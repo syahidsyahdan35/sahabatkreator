@@ -12,6 +12,7 @@ import { MoreSheet } from "./components/MoreSheet";
 import { ProfileBlock } from "./components/ProfileBlock";
 import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
+import { AutomationsPage } from "./pages/AutomationsPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { InboxPage } from "./pages/InboxPage";
 import {
@@ -148,6 +149,8 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
           <InboxPage t={t} locale={locale} />
         ) : activeId === "channels" ? (
           <ChannelsPage t={t} locale={locale} />
+        ) : activeId === "automations" ? (
+          <AutomationsPage t={t} locale={locale} />
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}

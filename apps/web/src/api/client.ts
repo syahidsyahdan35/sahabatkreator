@@ -1,15 +1,21 @@
 import type {
+  AutomationListResponse,
+  AutomationResponse,
+  AutomationRunListResponse,
+  AutomationRunResponse,
   ChannelAccountListResponse,
   ChannelAccountResponse,
   ContactListResponse,
   ContactResponse,
   ConversationListResponse,
   ConversationResponse,
+  CreateAutomationRequest,
   CreateContactRequest,
   MessageListResponse,
   MessageResponse,
   TenantListResponse,
   TenantResponse,
+  UpdateAutomationRequest,
   UpdateContactRequest,
 } from "@sahabat-kreator/contracts";
 
@@ -236,6 +242,48 @@ export const api = {
         `/api/tenants/${tenantId}/conversations/${conversationId}/messages`,
         { method: "POST", body: JSON.stringify({ contentText }) },
       );
+    },
+  },
+  automations: {
+    /** GET /api/tenants/:tenantId/automations → daftar + runCount (Fase 2A). */
+    async list(tenantId: string): Promise<AutomationResponse[]> {
+      const body = await request<AutomationListResponse>(
+        `/api/tenants/${tenantId}/automations`,
+        { method: "GET" },
+      );
+      return body.automations;
+    },
+    /** POST /api/tenants/:tenantId/automations → 201 automation baru. */
+    create(
+      tenantId: string,
+      input: CreateAutomationRequest,
+    ): Promise<AutomationResponse> {
+      return request<AutomationResponse>(
+        `/api/tenants/${tenantId}/automations`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/automations/:id → automation terbarui. */
+    update(
+      tenantId: string,
+      automationId: string,
+      input: UpdateAutomationRequest,
+    ): Promise<AutomationResponse> {
+      return request<AutomationResponse>(
+        `/api/tenants/${tenantId}/automations/${automationId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** GET /api/tenants/:tenantId/automations/:id/runs → riwayat eksekusi. */
+    async listRuns(
+      tenantId: string,
+      automationId: string,
+    ): Promise<AutomationRunResponse[]> {
+      const body = await request<AutomationRunListResponse>(
+        `/api/tenants/${tenantId}/automations/${automationId}/runs`,
+        { method: "GET" },
+      );
+      return body.runs;
     },
   },
 };
