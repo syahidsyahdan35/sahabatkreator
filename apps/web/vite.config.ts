@@ -3,7 +3,18 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173, host: true },
+  server: {
+    port: 5173,
+    host: true,
+    // Dev lokal: teruskan /api ke API lokal (termasuk WebSocket webchat).
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:3101",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
+  },
   preview: {
     port: 5173,
     host: true,
@@ -19,6 +30,10 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:3101",
         changeOrigin: true,
+        // Fase 1F: WebSocket widget webchat (/api/webchat/ws) WAJIB
+        // diteruskan sebagai upgrade ke API — tanpa ws:true koneksi
+        // realtime pengunjung putus di Vite preview.
+        ws: true,
       },
     },
   },

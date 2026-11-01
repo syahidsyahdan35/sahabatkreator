@@ -16,6 +16,12 @@ import type { AppVariables } from "./http";
 import { createTenantsRoutes } from "./modules/tenants/routes";
 import { createContactsRoutes } from "./modules/contacts/routes";
 import { createInboxRoutes } from "./modules/inbox/routes";
+import { createChannelsRoutes } from "./modules/channels/routes";
+import { WebchatHub } from "./modules/webchat/hub";
+import {
+  createWebchatRoutes,
+  createWebchatUpgradeHandler,
+} from "./modules/webchat/routes";
 
 const env = loadEnv();
 const startedAt = Date.now();
@@ -55,11 +61,20 @@ routes.get("/version", (c) => {
   return c.json(body);
 });
 
+// Hub WebSocket webchat (Fase 1F) — satu instance dipakai route balasan
+// inbox (mendorong realtime) dan handler upgrade WS (menerima koneksi).
+const webchatHub = new WebchatHub();
+const webchatOpts = { secret: env.WEBCHAT_SECRET, hub: webchatHub };
+
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...
 routes.route("/", createContactsRoutes(authBundle));
-routes.route("/", createInboxRoutes(authBundle));
+routes.route("/", createInboxRoutes(authBundle, webchatHub));
+// Modul channels (Fase 1F) — manajemen channel workspace /tenants/:tenantId/channels.
+routes.route("/", createChannelsRoutes(authBundle));
+// Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
+routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 
 export const app = new Hono<{ Variables: AppVariables }>();
 app.route("/", routes);
@@ -76,7 +91,15 @@ if (authBundle) {
 // sebagai sub-app Hono per modul — lihat src/modules/.
 
 if (process.env.NODE_ENV !== "test") {
-  serve({ fetch: app.fetch, port: env.API_PORT }, (info) => {
+  const server = serve({ fetch: app.fetch, port: env.API_PORT }, (info) => {
     console.log(`[api] Sahabat Kreator API listening on http://localhost:${info.port}`);
+  });
+  // WebSocket webchat (Fase 1F): upgrade HTTP di path /webchat/ws dan
+  // /api/webchat/ws ditangani hub webchat; path lain bukan urusan kita.
+  const handleWebchatUpgrade = createWebchatUpgradeHandler(authBundle, webchatOpts);
+  server.on("upgrade", (req, socket, head) => {
+    if (!handleWebchatUpgrade(req, socket, head)) {
+      socket.destroy();
+    }
   });
 }

@@ -34,5 +34,21 @@ export {
   getConversation,
   listMessages,
   queueOutboundMessage,
+  getConversationDeliveryTarget,
+  markOutboundMessageSent,
   type ConversationWithSummary,
+  type ConversationDeliveryTarget,
 } from "./conversations";
+export {
+  createWebchatChannelAccount,
+  listChannelAccounts,
+  generateWebchatSiteKey,
+} from "./channels";
+export {
+  resolveWebchatAccountBySiteKey,
+  openWebchatSession,
+  recordWebchatInboundMessage,
+  flushQueuedWebchatMessages,
+  type WebchatAccountRef,
+  type OpenWebchatSessionResult,
+} from "./webchat";

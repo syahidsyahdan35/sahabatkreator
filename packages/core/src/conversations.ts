@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   auditLogs,
+  channelAccounts,
   contacts,
   conversations,
   messages,
@@ -15,11 +16,12 @@ import { withTenantDb } from "./tx";
  * Service domain percakapan & pesan inbox (Fase 1D, RANCANGAN §5.1 & §6).
  * Transport-agnostic; semua query dalam konteks RLS tenant.
  *
- * Pengiriman outbound di fase ini adalah STUB antrean: pesan dibuat dengan
- * status `queued` + catatan audit `message.queued`, TANPA dikirim ke
- * channel mana pun. Pengiriman sungguhan menunggu adapter channel
- * (WhatsApp/IG/...) di fase berikutnya — worker nanti mengambil pesan
- * `queued` dan mengeksekusi pengirimannya.
+ * Pengiriman outbound dimulai sebagai antrean: pesan dibuat dengan status
+ * `queued` + catatan audit `message.queued`. Sejak Fase 1F, lapisan
+ * transport (API) mencoba mengirim pesan `queued` untuk channel yang sudah
+ * hidup (webchat lewat hub WebSocket) dan menandainya `sent` lewat
+ * `markOutboundMessageSent`; channel lain tetap `queued` sampai adapter
+ * channel-nya tiba di fase masing-masing.
  */
 
 export interface ConversationWithSummary extends Conversation {
@@ -190,5 +192,90 @@ export async function queueOutboundMessage(
     });
 
     return message;
+  });
+}
+
+export interface ConversationDeliveryTarget {
+  provider: Conversation["provider"];
+  channelAccountId: string;
+  /** external_id akun channel (untuk webchat: siteKey publik). */
+  channelExternalId: string;
+  contactId: string;
+}
+
+/**
+ * Target pengiriman satu percakapan: provider + akun channel-nya.
+ * Dipakai lapisan transport (API) untuk memutuskan apakah balasan bisa
+ * dikirim sungguhan (mis. webchat lewat hub WS) atau tetap `queued`.
+ * Null bila percakapan bukan milik tenant ini.
+ */
+export async function getConversationDeliveryTarget(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  conversationId: string,
+): Promise<ConversationDeliveryTarget | null> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select({
+        provider: conversations.provider,
+        channelAccountId: conversations.channelAccountId,
+        channelExternalId: channelAccounts.externalId,
+        contactId: conversations.contactId,
+      })
+      .from(conversations)
+      .innerJoin(
+        channelAccounts,
+        eq(conversations.channelAccountId, channelAccounts.id),
+      )
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.id, conversationId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Menandai satu pesan outbound `queued` sebagai `sent` setelah transport
+ * sungguhan mengirimnya (Fase 1F: hub WebSocket webchat) + audit
+ * `message.sent`. Mengembalikan baris terbaru, atau null bila pesan tidak
+ * ada / tidak lagi berstatus queued.
+ */
+export async function markOutboundMessageSent(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  messageId: string,
+  via: string,
+): Promise<Message | null> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [updated] = await tx
+      .update(messages)
+      .set({ status: "sent" })
+      .where(
+        and(
+          eq(messages.tenantId, ctx.tenantId),
+          eq(messages.id, messageId),
+          eq(messages.status, "queued"),
+        ),
+      )
+      .returning();
+    if (!updated) return null;
+
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: "system",
+      actorId: via,
+      action: "message.sent",
+      meta: {
+        conversationId: updated.conversationId,
+        messageId: updated.id,
+        via,
+      },
+    });
+
+    return updated;
   });
 }

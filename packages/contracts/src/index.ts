@@ -13,6 +13,7 @@ export const ErrorCodeSchema = z.enum([
   "VALIDATION_ERROR",
   "TENANT_NOT_FOUND",
   "CHANNEL_NOT_CONNECTED",
+  "CHANNEL_NOT_AVAILABLE_YET",
   "MESSAGING_WINDOW_CLOSED",
   "RATE_LIMITED",
   "ENTITLEMENT_EXCEEDED",
@@ -221,3 +222,84 @@ export const SendMessageRequestSchema = z.object({
   contentText: z.string().trim().min(1).max(4096),
 });
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// Channel accounts (Fase 1F — manajemen channel workspace)
+// ---------------------------------------------------------------------------
+
+export const ChannelAccountStatusSchema = z.enum([
+  "connected",
+  "disconnected",
+  "error",
+]);
+export type ChannelAccountStatus = z.infer<typeof ChannelAccountStatusSchema>;
+
+export const CreateChannelRequestSchema = z.object({
+  provider: ChannelProviderSchema,
+  displayName: z.string().trim().min(1).max(255).optional(),
+});
+export type CreateChannelRequest = z.infer<typeof CreateChannelRequestSchema>;
+
+export const ChannelAccountResponseSchema = z.object({
+  id: z.string().uuid(),
+  provider: ChannelProviderSchema,
+  /** Untuk webchat: siteKey publik (`wc_...`) yang dipasang di situs tenant. */
+  externalId: z.string(),
+  displayName: z.string().nullable(),
+  status: ChannelAccountStatusSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type ChannelAccountResponse = z.infer<
+  typeof ChannelAccountResponseSchema
+>;
+
+export const ChannelAccountListResponseSchema = z.object({
+  channels: z.array(ChannelAccountResponseSchema),
+});
+export type ChannelAccountListResponse = z.infer<
+  typeof ChannelAccountListResponseSchema
+>;
+
+// ---------------------------------------------------------------------------
+// Webchat publik (Fase 1F) — API widget untuk pengunjung situs tenant.
+// Autentikasi: siteKey publik (di URL sesi) + token pengunjung bertanda
+// tangan HMAC (Bearer). BUKAN sesi dashboard.
+// ---------------------------------------------------------------------------
+
+export const WebchatSessionRequestSchema = z.object({
+  /** Nama tampilan opsional dari pengunjung. */
+  name: z.string().trim().min(1).max(255).optional(),
+  /**
+   * Id pengunjung persisten yang dibuat widget & disimpan di localStorage
+   * situs asal — dipakai untuk menemukan kontak/percakapan yang sama pada
+   * kunjungan berikutnya.
+   */
+  visitorId: z.string().trim().min(8).max(255).optional(),
+});
+export type WebchatSessionRequest = z.infer<typeof WebchatSessionRequestSchema>;
+
+export const WebchatSessionResponseSchema = z.object({
+  token: z.string(),
+  contactId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  /** Pesan terakhir percakapan (kronologis menaik) untuk render awal widget. */
+  messages: z.array(MessageResponseSchema),
+});
+export type WebchatSessionResponse = z.infer<
+  typeof WebchatSessionResponseSchema
+>;
+
+export const WebchatSendMessageRequestSchema = z.object({
+  contentText: z.string().trim().min(1).max(4096),
+});
+export type WebchatSendMessageRequest = z.infer<
+  typeof WebchatSendMessageRequestSchema
+>;
+
+/** Event yang didorong server ke pengunjung lewat WebSocket webchat. */
+export const WebchatRealtimeEventSchema = z.object({
+  type: z.literal("message"),
+  message: MessageResponseSchema,
+});
+export type WebchatRealtimeEvent = z.infer<typeof WebchatRealtimeEventSchema>;

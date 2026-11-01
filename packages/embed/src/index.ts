@@ -1,4 +1,7 @@
-// Placeholder terstruktur — @sahabat-kreator/embed.
-// Widget webchat untuk website kreator (<script> ringan), mendukung light/dark/auto & i18n.
-// Implementasi: Fase 1.5–6. Lihat docs/RANCANGAN-v3.md.
+// @sahabat-kreator/embed — widget webchat untuk situs tenant.
+// Implementasi widget ada di `src/widget.ts` (vanilla TS, tanpa framework),
+// dibundel tsup menjadi satu file IIFE `dist/widget.js`, lalu
+// `scripts/publish.mjs` menyalinnya ke apps/web/public/widget.js agar
+// tersaji di https://<domain>/widget.js. File ini sengaja kosong: paket
+// ini tidak mengekspor API untuk dikonsumsi paket lain.
 export {};

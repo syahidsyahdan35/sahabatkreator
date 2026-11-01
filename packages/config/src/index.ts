@@ -23,6 +23,8 @@ const EnvSchema = z.object({
   /** Better Auth (Fase 1B): secret penandatanganan sesi & URL publik aplikasi. */
   BETTER_AUTH_SECRET: z.string().min(16).optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
+  /** Secret HMAC untuk token sesi pengunjung webchat (Fase 1F). */
+  WEBCHAT_SECRET: z.string().min(16).optional(),
   REDIS_URL: z.string().url().optional(),
   /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
   OPENROUTER_API_KEY: z.string().min(1).optional(),

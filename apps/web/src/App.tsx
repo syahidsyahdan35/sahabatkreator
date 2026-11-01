@@ -21,6 +21,8 @@ import {
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { ChannelsPage } from "./pages/ChannelsPage";
+import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
 
 // Badge persetujuan agent masih demo Fase 0. Badge unread Inbox SEJAK Fase 1E
@@ -144,6 +146,8 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
           <ContactsPage t={t} locale={locale} />
         ) : activeId === "inbox" ? (
           <InboxPage t={t} locale={locale} />
+        ) : activeId === "channels" ? (
+          <ChannelsPage t={t} locale={locale} />
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}
@@ -241,6 +245,12 @@ export default function App() {
       </div>
     </div>
   );
+
+  // Halaman demo webchat publik (Fase 1F): di luar shell & tanpa sesi —
+  // harus bisa dibuka siapa pun seperti situs tenant yang memasang widget.
+  if (path === "/webchat-demo") {
+    return <WebchatDemoPage t={t} locale={locale} />;
+  }
 
   return (
     <AuthProvider>

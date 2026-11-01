@@ -15,7 +15,7 @@ export type AppContext = Context<{ Variables: AppVariables }>;
 /** Balasan error sesuai kontrak: { error: { code, message } } (RANCANGAN §11.1). */
 export function apiError(
   c: Context,
-  status: 400 | 401 | 403 | 404 | 409 | 500 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 422 | 500 | 503,
   code: ErrorCode,
   message: string,
 ) {

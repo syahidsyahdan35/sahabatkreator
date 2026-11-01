@@ -1,4 +1,6 @@
 import type {
+  ChannelAccountListResponse,
+  ChannelAccountResponse,
   ContactListResponse,
   ContactResponse,
   ConversationListResponse,
@@ -171,6 +173,26 @@ export const api = {
       return request<ContactResponse>(
         `/api/tenants/${tenantId}/contacts/${contactId}`,
         { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+  },
+  channels: {
+    /** GET /api/tenants/:tenantId/channels */
+    async list(tenantId: string): Promise<ChannelAccountResponse[]> {
+      const body = await request<ChannelAccountListResponse>(
+        `/api/tenants/${tenantId}/channels`,
+        { method: "GET" },
+      );
+      return body.channels;
+    },
+    /** POST /api/tenants/:tenantId/channels {provider, displayName} (Fase 1F: webchat). */
+    create(
+      tenantId: string,
+      input: { provider: string; displayName?: string },
+    ): Promise<ChannelAccountResponse> {
+      return request<ChannelAccountResponse>(
+        `/api/tenants/${tenantId}/channels`,
+        { method: "POST", body: JSON.stringify(input) },
       );
     },
   },

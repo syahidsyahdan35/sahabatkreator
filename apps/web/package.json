@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@sahabat-kreator/contracts": "workspace:*",
+    "@sahabat-kreator/embed": "workspace:*",
     "@sahabat-kreator/i18n": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

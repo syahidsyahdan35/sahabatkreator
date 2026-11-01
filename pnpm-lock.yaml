@@ -15,6 +15,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.7
         version: 1.19.17(hono@4.13.16)
+      '@sahabat-kreator/channel-webchat':
+        specifier: workspace:*
+        version: link:../../packages/channels/channel-webchat
       '@sahabat-kreator/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -36,6 +39,9 @@ importers:
       hono:
         specifier: ^4.6.14
         version: 4.13.16
+      ws:
+        specifier: ^8.18.0
+        version: 8.22.1
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -43,6 +49,9 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.5
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.2
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(jiti@1.21.7)(postcss@8.5.32)(tsx@4.23.15)(typescript@5.9.3)
@@ -62,6 +71,9 @@ importers:
       '@sahabat-kreator/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@sahabat-kreator/embed':
+        specifier: workspace:*
+        version: link:../../packages/embed
       '@sahabat-kreator/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
@@ -115,7 +127,18 @@ importers:
 
   packages/channels/channel-telegram: {}
 
-  packages/channels/channel-webchat: {}
+  packages/channels/channel-webchat:
+    dependencies:
+      '@sahabat-kreator/channel-core':
+        specifier: workspace:*
+        version: link:../channel-core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.5
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/channels/channel-whatsapp:
     dependencies:
@@ -197,7 +220,14 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
-  packages/embed: {}
+  packages/embed:
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.32)(tsx@4.23.15)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/i18n:
     devDependencies:
@@ -1289,6 +1319,9 @@ packages:
   '@types/react@18.3.31':
     resolution: {integrity: sha512-vfEqpXTvwT91yhmwdfouStN2hSKwTvyRs8qpLfADyrq/kxDw0hZM7Wk9Ug1FELj8hIby+S/+kQCSRFF32nv2Qw==}
 
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
+
   '@vitejs/plugin-react@4.7.0':
     resolution: {integrity: sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA==}
     engines: {node: ^14.18.0 || >=16.0.0}
@@ -2091,6 +2124,18 @@ packages:
       terser:
         optional: true
 
+  ws@8.22.1:
+    resolution: {integrity: sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xtend@4.0.2:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
@@ -2791,6 +2836,10 @@ snapshots:
     dependencies:
       '@types/prop-types': 15.7.15
       csstype: 3.2.3
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 22.20.5
 
   '@vitejs/plugin-react@4.7.0(vite@5.4.21(@types/node@22.20.5))':
     dependencies:
@@ -3529,6 +3578,8 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.5
       fsevents: 2.3.3
+
+  ws@8.22.1: {}
 
   xtend@4.0.2: {}
 
