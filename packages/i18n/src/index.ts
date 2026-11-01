@@ -26,10 +26,21 @@ function getByPath(obj: unknown, path: string): string | undefined {
 /**
  * Buat fungsi t() untuk satu locale. Fallback selalu ke `en` (RANCANGAN §11.1).
  * Contoh: const t = createTranslator("id"); t("nav.inbox") // "Inbox"
+ *
+ * Interpolasi sederhana: t("workspace.dashboardContext", { name: "Studio" })
+ * mengganti placeholder "{name}" pada resource. Placeholder tanpa params
+ * dibiarkan apa adanya.
  */
 export function createTranslator(locale: Locale) {
-  return function t(key: TranslationKey): string {
-    return getByPath(resources[locale], key) ?? getByPath(en, key) ?? key;
+  return function t(
+    key: TranslationKey,
+    params?: Record<string, string | number>,
+  ): string {
+    const raw = getByPath(resources[locale], key) ?? getByPath(en, key) ?? key;
+    if (!params) return raw;
+    return raw.replace(/\{(\w+)\}/g, (match, name: string) =>
+      params[name] !== undefined ? String(params[name]) : match,
+    );
   };
 }
 

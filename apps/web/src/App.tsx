@@ -1,19 +1,141 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createTranslator,
   type Locale,
-  type TranslationKey,
 } from "@sahabat-kreator/i18n";
 import { NAV_REGISTRY, type NavItem } from "./navigation/registry";
+import { AuthProvider, useAuth } from "./auth/AuthProvider";
+import { WorkspaceProvider } from "./workspace/WorkspaceProvider";
 import { Sidebar } from "./components/Sidebar";
 import { MobileBottomBar } from "./components/MobileBottomBar";
 import { MoreSheet } from "./components/MoreSheet";
+import { ProfileBlock } from "./components/ProfileBlock";
+import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
+import { LoginPage } from "./pages/LoginPage";
+import { RegisterPage } from "./pages/RegisterPage";
 import { useTheme, type ThemeMode } from "./theme";
 
 // Badge demo Fase 0 — nanti berasal dari query yang sama untuk desktop & mobile (§10.1).
 const DEMO_BADGES = { unreadInbox: 3, pendingApprovals: 1 } as const;
+
+/**
+ * Router path sederhana (Fase 1C): hanya tiga permukaan —
+ * /login & /register (berdiri sendiri, tanpa shell) dan shell dashboard
+ * untuk semua path lain. Navigasi antar-menu DI DALAM shell tetap berbasis
+ * state activeId seperti Fase 0 (registry navigasi tidak berubah).
+ */
+function usePathRoute() {
+  const [path, setPath] = useState(() =>
+    typeof window === "undefined" ? "/" : window.location.pathname,
+  );
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  const navigateTo = useCallback((next: string) => {
+    if (window.location.pathname !== next) {
+      window.history.pushState({}, "", next);
+    }
+    setPath(next);
+  }, []);
+  return { path, navigateTo };
+}
+
+type Translator = ReturnType<typeof createTranslator>;
+
+interface ShellProps {
+  t: Translator;
+  locale: Locale;
+  controls: React.ReactNode;
+  onNavigateTo: (path: string) => void;
+}
+
+/** Shell dashboard TERPROTEKSI: wajib sesi; belum login → dialihkan ke /login. */
+function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
+  const { status, user, signOut } = useAuth();
+  const [activeId, setActiveId] = useState("dashboard");
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  useEffect(() => {
+    if (status === "anonymous") onNavigateTo("/login");
+  }, [status, onNavigateTo]);
+
+  if (status === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg text-ink">
+        <p className="text-sm text-muted">{t("common.loading")}</p>
+      </div>
+    );
+  }
+  if (status !== "authenticated" || !user) return null;
+
+  const activeItem: NavItem =
+    NAV_REGISTRY.find((i) => i.id === activeId) ?? NAV_REGISTRY[0]!;
+  const moreActive = activeItem.mobile.slot === "more";
+
+  const navigate = (item: NavItem) => {
+    setActiveId(item.id);
+    setMoreOpen(false);
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    onNavigateTo("/login");
+  };
+
+  const profile = (
+    <ProfileBlock t={t} user={user} onSignOut={handleSignOut} />
+  );
+  const workspace = <WorkspaceSwitcher t={t} />;
+
+  return (
+    <WorkspaceProvider>
+      <div className="flex min-h-screen bg-bg text-ink">
+        <Sidebar
+          t={t}
+          activeId={activeId}
+          onNavigate={navigate}
+          badges={DEMO_BADGES}
+          controls={controls}
+          workspace={workspace}
+          profile={profile}
+        />
+        <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
+          <div className="mb-6 md:hidden">
+            <div className="text-lg font-bold">{t("app.name")}</div>
+            <div className="text-xs text-muted">{t("app.tagline")}</div>
+          </div>
+          {activeId === "dashboard" ? (
+            <DashboardPage t={t} locale={locale} />
+          ) : (
+            <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
+          )}
+        </main>
+        <MobileBottomBar
+          t={t}
+          activeId={activeId}
+          moreActive={moreActive}
+          onNavigate={navigate}
+          onMore={() => setMoreOpen(true)}
+          badges={DEMO_BADGES}
+        />
+        <MoreSheet
+          t={t}
+          open={moreOpen}
+          activeId={activeId}
+          onClose={() => setMoreOpen(false)}
+          onNavigate={navigate}
+          controls={controls}
+          workspace={workspace}
+          profile={profile}
+        />
+      </div>
+    </WorkspaceProvider>
+  );
+}
 
 export default function App() {
   const [locale, setLocale] = useState<Locale>(() => {
@@ -23,9 +145,8 @@ export default function App() {
       return "en";
     }
   });
-  const [activeId, setActiveId] = useState("dashboard");
-  const [moreOpen, setMoreOpen] = useState(false);
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
+  const { path, navigateTo } = usePathRoute();
 
   const t = useMemo(() => createTranslator(locale), [locale]);
 
@@ -37,15 +158,6 @@ export default function App() {
     }
     document.documentElement.lang = locale;
   }, [locale]);
-
-  const activeItem: NavItem =
-    NAV_REGISTRY.find((i) => i.id === activeId) ?? NAV_REGISTRY[0]!;
-  const moreActive = activeItem.mobile.slot === "more";
-
-  const navigate = (item: NavItem) => {
-    setActiveId(item.id);
-    setMoreOpen(false);
-  };
 
   const themeLabel = (m: ThemeMode) =>
     t(m === "light" ? "common.themeLight" : m === "dark" ? "common.themeDark" : "common.themeSystem");
@@ -98,35 +210,14 @@ export default function App() {
   );
 
   return (
-    <div className="flex min-h-screen bg-bg text-ink">
-      <Sidebar t={t} activeId={activeId} onNavigate={navigate} badges={DEMO_BADGES} controls={controls} />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
-        <div className="mb-6 md:hidden">
-          <div className="text-lg font-bold">{t("app.name")}</div>
-          <div className="text-xs text-muted">{t("app.tagline")}</div>
-        </div>
-        {activeId === "dashboard" ? (
-          <DashboardPage t={t} locale={locale} />
-        ) : (
-          <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
-        )}
-      </main>
-      <MobileBottomBar
-        t={t}
-        activeId={activeId}
-        moreActive={moreActive}
-        onNavigate={navigate}
-        onMore={() => setMoreOpen(true)}
-        badges={DEMO_BADGES}
-      />
-      <MoreSheet
-        t={t}
-        open={moreOpen}
-        activeId={activeId}
-        onClose={() => setMoreOpen(false)}
-        onNavigate={navigate}
-        controls={controls}
-      />
-    </div>
+    <AuthProvider>
+      {path === "/login" ? (
+        <LoginPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
+      ) : path === "/register" ? (
+        <RegisterPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
+      ) : (
+        <Shell t={t} locale={locale} controls={controls} onNavigateTo={navigateTo} />
+      )}
+    </AuthProvider>
   );
 }

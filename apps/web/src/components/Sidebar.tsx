@@ -8,16 +8,21 @@ interface SidebarProps {
   onNavigate: (item: NavItem) => void;
   badges: Partial<Record<NonNullable<NavItem["badge"]>, number>>;
   controls: React.ReactNode;
+  /** Pemilih workspace aktif (di bawah brand). */
+  workspace: React.ReactNode;
+  /** Blok profil user login + logout (di atas kontrol bahasa/tema). */
+  profile: React.ReactNode;
 }
 
 /** Sidebar DESKTOP — me-render registry navigasi yang sama dengan mobile (§10.1). */
-export function Sidebar({ t, activeId, onNavigate, badges, controls }: SidebarProps) {
+export function Sidebar({ t, activeId, onNavigate, badges, controls, workspace, profile }: SidebarProps) {
   return (
     <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-line bg-surface md:flex">
       <div className="border-b border-line px-5 py-4">
         <div className="text-lg font-bold text-ink">{t("app.name")}</div>
         <div className="text-xs text-muted">{t("app.tagline")}</div>
       </div>
+      <div className="border-b border-line px-4 py-3">{workspace}</div>
       <nav className="flex-1 overflow-y-auto p-3">
         <ul className="space-y-1">
           {desktopItems.map((item) => {
@@ -47,6 +52,7 @@ export function Sidebar({ t, activeId, onNavigate, badges, controls }: SidebarPr
           })}
         </ul>
       </nav>
+      <div className="border-t border-line p-4">{profile}</div>
       <div className="border-t border-line p-4">{controls}</div>
     </aside>
   );

@@ -59,6 +59,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@sahabat-kreator/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@sahabat-kreator/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
