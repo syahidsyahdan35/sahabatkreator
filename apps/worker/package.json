@@ -1,11 +1,1 @@
-{
-  "name": "@sahabat-kreator/worker",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "exports": {
-    ".": "./src/index.ts"
-  }
-}
+{"dependencies":{"@sahabat-kreator/config":"workspace:*","@sahabat-kreator/core":"workspace:*","@sahabat-kreator/db":"workspace:*","@sahabat-kreator/queue":"workspace:*","bullmq":"^5.34.0"},"devDependencies":{"@types/node":"^22.10.2","tsup":"^8.3.5","tsx":"^4.19.2","typescript":"^5.6.3"},"exports":{".":"./src/index.ts"},"main":"./src/index.ts","name":"@sahabat-kreator/worker","private":true,"scripts":{"build":"tsup","dev":"tsx watch src/index.ts","start":"tsx src/index.ts","typecheck":"tsc --noEmit"},"type":"module","types":"./src/index.ts","version":"0.1.0"}

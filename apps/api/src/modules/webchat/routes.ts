@@ -186,7 +186,7 @@ export function createWebchatUpgradeHandler(
     if (!payload) return reject("401 Unauthorized");
 
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-      opts.hub.register(payload.cv, ws);
+      opts.hub.register(payload.cv, ws, payload.tid);
       ws.send(JSON.stringify({ type: "ready", conversationId: payload.cv }));
       void (async () => {
         try {

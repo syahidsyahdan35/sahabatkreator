@@ -34,11 +34,31 @@ export {
   getConversation,
   listMessages,
   queueOutboundMessage,
+  listQueuedOutboundMessages,
   getConversationDeliveryTarget,
   markOutboundMessageSent,
   type ConversationWithSummary,
   type ConversationDeliveryTarget,
 } from "./conversations";
+export {
+  createAutomation,
+  listAutomations,
+  getAutomation,
+  updateAutomation,
+  listAutomationRuns,
+  keywordMatches,
+  evaluateInboundMessageForAutomations,
+  type CreateAutomationInput,
+  type UpdateAutomationInput,
+  type AutomationWithRunCount,
+  type AutomationFiredResult,
+  type EvaluateInboundResult,
+} from "./automations";
+export {
+  relayUnpublishedOutboxEvents,
+  type UnpublishedOutboxEvent,
+  type OutboxRelayHandler,
+} from "./outbox";
 export {
   createWebchatChannelAccount,
   listChannelAccounts,

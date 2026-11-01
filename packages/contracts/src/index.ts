@@ -303,3 +303,92 @@ export const WebchatRealtimeEventSchema = z.object({
   message: MessageResponseSchema,
 });
 export type WebchatRealtimeEvent = z.infer<typeof WebchatRealtimeEventSchema>;
+
+// ---------------------------------------------------------------------------
+// Automations (Fase 2A) — trigger keyword → kirim pesan otomatis.
+// Konfigurasi di DB disimpan sebagai trigger_config {keywords, match} dan
+// action_config {text}; kontrak API menampilkannya sebagai field datar.
+// ---------------------------------------------------------------------------
+
+export const AutomationMatchSchema = z.enum(["exact", "contains"]);
+export type AutomationMatch = z.infer<typeof AutomationMatchSchema>;
+
+const AutomationKeywordsSchema = z
+  .array(z.string().trim().min(1).max(255))
+  .min(1)
+  .max(10);
+
+export const CreateAutomationRequestSchema = z.object({
+  name: z.string().trim().min(1).max(255),
+  keywords: AutomationKeywordsSchema,
+  match: AutomationMatchSchema.default("exact"),
+  /** Isi balasan otomatis; mendukung placeholder {name} = nama kontak. */
+  text: z.string().trim().min(1).max(4096),
+});
+export type CreateAutomationRequest = z.infer<
+  typeof CreateAutomationRequestSchema
+>;
+
+export const UpdateAutomationRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(255).optional(),
+    keywords: AutomationKeywordsSchema.optional(),
+    match: AutomationMatchSchema.optional(),
+    text: z.string().trim().min(1).max(4096).optional(),
+    isActive: z.boolean().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "At least one field must be provided",
+  });
+export type UpdateAutomationRequest = z.infer<
+  typeof UpdateAutomationRequestSchema
+>;
+
+export const AutomationResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  triggerType: z.literal("keyword"),
+  keywords: z.array(z.string()),
+  match: AutomationMatchSchema,
+  actionType: z.literal("send_message"),
+  text: z.string(),
+  isActive: z.boolean(),
+  /** Jumlah baris automation_runs milik automation ini. */
+  runCount: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type AutomationResponse = z.infer<typeof AutomationResponseSchema>;
+
+export const AutomationListResponseSchema = z.object({
+  automations: z.array(AutomationResponseSchema),
+});
+export type AutomationListResponse = z.infer<
+  typeof AutomationListResponseSchema
+>;
+
+export const AutomationRunStatusSchema = z.enum([
+  "completed",
+  "failed",
+  "skipped",
+]);
+export type AutomationRunStatus = z.infer<typeof AutomationRunStatusSchema>;
+
+export const AutomationRunResponseSchema = z.object({
+  id: z.string().uuid(),
+  automationId: z.string().uuid(),
+  contactId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  triggerMessageId: z.string().uuid().nullable(),
+  status: AutomationRunStatusSchema,
+  detail: z.record(z.string(), z.unknown()),
+  createdAt: z.string().datetime(),
+});
+export type AutomationRunResponse = z.infer<typeof AutomationRunResponseSchema>;
+
+export const AutomationRunListResponseSchema = z.object({
+  runs: z.array(AutomationRunResponseSchema),
+});
+export type AutomationRunListResponse = z.infer<
+  typeof AutomationRunListResponseSchema
+>;

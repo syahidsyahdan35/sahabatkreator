@@ -9,3 +9,4 @@ export * from "./system";
 export * from "./auth";
 export * from "./channels";
 export * from "./inbox";
+export * from "./automations";

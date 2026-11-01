@@ -45,8 +45,8 @@ const tablesRes = await db.query<{ count: string }>(
 console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // 11 tabel Fase 1A + 4 tabel Better Auth Fase 1B (auth_user/session/account/verification)
 // + 6 tabel Fase 1D (channel_accounts, channel_identities, contacts, media,
-// conversations, messages)
-assert.equal(Number(tablesRes.rows[0].count), 21);
+// conversations, messages) + 2 tabel Fase 2A (automations, automation_runs)
+assert.equal(Number(tablesRes.rows[0].count), 23);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -103,8 +103,10 @@ console.log("[3] webhook_inbox: duplikat (provider, provider_event_id) ditolak: 
 const policies = await db.query<{ count: string }>(
   `SELECT count(*)::text AS count FROM pg_policies WHERE schemaname = 'public'`,
 );
-assert.equal(Number(policies.rows[0].count), 14);
-console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (14 tabel tenant-scoped)`);
+// 14 policy Fase 1A–1F + automations & automation_runs (Fase 2A)
+// + policy kedua `system_relay` pada outbox_events (Fase 2A) = 17.
+assert.equal(Number(policies.rows[0].count), 17);
+console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
   CREATE ROLE app_user NOLOGIN;
@@ -112,7 +114,8 @@ await db.exec(`
     tenants, users, plans, tenant_members, invitations, api_keys,
     subscriptions, webhook_inbox, outbox_events, audit_logs, usage_ledger,
     auth_user, auth_session, auth_account, auth_verification,
-    channel_accounts, channel_identities, contacts, media, conversations, messages
+    channel_accounts, channel_identities, contacts, media, conversations, messages,
+    automations, automation_runs
   TO app_user;
 `);
 
@@ -217,6 +220,27 @@ assert.deepEqual(
 assert.equal(selfSeen.crossInsertBlocked, true);
 console.log(
   "[6] RLS app.user_id: user hanya melihat keanggotaannya sendiri, insert via konteks user ditolak: OK",
+);
+
+// ---------- 6. Lengan system_relay pada outbox_events (Fase 2A) ----------
+// Worker relay berjalan TANPA konteks tenant, tetapi dengan setting
+// app.system_relay='outbox' ia harus melihat event SEMUA tenant; tanpa
+// setting itu (dan tanpa app.tenant_id) ia tidak boleh melihat apa pun.
+const relaySeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const withoutSetting = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM outbox_events`,
+  );
+  await tx.query(`SELECT set_config('app.system_relay', 'outbox', true)`);
+  const withSetting = await tx.query<{ tenant_id: string }>(
+    `SELECT tenant_id FROM outbox_events ORDER BY tenant_id`,
+  );
+  return { without: withoutSetting.rows[0].n, tenants: withSetting.rows.map((r) => r.tenant_id) };
+});
+assert.equal(relaySeen.without, "0");
+assert.deepEqual(relaySeen.tenants, [TENANT_A, TENANT_B]);
+console.log(
+  "[7] RLS system_relay: tanpa setting outbox tak terlihat; dengan app.system_relay='outbox' event semua tenant terbaca: OK",
 );
 
 await db.close();

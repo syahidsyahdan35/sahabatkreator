@@ -17,7 +17,9 @@ import { createTenantsRoutes } from "./modules/tenants/routes";
 import { createContactsRoutes } from "./modules/contacts/routes";
 import { createInboxRoutes } from "./modules/inbox/routes";
 import { createChannelsRoutes } from "./modules/channels/routes";
+import { createAutomationsRoutes } from "./modules/automations/routes";
 import { WebchatHub } from "./modules/webchat/hub";
+import { startWebchatDeliveryPoller } from "./modules/webchat/poller";
 import {
   createWebchatRoutes,
   createWebchatUpgradeHandler,
@@ -73,6 +75,8 @@ routes.route("/", createContactsRoutes(authBundle));
 routes.route("/", createInboxRoutes(authBundle, webchatHub));
 // Modul channels (Fase 1F) — manajemen channel workspace /tenants/:tenantId/channels.
 routes.route("/", createChannelsRoutes(authBundle));
+// Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
+routes.route("/", createAutomationsRoutes(authBundle));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 
@@ -102,4 +106,10 @@ if (process.env.NODE_ENV !== "test") {
       socket.destroy();
     }
   });
+  // Poller pengiriman webchat (Fase 2A): mendorong pesan outbound `queued`
+  // yang dibuat proses lain (worker automation) ke pengunjung yang sedang
+  // terhubung lewat hub. Jembatan lintas proses — lihat modules/webchat/poller.ts.
+  if (authBundle) {
+    startWebchatDeliveryPoller(authBundle, webchatHub);
+  }
 }

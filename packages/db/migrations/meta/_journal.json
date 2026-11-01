@@ -50,6 +50,20 @@
       "when": 1793563200000,
       "tag": "0006_rls_webchat_site_key_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793560685059,
+      "tag": "0007_automations_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793570400000,
+      "tag": "0008_rls_automations_outbox_relay",
+      "breakpoints": true
     }
   ]
 }

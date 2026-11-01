@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -192,6 +192,33 @@ export async function queueOutboundMessage(
     });
 
     return message;
+  });
+}
+
+/**
+ * Pesan outbound yang masih `queued` pada satu percakapan, kronologis
+ * menaik. Dipakai poller pengiriman API (Fase 2A) untuk mendorong balasan
+ * yang dibuat proses lain (worker automation) lewat hub WebSocket webchat.
+ * Mengembalikan array kosong bila percakapan bukan milik tenant ini.
+ */
+export async function listQueuedOutboundMessages(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  conversationId: string,
+): Promise<Message[]> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    return tx
+      .select()
+      .from(messages)
+      .where(
+        and(
+          eq(messages.tenantId, ctx.tenantId),
+          eq(messages.conversationId, conversationId),
+          eq(messages.direction, "outbound"),
+          eq(messages.status, "queued"),
+        ),
+      )
+      .orderBy(asc(messages.createdAt));
   });
 }
 
