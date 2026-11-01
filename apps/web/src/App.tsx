@@ -29,6 +29,8 @@ import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
+import { ProductsPage } from "./pages/ProductsPage";
+import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
 
@@ -165,6 +167,8 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
           <ChannelsPage t={t} locale={locale} />
         ) : activeId === "automations" ? (
           <AutomationsPage t={t} locale={locale} />
+        ) : activeId === "products" ? (
+          <ProductsPage t={t} locale={locale} />
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}
@@ -267,6 +271,15 @@ export default function App() {
   // harus bisa dibuka siapa pun seperti situs tenant yang memasang widget.
   if (path === "/webchat-demo") {
     return <WebchatDemoPage t={t} locale={locale} />;
+  }
+
+  // Halaman bayar publik (Fase 4A): di luar shell & tanpa sesi — tautan
+  // /pay/:code dibagikan penjual ke pembeli. SIMULASI berlabel besar.
+  if (path.startsWith("/pay/")) {
+    const code = decodeURIComponent(path.slice("/pay/".length)).split("/")[0];
+    if (code) {
+      return <PayPage t={t} locale={locale} code={code} />;
+    }
   }
 
   return (

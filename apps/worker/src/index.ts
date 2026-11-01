@@ -115,6 +115,9 @@ const bullWorker = new Worker<MainJobData>(
         tenantId: data.tenantId,
         conversationId: data.conversationId,
         messageId: data.messageId,
+        // Untuk tool send_payment_link (Fase 4A): URL /pay/:code yang
+        // dikirim agent harus absolut, berbasis URL publik aplikasi.
+        publicBaseUrl: env.BETTER_AUTH_URL,
       });
       if (result.responded || result.reason) {
         console.log(

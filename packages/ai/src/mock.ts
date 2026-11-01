@@ -20,6 +20,13 @@ import type {
  *    Mock TIDAK pernah memanggil handoff/stage — kedua tool itu dibuktikan
  *    lewat uji integrasi executor tool di core (lihat
  *    apps/worker/scripts/verify-agent-tools.ts).
+ * 5. (Fase 4A) Bila pesan terakhir pengunjung mengandung kata "beli" atau
+ *    "checkout" (case-insensitive), mock MENAMBAHKAN tool call
+ *    `send_payment_link` dengan productName = teks pesan itu sendiri —
+ *    runtime mencocokkan nama produk dari teks tersebut (lihat
+ *    matchActiveProductForPayment di core). Ini perilaku pembuktian agar
+ *    rantai produk→tautan bayar bisa diuji end-to-end tanpa model
+ *    sungguhan; model asli memutuskan sendiri kapan memanggil tool ini.
  * 4. Usage token adalah estimasi deterministik (panjang karakter / 4),
  *    BUKAN angka dari provider — dicatat apa adanya sebagai provider
  *    'mock' dengan biaya model 0.
@@ -59,6 +66,19 @@ export class MockProvider implements LlmProvider {
         arguments: { tag: "ai-lead" },
       },
     ];
+
+    // Perilaku pembuktian Fase 4A (lihat kepala file poin 5): niat membeli
+    // pada pesan terakhir → panggil send_payment_link.
+    const lastUserText =
+      [...request.messages].reverse().find((m) => m.role === "user")?.content ??
+      "";
+    if (/\b(beli|checkout)\b/i.test(lastUserText)) {
+      toolCalls.push({
+        id: "mock-call-2",
+        name: "send_payment_link",
+        arguments: { productName: lastUserText },
+      });
+    }
 
     const inputText =
       request.system +

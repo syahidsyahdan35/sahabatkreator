@@ -301,5 +301,90 @@ async function auditActions(action: string): Promise<number> {
   console.log("[6] executeAgentToolCall langsung: handoff dieksekusi & tercatat: OK");
 }
 
+// ---------- 7. Fase 4A: tool send_payment_link ----------
+{
+  const p1 = await client.query<{ id: string }>(
+    `INSERT INTO products (tenant_id, name, price_idr, created_at)
+     VALUES ($1, 'Kelas Rekaman Kilat', 349000, '2026-01-01T00:00:00Z') RETURNING id`,
+    [TENANT],
+  );
+  const p2 = await client.query<{ id: string }>(
+    `INSERT INTO products (tenant_id, name, price_idr, created_at)
+     VALUES ($1, 'Ebook Uji', 50000, '2026-01-02T00:00:00Z') RETURNING id`,
+    [TENANT],
+  );
+  void p2;
+  const { contactId, conversationId } = await seedConversation("Beli");
+
+  // Nama cocok di dalam kalimat permintaan → produk itu yang dipilih.
+  const outcome = await executeAgentToolCall(
+    db,
+    { tenantId: TENANT },
+    { agentId: AGENT, contactId, conversationId },
+    {
+      id: "y",
+      name: "send_payment_link",
+      arguments: { productName: "saya mau beli kelas rekaman kilat" },
+    },
+    { publicBaseUrl: "https://uji.example" },
+  );
+  assert.equal(outcome.executed, true);
+  assert.equal(outcome.note, "payment_link_sent");
+  const link = await client.query<{
+    product_id: string;
+    amount_idr: string;
+    code: string;
+    status: string;
+    provider: string;
+  }>(
+    `SELECT product_id, amount_idr::text, code, status, provider FROM payment_links
+     WHERE tenant_id=$1 AND conversation_id=$2`,
+    [TENANT, conversationId],
+  );
+  assert.equal(link.rows.length, 1);
+  assert.equal(link.rows[0].product_id, p1.rows[0].id);
+  assert.equal(link.rows[0].amount_idr, "349000");
+  assert.equal(link.rows[0].status, "pending");
+  assert.equal(link.rows[0].provider, "simulation");
+  assert.ok(link.rows[0].code.startsWith("pay_"));
+  const payMsg = await client.query<{ content_text: string }>(
+    `SELECT content_text FROM messages WHERE conversation_id=$1 AND direction='outbound'
+     AND content_text LIKE '%/pay/%'`,
+    [conversationId],
+  );
+  assert.equal(payMsg.rows.length, 1);
+  assert.ok(
+    payMsg.rows[0].content_text.includes(
+      `https://uji.example/pay/${link.rows[0].code}`,
+    ),
+  );
+  assert.equal(await auditActions("payment_link.created"), 1);
+  assert.equal(await auditActions("agent.payment_link"), 1);
+
+  // Nama tidak cocok sama sekali → fallback produk aktif tertua + tercatat.
+  const outcome2 = await executeAgentToolCall(
+    db,
+    { tenantId: TENANT },
+    { agentId: AGENT, contactId, conversationId },
+    {
+      id: "z",
+      name: "send_payment_link",
+      arguments: { productName: "sesuatu yang tidak dijual xyz" },
+    },
+    { publicBaseUrl: "https://uji.example" },
+  );
+  assert.equal(outcome2.executed, true);
+  assert.equal(outcome2.note, "payment_link_sent_fallback_product");
+  const link2 = await client.query<{ product_id: string }>(
+    `SELECT product_id FROM payment_links WHERE tenant_id=$1 AND conversation_id=$2
+     ORDER BY created_at DESC LIMIT 1`,
+    [TENANT, conversationId],
+  );
+  assert.equal(link2.rows[0].product_id, p1.rows[0].id);
+  console.log(
+    "[7] Fase 4A send_payment_link: tautan snapshot harga + pesan URL terkirim + audit; nama tak cocok → fallback produk aktif tertua tercatat: OK",
+  );
+}
+
 await client.close();
 console.log("verify-agent-tools (PGlite): SEMUA LULUS");

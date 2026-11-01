@@ -51,7 +51,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 6 tabel Fase 1D (channel_accounts, channel_identities, contacts, media,
 // conversations, messages) + 2 tabel Fase 2A (automations, automation_runs)
 // + 4 tabel Fase 3A (agents, kb_documents, kb_chunks, agent_suggestions)
-assert.equal(Number(tablesRes.rows[0].count), 27);
+// + 2 tabel Fase 4A (products, payment_links)
+assert.equal(Number(tablesRes.rows[0].count), 29);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -110,8 +111,10 @@ const policies = await db.query<{ count: string }>(
 );
 // 14 policy Fase 1A–1F + automations & automation_runs (Fase 2A)
 // + policy kedua `system_relay` pada outbox_events (Fase 2A)
-// + agents, kb_documents, kb_chunks, agent_suggestions (Fase 3A) = 21.
-assert.equal(Number(policies.rows[0].count), 21);
+// + agents, kb_documents, kb_chunks, agent_suggestions (Fase 3A)
+// + products & payment_links tenant_isolation + lengan publik
+// `public_code_lookup` pada payment_links (Fase 4A) = 24.
+assert.equal(Number(policies.rows[0].count), 24);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -122,7 +125,8 @@ await db.exec(`
     auth_user, auth_session, auth_account, auth_verification,
     channel_accounts, channel_identities, contacts, media, conversations, messages,
     automations, automation_runs,
-    agents, kb_documents, kb_chunks, agent_suggestions
+    agents, kb_documents, kb_chunks, agent_suggestions,
+    products, payment_links
   TO app_user;
 `);
 
@@ -300,6 +304,74 @@ assert.deepEqual(kbSeen.agentsB.rows.map((r) => r.name), ["Agent B"]);
 assert.equal(kbSeen.chunksB.rows.length, 0);
 console.log(
   "[8] Fase 3A: RLS agents/KB per tenant + search_vector ter-generate + retrieval FTS (OR + ts_rank) menemukan chunk yang benar: OK",
+);
+
+// ---------- 8. Fase 4A: RLS products/payment_links + lengan publik code ----------
+// Produk + tautan bayar tenant A; tenant B punya produk sendiri. Uji:
+// konteks tenant hanya melihat miliknya; TANPA konteks tenant tetapi dengan
+// app.payment_code, hanya baris tautan berkode itu yang terlihat (dan tabel
+// products TETAP tertutup — lengan publik hanya di payment_links); tanpa
+// setting apa pun, payment_links tak terlihat sama sekali.
+const PRODUCT_A = "55555555-5555-4555-8555-555555555555";
+const LINK_CODE_A = "pay_uji4aKodeA001";
+await db.query(
+  `INSERT INTO products (id, tenant_id, name, price_idr) VALUES ($1, $2, 'Kelas Rekaman Kilat', 349000)`,
+  [PRODUCT_A, TENANT_A],
+);
+await db.query(
+  `INSERT INTO products (tenant_id, name, price_idr) VALUES ($1, 'Produk B', 1000)`,
+  [TENANT_B],
+);
+await db.query(
+  `INSERT INTO payment_links (tenant_id, product_id, code, amount_idr, expires_at)
+   VALUES ($1, $2, $3, 349000, now() + interval '7 days')`,
+  [TENANT_A, PRODUCT_A, LINK_CODE_A],
+);
+// Check constraint: harga negatif wajib ditolak DB.
+await assert.rejects(
+  db.query(
+    `INSERT INTO products (tenant_id, name, price_idr) VALUES ($1, 'Negatif', -5)`,
+    [TENANT_A],
+  ),
+  /check|products_price_idr_nonnegative/i,
+);
+const paySeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  // Tanpa konteks apa pun: kosong.
+  const noCtxLinks = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM payment_links`,
+  );
+  const noCtxProducts = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM products`,
+  );
+  // Konteks publik: hanya tautan berkode itu; products tetap tertutup.
+  await tx.query(`SELECT set_config('app.payment_code', $1, true)`, [LINK_CODE_A]);
+  const pubLinks = await tx.query<{ code: string; tenant_id: string }>(
+    `SELECT code, tenant_id FROM payment_links`,
+  );
+  const pubProducts = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM products`,
+  );
+  // Konteks tenant B: produk B saja, tautan kosong.
+  await tx.query(`SELECT set_config('app.payment_code', '', true)`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+  const productsB = await tx.query<{ name: string }>(`SELECT name FROM products`);
+  const linksB = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM payment_links`,
+  );
+  return { noCtxLinks, noCtxProducts, pubLinks, pubProducts, productsB, linksB };
+});
+assert.equal(paySeen.noCtxLinks.rows[0].n, "0");
+assert.equal(paySeen.noCtxProducts.rows[0].n, "0");
+assert.deepEqual(
+  paySeen.pubLinks.rows.map((r) => `${r.code}:${r.tenant_id}`),
+  [`${LINK_CODE_A}:${TENANT_A}`],
+);
+assert.equal(paySeen.pubProducts.rows[0].n, "0");
+assert.deepEqual(paySeen.productsB.rows.map((r) => r.name), ["Produk B"]);
+assert.equal(paySeen.linksB.rows[0].n, "0");
+console.log(
+  "[9] Fase 4A: RLS products/payment_links per tenant + lengan publik app.payment_code hanya membuka baris berkode itu (products tetap tertutup) + check harga >= 0: OK",
 );
 
 await db.close();

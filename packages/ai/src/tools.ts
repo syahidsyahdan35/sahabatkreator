@@ -5,17 +5,21 @@ import type { LlmToolDefinition } from "./types";
  *
  * Sesuai RANCANGAN §5.1 langkah 7 himpunan penuhnya adalah send_message,
  * send_payment_link, tag_contact, move_pipeline_stage, create_follow_up,
- * handoff_to_human. Yang dieksekusi runtime Fase 3A:
+ * handoff_to_human. Yang dieksekusi runtime:
  * - `tag_contact`        → menambah tag ke kontak lawan bicara.
  * - `move_pipeline_stage`→ memindahkan tahap pipeline kontak (nilai valid:
  *                          PIPELINE_STAGES — kolom DB varchar bebas, daftar
  *                          ini adalah validasi aplikasi).
  * - `handoff_to_human`   → mematikan AI pada percakapan ini
  *                          (conversations.agent_enabled=false) + audit.
+ * - `send_payment_link`  → (Fase 4A) membuat tautan bayar produk aktif
+ *                          yang cocok & mengirim URL-nya sebagai pesan
+ *                          terpisah. Provider tautan fase ini 'simulation'
+ *                          — belum ada pembayaran sungguhan di baliknya.
  * `send_message` bukan tool: teks hasil chat adalah pesannya (lihat
- * types.ts). `send_payment_link` & `create_follow_up` menunggu fase
- * produk/billing & sequence — belum didefinisikan agar model tidak
- * memanggil tool yang tidak dieksekusi siapa pun.
+ * types.ts). `create_follow_up` menunggu fase sequence — belum
+ * didefinisikan agar model tidak memanggil tool yang tidak dieksekusi
+ * siapa pun.
  */
 
 export const PIPELINE_STAGES = [
@@ -64,6 +68,21 @@ export const AGENT_TOOLS: LlmToolDefinition[] = [
         },
       },
       required: ["stage"],
+    },
+  },
+  {
+    name: "send_payment_link",
+    description:
+      "Buat tautan bayar untuk produk yang ingin dibeli kontak dan kirimkan URL-nya sebagai pesan tersendiri. Gunakan bila kontak menyatakan ingin membeli/checkout. Isi productName dengan nama produk yang disebut kontak bila ada.",
+    parameters: {
+      type: "object",
+      properties: {
+        productName: {
+          type: "string",
+          description:
+            "Nama produk yang ingin dibeli (opsional; kosong = produk aktif utama tenant).",
+        },
+      },
     },
   },
   {

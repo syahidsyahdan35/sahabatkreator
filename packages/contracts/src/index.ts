@@ -14,6 +14,7 @@ export const ErrorCodeSchema = z.enum([
   "TENANT_NOT_FOUND",
   "CHANNEL_NOT_CONNECTED",
   "CHANNEL_NOT_AVAILABLE_YET",
+  "PRODUCT_HAS_LINKS",
   "MESSAGING_WINDOW_CLOSED",
   "RATE_LIMITED",
   "ENTITLEMENT_EXCEEDED",
@@ -516,4 +517,119 @@ export const AgentSuggestionListResponseSchema = z.object({
 });
 export type AgentSuggestionListResponse = z.infer<
   typeof AgentSuggestionListResponseSchema
+>;
+
+// ---------------------------------------------------------------------------
+// Products & payment links (Fase 4A) — katalog produk tenant + tautan bayar.
+// PENTING: provider fase ini adalah 'simulation' — halaman /pay adalah
+// SIMULASI berlabel jujur, bukan gerbang pembayaran sungguhan (Midtrans/
+// Xendit menyusul bersama kredensial sandbox; temuan v26 §12: order API
+// Meta dihapus, pembayaran memang harus milik sendiri).
+// ---------------------------------------------------------------------------
+
+/** Harga Rupiah penuh: bilangan bulat >= 0 (bigint di DB, number di kontrak). */
+const PriceIdrSchema = z.number().int().nonnegative().max(1_000_000_000_000_000);
+
+export const CreateProductRequestSchema = z.object({
+  name: z.string().trim().min(1).max(255),
+  description: z.string().trim().max(10_000).optional(),
+  priceIdr: PriceIdrSchema,
+  isActive: z.boolean().optional(),
+});
+export type CreateProductRequest = z.infer<typeof CreateProductRequestSchema>;
+
+export const UpdateProductRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(255).optional(),
+    /** null = kosongkan deskripsi. */
+    description: z.string().trim().max(10_000).nullable().optional(),
+    priceIdr: PriceIdrSchema.optional(),
+    isActive: z.boolean().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "At least one field must be provided",
+  });
+export type UpdateProductRequest = z.infer<typeof UpdateProductRequestSchema>;
+
+export const ProductResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  priceIdr: z.number().int().nonnegative(),
+  isActive: z.boolean(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type ProductResponse = z.infer<typeof ProductResponseSchema>;
+
+export const ProductListResponseSchema = z.object({
+  products: z.array(ProductResponseSchema),
+});
+export type ProductListResponse = z.infer<typeof ProductListResponseSchema>;
+
+export const PaymentLinkStatusSchema = z.enum([
+  "pending",
+  "paid",
+  "expired",
+  "cancelled",
+]);
+export type PaymentLinkStatus = z.infer<typeof PaymentLinkStatusSchema>;
+
+export const CreatePaymentLinkRequestSchema = z.object({
+  productId: z.string().uuid(),
+  /** Opsional: tautan dibuat untuk kontak tertentu. */
+  contactId: z.string().uuid().optional(),
+});
+export type CreatePaymentLinkRequest = z.infer<
+  typeof CreatePaymentLinkRequestSchema
+>;
+
+export const PaymentLinkResponseSchema = z.object({
+  id: z.string().uuid(),
+  productId: z.string().uuid(),
+  productName: z.string(),
+  contactId: z.string().uuid().nullable(),
+  contactName: z.string().nullable(),
+  conversationId: z.string().uuid().nullable(),
+  code: z.string(),
+  /** URL publik halaman bayar: {base}/pay/{code}. */
+  url: z.string(),
+  /** Snapshot harga produk saat tautan dibuat. */
+  amountIdr: z.number().int().nonnegative(),
+  status: PaymentLinkStatusSchema,
+  /** Fase ini selalu 'simulation' — belum ada pembayaran sungguhan. */
+  provider: z.string(),
+  paidAt: z.string().datetime().nullable(),
+  expiresAt: z.string().datetime(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type PaymentLinkResponse = z.infer<typeof PaymentLinkResponseSchema>;
+
+export const PaymentLinkListResponseSchema = z.object({
+  paymentLinks: z.array(PaymentLinkResponseSchema),
+});
+export type PaymentLinkListResponse = z.infer<
+  typeof PaymentLinkListResponseSchema
+>;
+
+/**
+ * Tampilan publik halaman bayar /pay/:code — TANPA data pribadi kontak.
+ * Yang boleh dilihat siapa pun yang memegang tautan: produk, harga,
+ * status, dan nama workspace penjual.
+ */
+export const PublicPaymentResponseSchema = z.object({
+  code: z.string(),
+  productName: z.string(),
+  description: z.string().nullable(),
+  amountIdr: z.number().int().nonnegative(),
+  status: PaymentLinkStatusSchema,
+  tenantName: z.string(),
+  /** Selalu 'simulation' di fase ini; UI wajib menampilkan label simulasi. */
+  provider: z.string(),
+  paidAt: z.string().datetime().nullable(),
+  expiresAt: z.string().datetime(),
+});
+export type PublicPaymentResponse = z.infer<
+  typeof PublicPaymentResponseSchema
 >;

@@ -30,6 +30,27 @@ export function formatListTime(iso: string, locale: Locale): string {
   }).format(d);
 }
 
+/** Format harga Rupiah lewat Intl sesuai locale UI aktif (Fase 4A). */
+export function formatIdr(amount: number, locale: Locale): string {
+  return new Intl.NumberFormat(intlLocale(locale), {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
+/**
+ * Format harga Rupiah untuk halaman bayar publik: selalu id-ID sesuai
+ * penetapan desain Fase 4A (halaman pembeli Indonesia), lewat Intl.
+ */
+export function formatIdrId(amount: number): string {
+  return new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
 /** Jam menit untuk meta gelembung pesan. */
 export function formatTime(iso: string, locale: Locale): string {
   const d = new Date(iso);

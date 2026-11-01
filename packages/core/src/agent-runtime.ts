@@ -20,6 +20,11 @@ import { withTenantDb, type DbTx } from "./tx";
 import { getActiveAgent } from "./agents";
 import { listMessages } from "./conversations";
 import { searchKbChunks } from "./kb";
+import {
+  buildPaymentUrl,
+  createPaymentLink,
+  matchActiveProductForPayment,
+} from "./products";
 
 /**
  * Runtime AI Agent (Fase 3A, RANCANGAN §5.1 langkah 5–9).
@@ -74,8 +79,17 @@ export interface AgentToolContext {
 export interface AgentToolOutcome {
   name: string;
   executed: boolean;
-  /** Kode hasil stabil: 'tagged', 'tag_already_present', 'stage_moved', 'handoff_done', 'invalid_tag', 'invalid_stage', 'contact_not_found', 'unknown_tool', ... */
+  /** Kode hasil stabil: 'tagged', 'tag_already_present', 'stage_moved', 'handoff_done', 'invalid_tag', 'invalid_stage', 'contact_not_found', 'unknown_tool', 'payment_link_sent', 'payment_link_sent_fallback_product', 'no_active_product', ... */
   note: string;
+}
+
+export interface AgentToolOptions {
+  /**
+   * Base URL publik aplikasi (env BETTER_AUTH_URL, diteruskan worker) —
+   * dipakai tool `send_payment_link` untuk merangkai URL /pay/:code yang
+   * dikirim ke lawan bicara. Kosong → URL relatif (fallback jujur).
+   */
+  publicBaseUrl?: string;
 }
 
 async function insertAgentAudit(
@@ -104,6 +118,7 @@ export async function executeAgentToolCall(
   ctx: Pick<TenantContext, "tenantId">,
   toolCtx: AgentToolContext,
   call: LlmToolCall,
+  options?: AgentToolOptions,
 ): Promise<AgentToolOutcome> {
   const { tenantId } = ctx;
 
@@ -226,6 +241,104 @@ export async function executeAgentToolCall(
     });
   }
 
+  if (call.name === "send_payment_link") {
+    // Fase 4A: buat tautan bayar (snapshot harga produk) lalu kirim sebagai
+    // pesan outbound agent TERPISAH dari teks balasan utama — tautan adalah
+    // artefak yang harus bisa dilacak status bayarnya sendiri.
+    // CATATAN JUJUR: provider tautan fase ini 'simulation' — belum ada
+    // gerbang pembayaran sungguhan; halaman /pay berlabel simulasi.
+    const query =
+      typeof call.arguments.productName === "string"
+        ? call.arguments.productName
+        : undefined;
+    const match = await matchActiveProductForPayment(db, ctx, query);
+    if (!match) {
+      return { name: call.name, executed: false, note: "no_active_product" };
+    }
+    const created = await createPaymentLink(
+      db,
+      ctx,
+      {
+        productId: match.product.id,
+        contactId: toolCtx.contactId,
+        conversationId: toolCtx.conversationId,
+      },
+      { actorType: "agent", actorId: `agent:${toolCtx.agentId}` },
+    );
+    if (created.kind !== "ok") {
+      return { name: call.name, executed: false, note: created.kind };
+    }
+    const url = buildPaymentUrl(options?.publicBaseUrl, created.link.code);
+    const text = `Link pembayaran ${match.product.name}: ${url} (berlaku 7 hari)`;
+    const sent = await withTenantDb(db, tenantId, async (tx) => {
+      const [conversation] = await tx
+        .select()
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.tenantId, tenantId),
+            eq(conversations.id, toolCtx.conversationId),
+          ),
+        )
+        .limit(1);
+      if (!conversation) return false;
+      const [outbound] = await tx
+        .insert(messages)
+        .values({
+          tenantId,
+          conversationId: toolCtx.conversationId,
+          direction: "outbound",
+          senderType: "agent",
+          type: "text",
+          contentText: text,
+          status: "queued",
+        })
+        .returning();
+      const now = new Date();
+      await tx
+        .update(conversations)
+        .set({ lastMessageAt: now, updatedAt: now })
+        .where(eq(conversations.id, toolCtx.conversationId));
+      await tx.insert(outboxEvents).values({
+        tenantId,
+        type: "message.queued",
+        payload: {
+          provider: conversation.provider,
+          conversationId: toolCtx.conversationId,
+          messageId: outbound.id,
+          via: "agent_tool",
+          tool: "send_payment_link",
+          agentId: toolCtx.agentId,
+          paymentLinkId: created.link.id,
+        },
+      });
+      // Jejak eksplisit pilihan produk agent (termasuk jalur fallback ke
+      // produk aktif pertama) — di luar audit payment_link.created generik.
+      await insertAgentAudit(tx, tenantId, toolCtx.agentId, "agent.payment_link", {
+        paymentLinkId: created.link.id,
+        code: created.link.code,
+        productId: match.product.id,
+        productName: match.product.name,
+        matchedByName: match.matchedByName,
+        query: query ?? null,
+        contactId: toolCtx.contactId,
+        conversationId: toolCtx.conversationId,
+        via: "agent_tool",
+      });
+      return true;
+    });
+    if (!sent) {
+      return { name: call.name, executed: false, note: "conversation_not_found" };
+    }
+    return {
+      name: call.name,
+      executed: true,
+      note: match.matchedByName
+        ? "payment_link_sent"
+        : "payment_link_sent_fallback_product",
+    };
+  }
+
   return { name: call.name, executed: false, note: "unknown_tool" };
 }
 
@@ -289,7 +402,13 @@ async function recordUsageAndAudit(
 export async function respondToInboundMessage(
   db: Database,
   provider: LlmProvider,
-  input: { tenantId: string; conversationId: string; messageId: string },
+  input: {
+    tenantId: string;
+    conversationId: string;
+    messageId: string;
+    /** Base URL publik untuk tool send_payment_link (dari env worker). */
+    publicBaseUrl?: string;
+  },
 ): Promise<AgentRespondResult> {
   const { tenantId, conversationId, messageId } = input;
   const ctx = { tenantId };
@@ -367,7 +486,7 @@ export async function respondToInboundMessage(
   const system =
     `${agent.systemPrompt.trim()}${languageLine}\n` +
     "Kamu adalah agent layanan pelanggan. Jawab ringkas dan hanya berdasarkan fakta dari basis pengetahuan bila tersedia; jangan mengarang harga/fakta. " +
-    "Kamu boleh memakai tool tag_contact, move_pipeline_stage, dan handoff_to_human bila relevan.";
+    "Kamu boleh memakai tool tag_contact, move_pipeline_stage, send_payment_link (bila kontak ingin membeli), dan handoff_to_human bila relevan.";
 
   // 5. Panggil provider — error dicatat, tidak pernah melempar keluar.
   let result: Awaited<ReturnType<LlmProvider["chat"]>>;
@@ -470,7 +589,11 @@ export async function respondToInboundMessage(
   };
   const toolOutcomes: AgentToolOutcome[] = [];
   for (const call of result.toolCalls) {
-    toolOutcomes.push(await executeAgentToolCall(db, ctx, toolCtx, call));
+    toolOutcomes.push(
+      await executeAgentToolCall(db, ctx, toolCtx, call, {
+        publicBaseUrl: input.publicBaseUrl,
+      }),
+    );
   }
 
   let outboundMessageId: string | undefined;

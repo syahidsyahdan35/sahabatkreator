@@ -20,6 +20,8 @@ import { createChannelsRoutes } from "./modules/channels/routes";
 import { createAutomationsRoutes } from "./modules/automations/routes";
 import { createAgentsRoutes } from "./modules/agents/routes";
 import { createKnowledgeRoutes } from "./modules/knowledge/routes";
+import { createProductsRoutes } from "./modules/products/routes";
+import { createPayRoutes } from "./modules/pay/routes";
 import { WebchatHub } from "./modules/webchat/hub";
 import { startWebchatDeliveryPoller } from "./modules/webchat/poller";
 import {
@@ -82,6 +84,13 @@ routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
 routes.route("/", createAgentsRoutes(authBundle));
 routes.route("/", createKnowledgeRoutes(authBundle));
+// Modul products (Fase 4A) — katalog produk & tautan bayar /tenants/:tenantId/products|payment-links.
+routes.route(
+  "/",
+  createProductsRoutes(authBundle, { publicBaseUrl: env.BETTER_AUTH_URL }),
+);
+// Modul pay publik (Fase 4A) — halaman bayar /pay/:code (simulasi, tanpa sesi).
+routes.route("/", createPayRoutes(authBundle));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 

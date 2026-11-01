@@ -42,6 +42,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.RATE_LIMITED");
     case "CHANNEL_NOT_AVAILABLE_YET":
       return t("errors.CHANNEL_NOT_AVAILABLE_YET");
+    case "PRODUCT_HAS_LINKS":
+      return t("errors.PRODUCT_HAS_LINKS");
     default:
       break;
   }

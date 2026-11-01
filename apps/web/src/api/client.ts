@@ -17,15 +17,23 @@ import type {
   CreateAutomationRequest,
   CreateContactRequest,
   CreateKbDocumentRequest,
+  CreatePaymentLinkRequest,
+  CreateProductRequest,
   KbDocumentListResponse,
   KbDocumentResponse,
   MessageListResponse,
   MessageResponse,
+  PaymentLinkListResponse,
+  PaymentLinkResponse,
+  ProductListResponse,
+  ProductResponse,
+  PublicPaymentResponse,
   TenantListResponse,
   TenantResponse,
   UpdateAgentRequest,
   UpdateAutomationRequest,
   UpdateContactRequest,
+  UpdateProductRequest,
 } from "@sahabat-kreator/contracts";
 
 /**
@@ -400,6 +408,78 @@ export const api = {
         `/api/tenants/${tenantId}/kb/documents/${documentId}`,
         { method: "DELETE" },
       );
+    },
+  },
+  products: {
+    /** GET /api/tenants/:tenantId/products → daftar produk workspace (Fase 4A). */
+    async list(tenantId: string): Promise<ProductResponse[]> {
+      const body = await request<ProductListResponse>(
+        `/api/tenants/${tenantId}/products`,
+        { method: "GET" },
+      );
+      return body.products;
+    },
+    /** POST /api/tenants/:tenantId/products → 201 produk baru. */
+    create(
+      tenantId: string,
+      input: CreateProductRequest,
+    ): Promise<ProductResponse> {
+      return request<ProductResponse>(`/api/tenants/${tenantId}/products`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    /** PATCH /api/tenants/:tenantId/products/:id → produk terbarui. */
+    update(
+      tenantId: string,
+      productId: string,
+      input: UpdateProductRequest,
+    ): Promise<ProductResponse> {
+      return request<ProductResponse>(
+        `/api/tenants/${tenantId}/products/${productId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE → 204; 409 PRODUCT_HAS_LINKS bila produk sudah punya tautan bayar. */
+    async remove(tenantId: string, productId: string): Promise<void> {
+      await request<unknown>(`/api/tenants/${tenantId}/products/${productId}`, {
+        method: "DELETE",
+      });
+    },
+  },
+  paymentLinks: {
+    /** GET /api/tenants/:tenantId/payment-links → tautan bayar terbaru workspace. */
+    async list(tenantId: string): Promise<PaymentLinkResponse[]> {
+      const body = await request<PaymentLinkListResponse>(
+        `/api/tenants/${tenantId}/payment-links`,
+        { method: "GET" },
+      );
+      return body.paymentLinks;
+    },
+    /** POST /api/tenants/:tenantId/payment-links {productId, contactId?} → 201 tautan baru. */
+    create(
+      tenantId: string,
+      input: CreatePaymentLinkRequest,
+    ): Promise<PaymentLinkResponse> {
+      return request<PaymentLinkResponse>(
+        `/api/tenants/${tenantId}/payment-links`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+  },
+  pay: {
+    /** GET /api/pay/:code → ringkasan publik tautan bayar (tanpa sesi). */
+    getPublic(code: string): Promise<PublicPaymentResponse> {
+      return request<PublicPaymentResponse>(`/api/pay/${code}`, {
+        method: "GET",
+      });
+    },
+    /** POST /api/pay/:code/simulate-pay → SIMULASI pembayaran (bukan uang sungguhan). */
+    simulatePay(code: string): Promise<PublicPaymentResponse> {
+      return request<PublicPaymentResponse>(`/api/pay/${code}/simulate-pay`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
     },
   },
 };

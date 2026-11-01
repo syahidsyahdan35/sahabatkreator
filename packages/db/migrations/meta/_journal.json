@@ -78,6 +78,20 @@
       "when": 1793563204000,
       "tag": "0010_rls_agents_kb",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793563205000,
+      "tag": "0011_products_payment_links_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793563206000,
+      "tag": "0012_rls_products_payments",
+      "breakpoints": true
     }
   ]
 }
