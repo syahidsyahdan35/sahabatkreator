@@ -624,3 +624,98 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   rantai HTTP yang dipanggil UI (termasuk GET pending untuk badge,
   approve/reject, dan DELETE dokumen) lolos end-to-end terhadap URL
   publik asli.
+
+---
+
+## Update Fase 4A — Products + payment link SIMULASI + tool agent send_payment_link (2026-11-02)
+
+### Perubahan
+- **DB:** migrasi `0011_products_payment_links_schema` (generate: tabel
+  `products` — `price_idr` bigint + CHECK ≥ 0, `is_active`; dan
+  `payment_links` — `code` unik, `amount_idr` snapshot harga, enum status
+  `pending|paid|expired|cancelled`, `provider` default `'simulation'`,
+  `expires_at` di-set service +7 hari) dan `0012_rls_products_payments`
+  (tulis tangan). Pola akses publik /pay meniru lengan siteKey 0006:
+  policy kedua `public_code_lookup` FOR SELECT pada `payment_links`
+  `USING (code = nullif(current_setting('app.payment_code', true), ''))`
+  — tanpa konteks kode, halaman publik tidak melihat apa pun; **mutasi
+  publik tidak diberi lengan**: resolusi code→baris terjadi dalam
+  transaksi kode itu, semua tulis berjalan dalam konteks tenant pemilik.
+  `when` jurnal 0011/0012 diselaraskan manual menaik (…205000/…206000).
+  Total staging: **29 tabel, 24 policy**; grant `sk_app` otomatis dari
+  ALTER DEFAULT PRIVILEGES (terverifikasi `has_table_privilege`).
+- **API tenant (sesi + membership, non-member 404):**
+  `POST/GET /api/tenants/:tenantId/products`, `PATCH/DELETE
+  .../products/:id` — DELETE hard hanya bila belum ada payment_links;
+  bila sudah ada → **409 `PRODUCT_HAS_LINKS`** (saran: nonaktifkan).
+  `POST/GET /api/tenants/:tenantId/payment-links` (201; `url` dibangun
+  dari `BETTER_AUTH_URL`; audit `payment_link.created`).
+- **API publik halaman bayar:** `GET /api/pay/:code` → ringkasan publik
+  (nama produk, deskripsi, jumlah, status, nama tenant, provider) **tanpa
+  data pribadi kontak**; code tak dikenal → 404.
+  `POST /api/pay/:code/simulate-pay` → `paid` + `paid_at`, **idempoten**
+  (sudah paid → 200 tetap, tanpa audit ganda; audit `payment.paid` actor
+  system `pay-page-simulation`, meta `simulation: true`).
+- **Tool agent `send_payment_link`** (terdaftar di `packages/ai` untuk
+  Mock & OpenRouter): pencocokan produk aktif (nama utuh di teks → query
+  di nama → overlap token; fallback produk aktif tertua dengan
+  `matchedByName=false` tercatat di audit `agent.payment_link`), membuat
+  payment_link (actor `agent:<id>`), lalu mengirim pesan outbound
+  `sender_type='agent'` TERPISAH: `Link pembayaran {product}: {url}
+  (berlaku 7 hari)`. Mode suggest: tool TIDAK dieksekusi (hanya tercatat
+  di saran, seperti tool lain). MockProvider memanggil tool ini bila
+  pesan pengunjung mengandung kata "beli"/"checkout" (perilaku mock
+  terdokumentasi untuk pembuktian).
+- **Web:** halaman **Products** nyata — CRUD produk (harga via Intl
+  id-ID), tombol "Buat tautan bayar" per produk (URL hasil + tombol
+  salin), daftar tautan terbaru workspace (status diterjemahkan
+  Menunggu/Lunas/Kedaluwarsa/Dibatalkan), catatan simulasi permanen.
+  Halaman publik **`/pay/:code`** di luar shell dengan **lencana besar
+  permanen dwibahasa "SIMULASI — bukan pembayaran sungguhan" /
+  "SIMULATION — not a real payment"**, jumlah via Intl id-ID, tombol
+  "Bayar (simulasi)" → panel Lunas + waktu bayar.
+
+### Verifikasi Fase 4A
+- Lokal: typecheck SEMUA proyek (23) hijau; build api+worker+web hijau;
+  `packages/db` verify (PGlite): 13 migrasi bersih, 29 tabel, 24 policy,
+  seksi [9] Fase 4A lulus (RLS per tenant; tanpa konteks 0 baris; lengan
+  `app.payment_code` hanya membuka baris berkode itu & products tetap
+  tertutup; CHECK harga ≥ 0 menolak insert negatif). Uji integrasi
+  worker `verify:agent-tools` diperluas seksi [7] (executor
+  `send_payment_link` langsung: cocok nama → `payment_link_sent` +
+  snapshot 349000 + pesan outbound berisi URL; tak cocok → fallback
+  produk tertua) — SEMUA LULUS [1]–[7].
+- Publik dari server terhadap `https://botara.my.id` (skrip Bun, akun
+  uji BARU `fase4a-a-*@sk.test` & `fase4a-b-*@sk.test`, pengunjung
+  "Tania Uji 4A"): **29/29 PASS** — buat produk → buat payment-link →
+  GET publik berisi produk+harga benar & status pending → simulate-pay
+  → paid → simulate-pay kedua idempoten (paidAt sama) → daftar tenant
+  menampilkan paid → GET publik lagi paid → hapus produk ber-links 409
+  `PRODUCT_HAS_LINKS` → hapus produk tanpa links 204 → code acak 404
+  (GET & pay) → tanpa sesi 401 → tenant lain 404 (products/links/PATCH/
+  buat-link) → channel webchat + agent auto → pengunjung menulis "saya
+  mau beli kelas rekaman kilat" → **pesan agent berisi URL /pay/… tiba
+  via WS** (teks template persis) → GET publik code itu: produk cocok,
+  pending → simulate-pay → paid → link agent tercatat terhubung ke
+  kontak+percakapan pengunjung → kontak utuh (tag `ai-lead`, stage
+  valid) → riwayat memuat ≥2 pesan agent → halaman `/pay/:code` 200
+  judul SPA → health ok.
+- DB staging terkonfirmasi: audit `payment_link.created` = 2 (1 API
+  manual + 1 agent), `agent.payment_link` = 1, `payment.paid` = 2 persis
+  (idempotensi terbukti: 3 panggilan simulate-pay atas 2 tautan hanya
+  menghasilkan 2 audit), `payment_links` 2 baris paid provider
+  `simulation`. Bundle publik `index-WZHzDyF5.js` memuat lencana EN & ID.
+- Batas jujur: (1) **Ini SIMULASI berlabel** — tidak ada uang sungguhan
+  yang bergerak; provider selalu `'simulation'` sampai kredensial
+  sandbox Midtrans/Xendit diberikan user dan adapter pembayaran
+  dibangun (sesuai desain: Meta menghapus API order, pembayaran memang
+  milik sendiri). (2) Kedaluwarsa tautan ditegakkan lazy saat dibaca
+  (belum ada job penyapu). (3) Pembuktian tool agent memakai
+  MockProvider (perilaku "beli/checkout" terdokumentasi); jalur
+  OpenRouter menerima tool yang sama dari skema tetapi belum memanggil
+  model sungguhan di staging (kunci belum dipasang, seperti fase 3A).
+  (4) Pesan tautan terkirim mendahului teks balasan utama agent karena
+  tool dieksekusi lebih dulu di runtime — keduanya tiba sebagai pesan
+  agent terpisah. (5) Klik UI penuh dari VM tetap dibatasi artefak POST
+  proxy egress; yang terbukti adalah bundle tersaji publik + seluruh
+  rantai HTTP yang dipanggil UI & halaman bayar.
