@@ -549,3 +549,78 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   dibatasi relay ±2 dtk + antrean + poller ±2 dtk (umumnya <10 dtk).
   (4) UI agent/KB belum ada (fase berikutnya) — pengelolaan fase ini
   murni API. (5) Satu agent aktif tertua per tenant yang dipakai runtime.
+
+---
+
+## Update Fase 3B — UI Agents + Knowledge + persetujuan saran AI (2026-11-02)
+
+### Perubahan
+- Web saja (commit `0552773`, API tidak berubah): halaman **AI Agents**
+  menggantikan placeholder — daftar agent workspace aktif (nama, chip mode
+  Auto/Perlu persetujuan, chip Aktif/Nonaktif, model, waktu dibuat) dengan
+  sakelar aktif optimistis (pola 2B), dan modal buat/edit: nama, system
+  prompt (textarea + petunjuk persona/aturan), model teks bebas
+  (placeholder `openai/gpt-4o-mini` = default OpenRouterProvider), radio
+  mode auto/suggest dengan penjelasan awam, dan centang aktif.
+- **Catatan jujur WAJIB tampil** di halaman Agents (`agents.mockNote`,
+  en+id): provider model BELUM dikonfigurasi di server staging, balasan
+  agent masih dari penjawab demo/mock yang mengutip KB — alur, tool, dan
+  antrean persetujuan nyata, hanya sumber redaksinya pengganti.
+- **Antrean saran di halaman Agents:** draf `GET /suggestions?status=pending`
+  (teks, waktu Intl, nama agent dari daftar agent, nama kontak diresolusi
+  via API kontak per contactId unik dengan fallback ID ringkas, ID
+  percakapan ringkas, nama tool yang diusulkan dari `detail.toolCalls`
+  berlabel "tidak dieksekusi") dengan tombol Setujui (approve → teks
+  terkirim sebagai pesan agent) & Tolak; setelah aksi daftar dimuat ulang.
+- **Badge `pendingApprovals` kini ASLI:** `PendingApprovalsProvider` baru
+  (pola UnreadBadgeProvider 1E, di dalam WorkspaceProvider) menghitung
+  jumlah suggestions pending workspace aktif dari API yang sama; angka
+  demo Fase 0 (`DEMO_BADGES`) dihapus dari `App.tsx`. Registry tidak
+  diubah; Sidebar & MobileBottomBar tidak merender badge bila angka 0.
+  Halaman Agents memanggil `refresh()` provider setelah approve/reject.
+- Halaman **Knowledge** menggantikan placeholder — daftar dokumen (judul,
+  `chunkCount`, waktu), form tambah (judul + isi besar), modal lihat yang
+  mengambil dokumen segar via `GET /kb/documents/:id`, hapus dengan modal
+  konfirmasi (DELETE → 204), dan catatan bahwa dokumen dipecah otomatis
+  menjadi chunk yang dicari agent saat menjawab. Klien API web ditambah
+  `api.agents`, `api.suggestions`, `api.kb`; ±105 kunci i18n
+  `agents.*`/`knowledge.*` + `common.view`/`common.delete` en + id lengkap
+  (kelengkapan ditahan typecheck Resources).
+- Deploy: build web di VM → commit `0552773` → rsync seluruh repo (exclude
+  `.git` & `.env.staging` — file server utuh, mode 600 terkonfirmasi) →
+  proses Vite preview dihentikan → systemd `Restart=always` mengangkat
+  bundle baru `index-BETCr3fH.js` (254,26 KB / gzip 70,71 KB). Service API
+  & worker tidak di-restart (tidak ada perubahan di sisinya).
+
+### Verifikasi Fase 3B
+- Lokal: `pnpm typecheck` SEMUA proyek hijau; `pnpm --filter web build`
+  hijau. Bundle lokal terbukti memuat label dwibahasa baru (EN: "Reply
+  drafts awaiting approval", "Needs my approval", "Demo mode: the AI model
+  provider", "Approve & send"; ID: "Draf balasan menunggu persetujuan",
+  "Perlu persetujuan saya", "Mode demo: penyedia model AI",
+  "Setujui & kirim", "Tambah dokumen", dll.).
+- Publik dari VM: `GET /` → bundle `index-BETCr3fH.js` (sama dengan build
+  lokal), aset bundle terambil 200 (254.424 byte) dan memuat label EN/ID
+  yang sama; `GET /agents` & `GET /knowledge` → 200 judul "Sahabat
+  Kreator" (SPA shell); `GET /api/health` → ok;
+  `sahabat-kreator-web/api/worker` semua active di server.
+- Rantai API yang dipakai UI (dari server terhadap `https://botara.my.id`,
+  skrip Bun UA browser, akun uji BARU `fase3b-*@sk.test`, pengunjung
+  "Rina Uji 3B"): **30/30 PASS** — sign-up → tenant → channel webchat →
+  POST agent payload persis form UI (nama, systemPrompt, model teks bebas,
+  mode suggest, isActive) 201 & terbaca kembali → POST dokumen KB payload
+  form UI 201 (chunkCount ≥1) → GET daftar & GET :id cocok untuk modal
+  lihat → pengunjung bertanya sesuai KB → **suggestion pending muncul di
+  GET** (data yang dirender antrean & dihitung badge; teks memuat fakta
+  KB "349"; membawa agentId & contactId) → tidak ada pesan keluar sebelum
+  approve → approve → `sent` & pesan agent tiba ke pengunjung via WS →
+  jumlah pending kembali 0 → saran kedua → reject → `rejected` → PATCH
+  agent mode auto → terbaca `mode=auto` di GET → DELETE dokumen uji → 204
+  & GET :id 404 → tanpa sesi: GET agents/kb/suggestions → 401 → health ok.
+- Batas verifikasi UI yang jujur: klik UI penuh dari VM tetap tidak bisa
+  (POST dari VM ke domain publik timeout — artefak proxy egress, sama
+  seperti fase 1E/1F/2A/2B/3A). Yang terbukti: bundle baru tersaji publik,
+  semua label dwibahasa ada di bundle itu, rute SPA termuat, dan seluruh
+  rantai HTTP yang dipanggil UI (termasuk GET pending untuk badge,
+  approve/reject, dan DELETE dokumen) lolos end-to-end terhadap URL
+  publik asli.
