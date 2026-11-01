@@ -719,3 +719,97 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   agent terpisah. (5) Klik UI penuh dari VM tetap dibatasi artefak POST
   proxy egress; yang terbukti adalah bundle tersaji publik + seluruh
   rantai HTTP yang dipanggil UI & halaman bayar.
+
+---
+
+## Update Fase 2C — Sequence automation (rangkaian pesan berjeda) (2026-11-02)
+
+### Perubahan
+- **DB:** migrasi `0013_sequences_schema` (generate: enum `automation_kind`
+  + kolom `automations.kind` default `'keyword'` — baris 2A tetap berlaku;
+  tabel `automation_steps` dengan unik (automation_id, position) + CHECK
+  delay ≥ 0 & posisi ≥ 1; tabel `sequence_enrollments` dengan index unik
+  parsial satu enrollment `active` per (automation_id, contact_id)) dan
+  `0014_rls_sequences` (tenant_isolation untuk 2 tabel baru). Total staging:
+  **31 tabel, 26 policy**; grant `sk_app` otomatis dari ALTER DEFAULT
+  PRIVILEGES (terverifikasi `has_table_privilege`).
+- **Semantik:** pemicu tetap keyword untuk kedua jenis. kind `keyword` =
+  balasan langsung 2A (tidak berubah). kind `sequence` = pesan cocok
+  MENDAFTARKAN kontak ke rangkaian; setiap langkah dikirim setelah
+  jedanya (menit, relatif terhadap langkah sebelumnya; langkah pertama
+  relatif terhadap pendaftaran). `current_step` = langkah yang sudah
+  terkirim. Pendaftaran ulang saat enrollment masih aktif diabaikan
+  (run `skipped`, alasan `already_enrolled`). Langkah sequence TIDAK bisa
+  diedit setelah dibuat (buat automation baru) — dinyatakan di UI.
+- **Mesin worker:** core menulis event outbox `sequence.step_due`
+  {enrollmentId, stepPosition, delayMinutes} saat enrollment dibuat dan
+  setiap langkah selesai; relay menerjemahkannya menjadi job BullMQ
+  TERTUNDA `sequence.step` dengan jobId deterministik
+  `seq-<enrollmentId>-<position>`. Processor menjalankan
+  `executeSequenceStep` di core (pesan system `queued` → poller API
+  mengirim lewat hub webchat seperti biasa). Pesan pemicu sequence
+  dihitung sebagai tembakan automation → TIDAK diteruskan ke agent.
+- **Aturan berhenti:** (a) kontak membalas pesan apa pun di percakapan
+  itu setelah terdaftar → enrollment dibatalkan saat evaluasi pesan
+  masuk berjalan (audit `sequence.cancelled_reply`); enrollment yang
+  dibuat oleh pesan yang sama tidak ikut terbatalkan. (b) kontak opt-out
+  (`opt_in_status='opted_out'`) diperiksa saat langkah dieksekusi →
+  dibatalkan (audit `sequence.cancelled_opt_out`). (c) menonaktifkan
+  automation TIDAK membatalkan enrollment berjalan — hanya memblokir
+  pemicu baru (keputusan terdokumentasi di core).
+- **API:** POST automations menjadi union — tanpa `kind` (atau
+  `kind:'keyword'`) = jalur lama persis; `kind:'sequence'` menerima
+  `steps` 1–10 langkah (delay 0–43200 menit). GET daftar kini menyertakan
+  `kind`, `steps`, `stepCount`. Endpoint baru
+  `GET .../automations/:id/enrollments` (kontak, status, currentStep,
+  totalSteps, nextRunAt).
+- **Web:** halaman Automations — formulir buat memilih jenis (radio
+  "Balasan keyword" vs "Rangkaian pesan (sequence)" berpenjelasan awam),
+  editor langkah sederhana (baris jeda menit + teks, tambah/hapus, maks
+  10), chip jenis di daftar, dan modal riwayat sequence menampilkan
+  enrollments (status Aktif/Selesai/Berhenti, "Pesan X dari Y", jadwal
+  berikutnya). i18n en+id lengkap.
+- Deploy: build api+worker+web di VM → commit `90f27f9` → rsync repo
+  (`.env.staging` server dikecualikan & utuh) → migrasi dijalankan di
+  server dengan drizzle-kit memakai `MIGRATION_DATABASE_URL` dari
+  `.env.staging` → ketiga proses milik `ubuntu` dihentikan → systemd
+  `Restart=always` mengangkat binary baru (bundle `index-F0IM1OG8.js`).
+
+### Verifikasi Fase 2C
+- Lokal: typecheck SEMUA proyek hijau; build api+worker+web hijau;
+  `packages/db` verify (PGlite): 15 migrasi bersih, 31 tabel, 26 policy,
+  seksi [10] Fase 2C lulus (kind default, check delay, index unik
+  enrollment aktif, RLS steps/enrollments). Uji integrasi worker BARU
+  `verify:sequences` (PGlite): pendaftaran + step_due, eksekusi langkah
+  berurutan + posisi basi ditolak, berhenti-karena-balas, rangkaian
+  penuh completed, opt-out, already_enrolled, kompatibilitas keyword —
+  SEMUA LULUS; `verify:agent-tools` lama tetap lulus (urutan
+  keyword → agent tidak rusak).
+- Publik dari server terhadap `https://botara.my.id` (skrip Bun, akun
+  uji BARU `fase2c-*@sk.test`, pengunjung "Sinta Uji 2C" & "Rudi Uji
+  2C"): **32/32 PASS** — buat sequence 3 langkah payload persis form UI
+  (jeda 0/1/1 menit) → pengunjung mengirim "mulai" (huruf kecil) →
+  langkah 1 tiba via WS pada **+4,7 dtk**, langkah 2 pada **+66,7 dtk**,
+  langkah 3 pada **+128,8 dtk**; enrollments API menunjukkan
+  current_step 0→2→3 dan status akhir `completed`; 3 pesan system
+  berstatus `sent`; pesan pemicu TIDAK dijawab agent (agent auto aktif
+  di tenant yang sama). Uji berhenti: sequence kedua → langkah 1 tiba →
+  pengunjung membalas pesan biasa → ditunggu 100 dtk, langkah 2 TIDAK
+  tiba dan enrollment berstatus `cancelled`. Kompatibilitas: automation
+  dibuat dengan payload Fase 2A persis (tanpa `kind`) terdaftar sebagai
+  kind `keyword` dan tetap menembak balasan langsung. Negatif: tenant
+  lain 404 (automations & enrollments), tanpa sesi 401, health ok.
+- DB staging terkonfirmasi: audit `sequence.enrolled`=2,
+  `sequence.step_sent`=4, `sequence.completed`=1,
+  `sequence.cancelled_reply`=1; `sequence_enrollments`: 1 completed +
+  1 cancelled — persis jejak dua rantai uji di atas.
+- Batas jujur: (1) titik mulai delay BullMQ digeser ke saat event
+  ter-relay (polling ±2 dtk) dan pengiriman dibatasi poller API ±2 dtk —
+  langkah 1 terukur +4,7 dtk, langkah berjeda 60 dtk terukur 62–64 dtk;
+  presisi detik-sempurna bukan target staging. (2) Pembatalan karena
+  balasan terjadi di jalur evaluasi pesan masuk (relay ±2 dtk) — balasan
+  yang tiba <2 dtk sebelum langkah jatuh tempo masih bisa balapan dimenangkan
+  langkah itu; jendela ini melekat pada arsitektur relay polling dan
+  dicatat apa adanya. (3) Klik UI penuh dari VM tetap dibatasi artefak
+  POST proxy egress; yang terbukti adalah bundle tersaji publik (memuat
+  label EN/ID sequence) + seluruh rantai HTTP/WS yang dipakai UI.
