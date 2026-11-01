@@ -261,3 +261,65 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   seperti fase sebelumnya). Yang terbukti: bundle baru tersaji publik,
   semua label dwibahasa ada di bundle itu, dan seluruh rantai HTTP yang
   dipanggil UI lolos end-to-end terhadap URL publik asli.
+
+---
+
+## Update Fase 1F — Webchat hidup end-to-end (2026-11-02)
+
+### Perubahan
+- **Channel pertama yang benar-benar mengirim/menerima.** Arsitektur final:
+  - Identitas channel webchat = `channel_accounts.external_id` berupa
+    siteKey publik `wc_...` (dibuat saat channel dibuat). Token sesi
+    pengunjung = HMAC-SHA256 sederhana di `@sahabat-kreator/channel-webchat`
+    (payload tenant/akun/kontak/percakapan + expiry 30 hari), ditandatangani
+    `WEBCHAT_SECRET` (digenerate di server, hanya di `.env.staging` 600).
+  - Logika sesi/pesan ada di core (`webchat.ts`): resolusi siteKey → tenant
+    lewat transaksi yang men-set `app.webchat_site_key` + lengan SELECT pada
+    policy RLS `channel_accounts` (**migrasi 0006**, pola lengan 0003);
+    pesan inbound menulis baris pesan + unread + event outbox
+    `message.received` dalam satu transaksi.
+  - API publik widget (tanpa sesi dashboard): `POST /api/webchat/:siteKey/session`,
+    `GET|POST /api/webchat/messages` (Bearer token pengunjung), dan WS
+    `GET /api/webchat/ws?token=` yang ditangani handler upgrade HTTP di
+    proses API (paket `ws`), BUKAN route Hono.
+  - Pengiriman balasan dashboard (endpoint 1D): bila percakapan webchat dan
+    pengunjung sedang WS-connected, hub mendorong pesan saat itu juga dan
+    status menjadi `sent` (audit `message.sent`); bila offline, pesan tetap
+    `queued` dan ter-flush (→ `sent`) saat pengunjung WS-connect berikutnya.
+    Provider lain tetap `queued` seperti sebelumnya.
+  - Vite preview proxy `/api` kini `ws: true` — WAJIB agar upgrade WS
+    widget tembus dari publik ke API 3101 (terbukti oleh uji WS di bawah).
+  - Manajemen channel: `POST/GET /api/tenants/:tenantId/channels`
+    (webchat 201; provider lain → 422 `CHANNEL_NOT_AVAILABLE_YET`).
+  - Widget (`packages/embed`, vanilla TS satu file, 6,9 KB minified):
+    build tsup → disalin ke `apps/web/public/widget.js` → tersaji di
+    `https://botara.my.id/widget.js`. Halaman Channels di web menampilkan
+    daftar channel, form buat webchat, siteKey + snippet embed siap salin;
+    halaman publik `/webchat-demo?key=wc_...` untuk uji manusia.
+- Deploy: migrasi 0006 diterapkan ke staging via SSH port-forward (role
+  migrasi, pola 1D) → `WEBCHAT_SECRET` ditambahkan ke `.env.staging` →
+  build api+web+embed di VM → rsync → kedua proses milik `ubuntu`
+  dihentikan → systemd `Restart=always` mengangkat binary baru
+  (bundle web `index-CzH2WQnC.js`).
+
+### Verifikasi Fase 1F (publik, dari server terhadap https://botara.my.id)
+- Skrip E2E Bun di server (akun uji baru `fase1f-*@sk.test`): **24/24 PASS** —
+  sign-up → buat tenant → POST channels webchat 201 + siteKey `wc_...` →
+  POST channels whatsapp → 422 `CHANNEL_NOT_AVAILABLE_YET` → GET channels →
+  POST session pengunjung → token + conversationId → POST pesan inbound
+  201 `received` → GET conversations dashboard: percakapan webchat muncul,
+  unread=1, nama kontak benar → GET messages: inbound ada → WS connect
+  (`ready`) → POST balasan dashboard → **201 status `sent`** dan pengunjung
+  menerima event WS realtime → WS ditutup → balasan kedua tetap `queued` →
+  WS reconnect → balasan ter-flush sebagai event dan status di API menjadi
+  `sent` → negatif: siteKey salah 404, token rusak 401, user tenant lain
+  404 (conversations & channels), token pengunjung hanya membaca
+  percakapannya sendiri.
+- DB staging terkonfirmasi: event outbox `message.received` provider
+  webchat tercatat untuk pesan uji.
+- GET publik dari VM: `/widget.js` → 200 (6.889 byte, kode widget asli),
+  `/webchat-demo?key=...` → 200 judul "Sahabat Kreator", `/api/health` ok.
+- Batas jujur: uji widget di browser sungguhan (klik tombol chat) tidak
+  dijalankan dari VM; yang terbukti adalah seluruh protokol yang dipakai
+  widget (REST + WS persis seperti implementasi widget) terhadap URL
+  publik asli, file widget tersaji publik, dan halaman demo termuat.
