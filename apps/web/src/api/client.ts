@@ -1,4 +1,8 @@
 import type {
+  AgentListResponse,
+  AgentResponse,
+  AgentSuggestionListResponse,
+  AgentSuggestionResponse,
   AutomationListResponse,
   AutomationResponse,
   AutomationRunListResponse,
@@ -9,12 +13,17 @@ import type {
   ContactResponse,
   ConversationListResponse,
   ConversationResponse,
+  CreateAgentRequest,
   CreateAutomationRequest,
   CreateContactRequest,
+  CreateKbDocumentRequest,
+  KbDocumentListResponse,
+  KbDocumentResponse,
   MessageListResponse,
   MessageResponse,
   TenantListResponse,
   TenantResponse,
+  UpdateAgentRequest,
   UpdateAutomationRequest,
   UpdateContactRequest,
 } from "@sahabat-kreator/contracts";
@@ -284,6 +293,113 @@ export const api = {
         { method: "GET" },
       );
       return body.runs;
+    },
+  },
+  agents: {
+    /** GET /api/tenants/:tenantId/agents → daftar agent workspace (Fase 3A). */
+    async list(tenantId: string): Promise<AgentResponse[]> {
+      const body = await request<AgentListResponse>(
+        `/api/tenants/${tenantId}/agents`,
+        { method: "GET" },
+      );
+      return body.agents;
+    },
+    /** POST /api/tenants/:tenantId/agents → 201 agent baru. */
+    create(
+      tenantId: string,
+      input: CreateAgentRequest,
+    ): Promise<AgentResponse> {
+      return request<AgentResponse>(`/api/tenants/${tenantId}/agents`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    /** PATCH /api/tenants/:tenantId/agents/:id → agent terbarui. */
+    update(
+      tenantId: string,
+      agentId: string,
+      input: UpdateAgentRequest,
+    ): Promise<AgentResponse> {
+      return request<AgentResponse>(
+        `/api/tenants/${tenantId}/agents/${agentId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+  },
+  suggestions: {
+    /** GET /api/tenants/:tenantId/suggestions?status=pending → draf balasan agent mode suggest. */
+    async list(
+      tenantId: string,
+      opts?: { status?: string },
+    ): Promise<AgentSuggestionResponse[]> {
+      const q = new URLSearchParams();
+      if (opts?.status) q.set("status", opts.status);
+      const qs = q.toString();
+      const body = await request<AgentSuggestionListResponse>(
+        `/api/tenants/${tenantId}/suggestions${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+      return body.suggestions;
+    },
+    /** POST .../suggestions/:id/approve → teks saran terkirim sebagai pesan agent. */
+    approve(
+      tenantId: string,
+      suggestionId: string,
+    ): Promise<AgentSuggestionResponse> {
+      return request<AgentSuggestionResponse>(
+        `/api/tenants/${tenantId}/suggestions/${suggestionId}/approve`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /** POST .../suggestions/:id/reject → draf ditolak. */
+    reject(
+      tenantId: string,
+      suggestionId: string,
+    ): Promise<AgentSuggestionResponse> {
+      return request<AgentSuggestionResponse>(
+        `/api/tenants/${tenantId}/suggestions/${suggestionId}/reject`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  kb: {
+    /** GET /api/tenants/:tenantId/kb/documents → daftar dokumen + chunkCount. */
+    async listDocuments(tenantId: string): Promise<KbDocumentResponse[]> {
+      const body = await request<KbDocumentListResponse>(
+        `/api/tenants/${tenantId}/kb/documents`,
+        { method: "GET" },
+      );
+      return body.documents;
+    },
+    /** POST /api/tenants/:tenantId/kb/documents → 201 dokumen baru (sudah ter-chunk). */
+    createDocument(
+      tenantId: string,
+      input: CreateKbDocumentRequest,
+    ): Promise<KbDocumentResponse> {
+      return request<KbDocumentResponse>(
+        `/api/tenants/${tenantId}/kb/documents`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** GET /api/tenants/:tenantId/kb/documents/:id → satu dokumen + chunkCount. */
+    getDocument(
+      tenantId: string,
+      documentId: string,
+    ): Promise<KbDocumentResponse> {
+      return request<KbDocumentResponse>(
+        `/api/tenants/${tenantId}/kb/documents/${documentId}`,
+        { method: "GET" },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/kb/documents/:id → 204 tanpa body. */
+    async deleteDocument(
+      tenantId: string,
+      documentId: string,
+    ): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/kb/documents/${documentId}`,
+        { method: "DELETE" },
+      );
     },
   },
 };

@@ -13,12 +13,18 @@ import { ProfileBlock } from "./components/ProfileBlock";
 import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
 import { AutomationsPage } from "./pages/AutomationsPage";
+import { AgentsPage } from "./pages/AgentsPage";
+import { KnowledgePage } from "./pages/KnowledgePage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { InboxPage } from "./pages/InboxPage";
 import {
   UnreadBadgeProvider,
   useUnreadBadge,
 } from "./inbox/UnreadBadgeProvider";
+import {
+  PendingApprovalsProvider,
+  usePendingApprovals,
+} from "./agents/PendingApprovalsProvider";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
@@ -26,10 +32,11 @@ import { ChannelsPage } from "./pages/ChannelsPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
 
-// Badge persetujuan agent masih demo Fase 0. Badge unread Inbox SEJAK Fase 1E
-// berasal dari API conversations workspace aktif (UnreadBadgeProvider) —
-// query yang sama untuk desktop & mobile (§10.1).
-const DEMO_BADGES = { pendingApprovals: 1 } as const;
+// Badge navigasi berasal dari API workspace aktif — query yang sama untuk
+// desktop & mobile (§10.1), registry tidak diubah: unread Inbox dari API
+// conversations (UnreadBadgeProvider, Fase 1E) dan pendingApprovals dari
+// jumlah draf agent berstatus pending (PendingApprovalsProvider, Fase 3B —
+// menggantikan angka demo Fase 0).
 
 /**
  * Router path sederhana (Fase 1C): hanya tiga permukaan —
@@ -84,12 +91,14 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
   return (
     <WorkspaceProvider>
       <UnreadBadgeProvider>
-        <ShellMain
-          t={t}
-          locale={locale}
-          controls={controls}
-          onNavigateTo={onNavigateTo}
-        />
+        <PendingApprovalsProvider>
+          <ShellMain
+            t={t}
+            locale={locale}
+            controls={controls}
+            onNavigateTo={onNavigateTo}
+          />
+        </PendingApprovalsProvider>
       </UnreadBadgeProvider>
     </WorkspaceProvider>
   );
@@ -99,12 +108,13 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
 function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
   const { user, signOut } = useAuth();
   const { totalUnread } = useUnreadBadge();
+  const { pendingCount } = usePendingApprovals();
   const [activeId, setActiveId] = useState("dashboard");
   const [moreOpen, setMoreOpen] = useState(false);
 
   if (!user) return null;
 
-  const badges = { ...DEMO_BADGES, unreadInbox: totalUnread };
+  const badges = { pendingApprovals: pendingCount, unreadInbox: totalUnread };
 
   const activeItem: NavItem =
     NAV_REGISTRY.find((i) => i.id === activeId) ?? NAV_REGISTRY[0]!;
@@ -147,6 +157,10 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
           <ContactsPage t={t} locale={locale} />
         ) : activeId === "inbox" ? (
           <InboxPage t={t} locale={locale} />
+        ) : activeId === "agents" ? (
+          <AgentsPage t={t} locale={locale} />
+        ) : activeId === "knowledge" ? (
+          <KnowledgePage t={t} locale={locale} />
         ) : activeId === "channels" ? (
           <ChannelsPage t={t} locale={locale} />
         ) : activeId === "automations" ? (
