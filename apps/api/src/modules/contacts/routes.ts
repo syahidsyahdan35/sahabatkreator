@@ -1,0 +1,137 @@
+import { Hono } from "hono";
+import { z } from "zod";
+import {
+  ContactListResponseSchema,
+  ContactResponseSchema,
+  CreateContactRequestSchema,
+  UpdateContactRequestSchema,
+  type ContactResponse,
+} from "@sahabat-kreator/contracts";
+import {
+  createContact,
+  getContact,
+  listContacts,
+  updateContact,
+} from "@sahabat-kreator/core";
+import type { Contact } from "@sahabat-kreator/db";
+import type { AuthBundle } from "../../auth";
+import { apiError, type AppVariables } from "../../http";
+import { requireAuth } from "../auth/session";
+import { resolveTenantForUser } from "../tenants/guard";
+
+function serializeContact(row: Contact): ContactResponse {
+  return ContactResponseSchema.parse({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    avatarUrl: row.avatarUrl,
+    tags: row.tags,
+    customFields: row.customFields,
+    pipelineStage: row.pipelineStage,
+    optInStatus: row.optInStatus,
+    consentAt: row.consentAt?.toISOString() ?? null,
+    lastContactedAt: row.lastContactedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+}
+
+const ListContactsQuerySchema = z.object({
+  search: z.string().max(255).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+/**
+ * Modul contacts (Fase 1D) — semua route bersarang di workspace:
+ *   POST  /tenants/:tenantId/contacts        buat kontak → 201
+ *   GET   /tenants/:tenantId/contacts        daftar + total (?search=&limit=&offset=)
+ *   GET   /tenants/:tenantId/contacts/:id    detail; bukan milik tenant → 404
+ *   PATCH /tenants/:tenantId/contacts/:id    ubah name/tags/pipeline_stage/opt_in_status
+ * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND,
+ * pola Fase 1B). Logika domain ada di @sahabat-kreator/core (RLS tenant).
+ */
+export function createContactsRoutes(bundle: AuthBundle | null) {
+  const app = new Hono<{ Variables: AppVariables }>();
+  const base = "/tenants/:tenantId/contacts";
+
+  if (!bundle) {
+    app.post(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(`${base}/:id`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.patch(`${base}/:id`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    return app;
+  }
+
+  const auth = requireAuth(bundle);
+  app.use("/tenants/*", auth);
+
+  app.post(base, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = CreateContactRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid contact payload");
+    }
+    const contact = await createContact(bundle.db, { tenantId: tenant.id }, parsed.data);
+    return c.json(serializeContact(contact), 201);
+  });
+
+  app.get(base, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const query = ListContactsQuerySchema.safeParse(c.req.query());
+    if (!query.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
+    }
+    const result = await listContacts(bundle.db, { tenantId: tenant.id }, query.data);
+    const body = ContactListResponseSchema.parse({
+      contacts: result.contacts.map(serializeContact),
+      total: result.total,
+    });
+    return c.json(body);
+  });
+
+  app.get(`${base}/:id`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    const contact = await getContact(bundle.db, { tenantId: tenant.id }, id);
+    if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    return c.json(serializeContact(contact));
+  });
+
+  app.patch(`${base}/:id`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = UpdateContactRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid contact payload");
+    }
+    const contact = await updateContact(bundle.db, { tenantId: tenant.id }, id, parsed.data);
+    if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    return c.json(serializeContact(contact));
+  });
+
+  return app;
+}

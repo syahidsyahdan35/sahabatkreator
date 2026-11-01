@@ -29,6 +29,20 @@
       "when": 1793551950026,
       "tag": "0003_rls_member_self_visibility",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793558289865,
+      "tag": "0004_channels_inbox_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793558297226,
+      "tag": "0005_rls_channels_inbox",
+      "breakpoints": true
     }
   ]
 }

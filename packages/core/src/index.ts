@@ -19,3 +19,20 @@ export {
   type MemberRole,
   type TenantWithRole,
 } from "./tenants";
+export { withTenantDb, type DbTx } from "./tx";
+export {
+  createContact,
+  listContacts,
+  getContact,
+  updateContact,
+  type CreateContactInput,
+  type UpdateContactInput,
+  type ListContactsInput,
+} from "./contacts";
+export {
+  listConversations,
+  getConversation,
+  listMessages,
+  queueOutboundMessage,
+  type ConversationWithSummary,
+} from "./conversations";

@@ -14,6 +14,8 @@ import {
 import { createAuthBundle, type AuthBundle } from "./auth";
 import type { AppVariables } from "./http";
 import { createTenantsRoutes } from "./modules/tenants/routes";
+import { createContactsRoutes } from "./modules/contacts/routes";
+import { createInboxRoutes } from "./modules/inbox/routes";
 
 const env = loadEnv();
 const startedAt = Date.now();
@@ -55,6 +57,9 @@ routes.get("/version", (c) => {
 
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
+// Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...
+routes.route("/", createContactsRoutes(authBundle));
+routes.route("/", createInboxRoutes(authBundle));
 
 export const app = new Hono<{ Variables: AppVariables }>();
 app.route("/", routes);

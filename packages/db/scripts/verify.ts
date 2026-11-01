@@ -44,7 +44,9 @@ const tablesRes = await db.query<{ count: string }>(
 );
 console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // 11 tabel Fase 1A + 4 tabel Better Auth Fase 1B (auth_user/session/account/verification)
-assert.equal(Number(tablesRes.rows[0].count), 15);
+// + 6 tabel Fase 1D (channel_accounts, channel_identities, contacts, media,
+// conversations, messages)
+assert.equal(Number(tablesRes.rows[0].count), 21);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -75,7 +77,11 @@ await db.query(
   `INSERT INTO outbox_events (tenant_id, type, payload) VALUES ($1, 'message.received', '{}'), ($2, 'message.received', '{}')`,
   [TENANT_A, TENANT_B],
 );
-console.log("[2] seed 2 tenant + member + usage + audit + outbox: OK");
+await db.query(
+  `INSERT INTO contacts (tenant_id, name, phone) VALUES ($1, 'Kontak A', '+628110000001'), ($2, 'Kontak B', '+628110000002')`,
+  [TENANT_A, TENANT_B],
+);
+console.log("[2] seed 2 tenant + member + usage + audit + outbox + contacts: OK");
 
 // ---------- 3. Dedup webhook_inbox ----------
 await db.query(
@@ -97,15 +103,16 @@ console.log("[3] webhook_inbox: duplikat (provider, provider_event_id) ditolak: 
 const policies = await db.query<{ count: string }>(
   `SELECT count(*)::text AS count FROM pg_policies WHERE schemaname = 'public'`,
 );
-assert.equal(Number(policies.rows[0].count), 8);
-console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (8 tabel tenant-scoped)`);
+assert.equal(Number(policies.rows[0].count), 14);
+console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (14 tabel tenant-scoped)`);
 
 await db.exec(`
   CREATE ROLE app_user NOLOGIN;
   GRANT SELECT, INSERT, UPDATE, DELETE ON
     tenants, users, plans, tenant_members, invitations, api_keys,
     subscriptions, webhook_inbox, outbox_events, audit_logs, usage_ledger,
-    auth_user, auth_session, auth_account, auth_verification
+    auth_user, auth_session, auth_account, auth_verification,
+    channel_accounts, channel_identities, contacts, media, conversations, messages
   TO app_user;
 `);
 
@@ -113,6 +120,8 @@ interface Seen {
   members: string[];
   usageTenants: string[];
   auditTenants: string[];
+  contactTenants: string[];
+  contactCrossInsertBlocked: boolean;
   crossInsertBlocked: boolean;
 }
 
@@ -129,6 +138,21 @@ const seen = await db.transaction(async (tx): Promise<Seen> => {
   const audit = await tx.query<{ tenant_id: string }>(
     `SELECT tenant_id FROM audit_logs`,
   );
+  const contactRows = await tx.query<{ tenant_id: string }>(
+    `SELECT tenant_id FROM contacts`,
+  );
+
+  let contactCrossInsertBlocked = false;
+  await tx.query(`SAVEPOINT sp0`);
+  try {
+    await tx.query(
+      `INSERT INTO contacts (tenant_id, name) VALUES ($1, 'Kontak Lintas')`,
+      [TENANT_B],
+    );
+  } catch (err) {
+    contactCrossInsertBlocked = /row-level security/i.test(String(err));
+    await tx.query(`ROLLBACK TO SAVEPOINT sp0`);
+  }
 
   let crossInsertBlocked = false;
   // savepoint agar kegagalan insert tidak membatalkan seluruh transaksi uji
@@ -147,6 +171,8 @@ const seen = await db.transaction(async (tx): Promise<Seen> => {
     members: members.rows.map((r) => r.tenant_id),
     usageTenants: usage.rows.map((r) => r.tenant_id),
     auditTenants: audit.rows.map((r) => r.tenant_id),
+    contactTenants: contactRows.rows.map((r) => r.tenant_id),
+    contactCrossInsertBlocked,
     crossInsertBlocked,
   };
 });
@@ -154,9 +180,11 @@ const seen = await db.transaction(async (tx): Promise<Seen> => {
 assert.deepEqual(seen.members, [TENANT_A]);
 assert.deepEqual(seen.usageTenants, [TENANT_A]);
 assert.deepEqual(seen.auditTenants, [TENANT_A]);
+assert.deepEqual(seen.contactTenants, [TENANT_A]);
+assert.equal(seen.contactCrossInsertBlocked, true);
 assert.equal(seen.crossInsertBlocked, true);
 console.log(
-  "[5] RLS: konteks tenant A hanya melihat data A (members/usage/audit), insert lintas tenant ditolak: OK",
+  "[5] RLS: konteks tenant A hanya melihat data A (members/usage/audit/contacts), insert lintas tenant ditolak: OK",
 );
 
 // ---------- 5. Lengan app.user_id pada policy tenant_members (Fase 1B) ----------

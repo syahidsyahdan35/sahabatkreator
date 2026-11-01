@@ -162,3 +162,41 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   /register menampilkan "Create your account" (Full name/Email/Password)
   dalam bahasa Inggris (default). Uji klik UI penuh dari VM tetap dibatasi
   artefak POST proxy egress VM seperti fase sebelumnya.
+
+---
+
+## Update Fase 1D — Skema channel/kontak/inbox + API kontak & percakapan (2026-11-02)
+
+### Perubahan
+- DB: migrasi `0004_channels_inbox_schema` (generate) + `0005_rls_channels_inbox`
+  (custom, pola RLS 0001) — 6 tabel baru: `channel_accounts`,
+  `channel_identities`, `contacts`, `media`, `conversations`, `messages`
+  (total 21 tabel, 14 policy RLS). Migrasi dijalankan ke staging via SSH
+  port-forward dengan role migrasi dari `.env.staging` (file tidak disentuh).
+  Grant `sk_app` atas tabel baru otomatis dari ALTER DEFAULT PRIVILEGES
+  Fase 1B — terverifikasi `has_table_privilege`.
+- API baru (semua wajib sesi + membership, non-member → 404):
+  `POST/GET /api/tenants/:tenantId/contacts`, `GET/PATCH .../contacts/:id`,
+  `GET .../conversations(?status=)`, `GET/POST .../conversations/:id/messages`.
+  POST pesan = fondasi inbox manual: pesan outbound `sender_type=user`
+  berstatus `queued` + audit `message.queued`, **belum dikirim ke channel**
+  (stub; pengiriman menunggu adapter channel). Web tidak berubah fase ini.
+- Deploy: build API di VM → rsync repo → proses API milik `ubuntu`
+  dihentikan → systemd `Restart=always` mengangkat binary baru dari
+  `dist` hasil rsync (service `sahabat-kreator-api` active, health ok).
+
+### Verifikasi Fase 1D (publik, dari server terhadap https://botara.my.id)
+- Skrip E2E (Python di server, akun uji BARU `fase1d-pub1b@sk.test` &
+  `fase1d-pub2b@sk.test`): **18/18 PASS** — sign-up → buat tenant →
+  POST kontak 201 → GET daftar/search berisi kontak → PATCH
+  (pipeline_stage + opt_in_status) → seed SQL langsung (channel_account
+  webchat + conversation + 1 pesan inbound) → GET conversations menampilkan
+  nama kontak + cuplikan pesan terakhir → GET messages berisi inbound →
+  POST balasan → 201 status `queued` (terkonfirmasi di DB) + audit
+  `message.queued` tercatat → urutan pesan kronologis benar → user kedua
+  mengakses kontak/conversations tenant pertama → 404 `TENANT_NOT_FOUND` →
+  tanpa sesi → 401 → `/api/health` ok.
+- Catatan alat uji: request Python `urllib` tanpa User-Agent diblokir
+  Cloudflare (403); dengan UA browser lolos. Bukan isu aplikasi.
+- PGlite lokal: migrasi 0000–0005 bersih, isolasi RLS `contacts` antar
+  tenant terbukti (hanya melihat tenant sendiri; insert lintas ditolak).

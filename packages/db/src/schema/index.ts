@@ -7,3 +7,5 @@ export * from "./identity";
 export * from "./tenants";
 export * from "./system";
 export * from "./auth";
+export * from "./channels";
+export * from "./inbox";
