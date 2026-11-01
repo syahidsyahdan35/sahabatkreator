@@ -323,3 +323,73 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   dijalankan dari VM; yang terbukti adalah seluruh protokol yang dipakai
   widget (REST + WS persis seperti implementasi widget) terhadap URL
   publik asli, file widget tersaji publik, dan halaman demo termuat.
+
+---
+
+## Update Fase 2A — Worker + antrean BullMQ + automation keyword (2026-11-02)
+
+### Perubahan
+- **DB:** migrasi `0007_automations_schema` (generate: tabel `automations`
+  & `automation_runs` + index unik parsial `(automation_id,
+  trigger_message_id)` sebagai penjaga idempotensi) dan
+  `0008_rls_automations_outbox_relay` (RLS tenant_isolation untuk kedua
+  tabel baru + policy kedua `system_relay` pada `outbox_events`). Total
+  staging: 23 tabel, 17 policy. Verifikasi PGlite lokal membuktikan lengan
+  relay: tanpa setting, outbox tak terlihat role aplikasi; dengan
+  `app.system_relay='outbox'`, event semua tenant terbaca.
+  - Catatan perbaikan yang ikut ter-commit: snapshot meta 0006 sebelumnya
+    adalah salinan persis 0005 (id sama) sehingga `drizzle-kit generate`
+    gagal karena tabrakan rantai snapshot — id/prevId 0006 diperbaiki.
+  - Nilai `when` jurnal 0007/0008 harus LEBIH BESAR dari `when` migrasi
+    terakhir yang sudah teraplikasi (0006 = 1793563200000); timestamp hasil
+    generate ternyata lebih kecil dan membuat drizzle melewatkan migrasi —
+    sudah diselaraskan (…201000/…202000).
+- **Antrean:** container khusus proyek `sahabat-kreator-redis`
+  (redis:7-alpine, hanya `127.0.0.1:6381`, volume `sahabat-kreator-redisdata`,
+  AOF, restart unless-stopped) — Redis proyek lain TIDAK dipakai.
+  `REDIS_URL=redis://127.0.0.1:6381` ditambahkan ke `.env.staging` (600).
+- **Worker BARU:** unit `sahabat-kreator-worker.service` (Bun menjalankan
+  `apps/worker/dist/index.js`, `EnvironmentFile=.env.staging`,
+  `Restart=always`). Isi: (1) relay outbox polling ±2 dtk — klaim event
+  belum ter-publish `FOR UPDATE SKIP LOCKED` dalam transaksi
+  `app.system_relay`, event `message.received` → job BullMQ
+  `automation.evaluate` dengan jobId `automation-evaluate-<eventId>`;
+  (2) BullMQ Worker yang menjalankan evaluasi keyword di core.
+- **Jembatan pengiriman lintas proses:** hub WS hidup di API, worker proses
+  lain. Worker hanya membuat balasan outbound `sender_type='system'`
+  berstatus `queued` (+ run `completed`, audit `automation.fired`, event
+  outbox `message.queued`). Poller baru di API (±2 dtk) mengambil pesan
+  `queued` untuk percakapan webchat yang pengunjungnya sedang terhubung
+  (tenant diketahui dari token WS — tetap per-tenant lewat RLS), mendorong
+  lewat hub, menandai `sent`. Jalur balasan dashboard 1D/1F tidak berubah.
+- **API baru:** `POST/GET /api/tenants/:tenantId/automations`,
+  `PATCH .../automations/:id`, `GET .../automations/:id/runs`
+  (sesi + membership; non-member 404; skema Zod di contracts).
+- Deploy: build api+worker di VM → migrasi via SSH port-forward (role
+  migrasi) → rsync repo → unit worker dipasang (file ditulis ke home dulu
+  lalu `sudo cp`, pola Fase 1B) → API di-restart, worker di-enable.
+  Service proyek lain tidak disentuh.
+
+### Verifikasi Fase 2A (publik, dari server terhadap https://botara.my.id)
+- Skrip E2E Bun di server (akun uji BARU `fase2a-*@sk.test`, pengunjung
+  "Budi Uji"): **25/25 PASS** —
+  sign-up → tenant → channel webchat → automation exact `HARGA` dengan
+  balasan berisi `{name}` → pengunjung kirim "halo" → 8 dtk TANPA balasan
+  otomatis → kirim "harga" (huruf kecil) → balasan otomatis tiba via WS
+  dengan nama kontak ter-render → di API dashboard pesan outbound
+  `sender_type=system` berstatus `sent` → `automation_runs` 1 `completed`
+  dengan triggerMessageId yang benar → kirim "HARGA" lagi (pesan baru) →
+  balasan kedua tiba, runs total 2 → audit `automation.fired` tercatat 2x
+  di DB → **worker di-restart: runs untuk pesan pemicu pertama tetap 1**
+  (relay tidak menggandakan) → PATCH `isActive=false` → kirim keyword →
+  tidak ada balasan baru → user tenant lain: GET automations & runs → 404
+  → tanpa sesi → 401 → daftar automation memuat `runCount=2`.
+- Operasional: `sahabat-kreator-worker/api/web` active; container
+  `sahabat-kreator-redis` Up; `GET https://botara.my.id/api/health` ok;
+  log worker menunjukkan relay mem-publish event & job evaluate berjalan.
+- Batas jujur: latensi balasan otomatis end-to-end dibatasi relay worker
+  ±2 dtk + poller API ±2 dtk + antrean (umumnya <5 dtk; uji memakai batas
+  tunggu 25 dtk). Web UI untuk automation belum ada (fase berikutnya) —
+  pengelolaan automation fase ini murni API. Idempotensi teruji pada
+  restart worker & relay ulang; skenario dua worker balapan dilindungi
+  klaim SKIP LOCKED + index unik, belum diuji beban.
