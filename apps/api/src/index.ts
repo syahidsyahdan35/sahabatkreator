@@ -15,9 +15,12 @@ import {
 const env = loadEnv();
 const startedAt = Date.now();
 
-export const app = new Hono();
+// Route inti didefinisikan sekali di sub-app `routes`, lalu di-mount dua kali
+// di app utama: di root (akses langsung ke API) dan di bawah prefix /api
+// (akses lewat proxy web — staging & publik memakai https://<domain>/api/...).
+const routes = new Hono();
 
-app.get("/health", (c) => {
+routes.get("/health", (c) => {
   const body: HealthResponse = HealthResponseSchema.parse({
     status: "ok",
     service: "api",
@@ -27,7 +30,7 @@ app.get("/health", (c) => {
   return c.json(body);
 });
 
-app.get("/version", (c) => {
+routes.get("/version", (c) => {
   const body: VersionResponse = VersionResponseSchema.parse({
     service: "api",
     version: APP_VERSION,
@@ -35,6 +38,10 @@ app.get("/version", (c) => {
   });
   return c.json(body);
 });
+
+export const app = new Hono();
+app.route("/", routes);
+app.route("/api", routes);
 
 // Modul bisnis (auth, tenants, channels, inbox, automations, agents, ...)
 // dipasang di sini sebagai sub-app Hono per modul — lihat src/modules/.
