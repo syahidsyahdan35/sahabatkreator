@@ -36,6 +36,9 @@ Target publik: `https://botara.my.id/` → SPA Sahabat Kreator;
     --port 5180 --host 127.0.0.1`, `Restart=always`.
 - Environment staging tahap ini TANPA kredensial apa pun (belum ada API key,
   database, atau Redis yang dipakai API Fase 0).
+- `apps/web/vite.config.ts` mendaftarkan `preview.allowedHosts: ["botara.my.id"]`
+  — tanpa ini Vite preview menjawab 403 untuk semua request ber-Host
+  botara.my.id (proteksi DNS rebinding), walau dari localhost tampak normal.
 
 ## Pengambilalihan domain
 
