@@ -453,3 +453,99 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   label dwibahasa ada di bundle itu, rute SPA termuat, dan seluruh rantai
   HTTP yang dipanggil UI (termasuk PATCH sakelar dan GET runs untuk modal
   riwayat) lolos end-to-end terhadap URL publik asli.
+
+---
+
+## Update Fase 3A — AI Agent backend (KB/FTS, loop agent di worker, mode auto/suggest) (2026-11-02)
+
+### Perubahan
+- **DB:** migrasi `0009_agents_kb_schema` (generate + `CREATE EXTENSION
+  vector` di kepala file) dan `0010_rls_agents_kb` (RLS tenant_isolation).
+  Tabel baru: `agents` (mode `auto|suggest`, `is_active` default false),
+  `kb_documents`, `kb_chunks` (`search_vector` tsvector TER-GENERATE
+  `to_tsvector('simple', content)` + GIN index; `embedding vector(1536)`
+  NULLABLE disiapkan untuk fase embedding — retrieval v1 full-text), dan
+  `agent_suggestions` (draf mode suggest). Total staging: **27 tabel,
+  21 policy**, ekstensi `vector` aktif. Jurnal: `when` 0009/0010
+  diselaraskan manual (…203000/…204000) — jebakan yang sama seperti 2A.
+  Saklar AI per percakapan memakai kolom `conversations.agent_enabled`
+  yang SUDAH ada sejak Fase 1D (tidak ada kolom `ai_enabled` duplikat).
+- **Provider LLM (@sahabat-kreator/ai, baru nyata):** kontrak
+  `chat({system, messages, tools, kbChunks})`. **MockProvider**
+  deterministik = default (`LLM_PROVIDER=mock`): mengutip kalimat pertama
+  chunk KB teratas & selalu memanggil tool `tag_contact 'ai-lead'`
+  (perilaku terdokumentasi agar retrieval + eksekusi tool terbukti).
+  **OpenRouterProvider** tersedia (function calling + fallback teks,
+  timeout 30 dtk) tetapi **BELUM aktif di staging**: `OPENROUTER_API_KEY`
+  terkonfirmasi TIDAK ada di `.env.staging` (hanya dihitung, nilai tidak
+  pernah dibaca). Aktivasi model sungguhan = tambahkan
+  `OPENROUTER_API_KEY` + `LLM_PROVIDER=openrouter` (+ opsional
+  `OPENROUTER_MODEL`) ke `.env.staging`, lalu restart api & worker.
+- **Runtime (core `agent-runtime.ts` + worker):** relay outbox →
+  `automation.evaluate`; setelah evaluasi TANPA tembakan, worker
+  meng-enqueue `agent.respond` (jobId `agent-respond-<messageId>`) —
+  urutan keyword → AI pasti. Loop: konteks RLS (riwayat 20 pesan),
+  retrieval KB (token pertanyaan di-OR-kan + `ts_rank`, top 5 —
+  plainto_tsquery sengaja TIDAK dipakai karena semantik AND-nya gagal
+  untuk pertanyaan alami; terbukti di verify PGlite), panggil provider,
+  catat `usage_ledger` type `ai_token` refType `agent_response`
+  (qty = total token; rincian provider/model/token di audit
+  `agent.responded` karena ledger tak punya kolom metadata) + caps
+  **200 respons/tenant/hari** (audit `agent.capped`). Mode `auto`: tool
+  dieksekusi (`tag_contact`, `move_pipeline_stage` ke stage valid
+  new/engaged/qualified/customer, `handoff_to_human` →
+  `agent_enabled=false` + audit `agent.handoff`) lalu balasan menjadi
+  pesan `sender_type='agent'` `queued` (poller API mengirim seperti
+  automation). Mode `suggest`: draf `agent_suggestions` pending; tool
+  TIDAK dieksekusi, dan approve manusia hanya mengirim teks saran.
+  Provider error → audit `agent.failed`, tidak ada pesan kosong.
+- **API baru (sesi + membership):** `POST/GET /api/tenants/:tenantId/agents`,
+  `PATCH .../agents/:id`, `POST/GET .../kb/documents`,
+  `GET/DELETE .../kb/documents/:id`, `GET .../suggestions?status=`,
+  `POST .../suggestions/:id/approve|reject`. Web TIDAK berubah fase ini.
+- Deploy: build api+worker di VM → commit `0f37ed3` → rsync repo
+  (`.env.staging` server dikecualikan & utuh) → **migrasi dijalankan di
+  server** dengan drizzle-kit di bawah Bun memakai `MIGRATION_DATABASE_URL`
+  dari `.env.staging` (kredensial tidak keluar server) → proses api &
+  worker milik `ubuntu` dihentikan → systemd `Restart=always` mengangkat
+  binary baru. Log worker memastikan: `provider LLM agent: mock`.
+
+### Verifikasi Fase 3A
+- Lokal: typecheck SEMUA proyek hijau; build api+worker hijau;
+  `packages/db` verify (PGlite, ekstensi vector didaftarkan): 27 tabel,
+  21 policy, RLS agents/KB per tenant + `search_vector` ter-generate +
+  retrieval menemukan chunk yang benar. Uji integrasi executor tool
+  (`apps/worker` script `verify:agent-tools`, PGlite + provider stub):
+  handoff mematikan `agent_enabled` + audit & pesan berikut ditolak
+  `ai_disabled`; tag/stage dieksekusi, stage invalid & tool asing ditolak
+  halus; mode suggest tanpa eksekusi tool; approve/reject/not_pending;
+  caps 200/hari → `capped` + audit. SEMUA LULUS.
+- Publik dari server terhadap `https://botara.my.id` (skrip Bun, akun uji
+  BARU `fase3a-*@sk.test`, pengunjung "Dewi Uji 3A"): **31/31 PASS** —
+  tenant → channel webchat → agent auto aktif → KB "Harga kelas Rekaman
+  Kilat adalah Rp349 ribu dan garansi 7 hari." (chunkCount ≥1) →
+  automation keyword `promo` → pengunjung tanya "berapa harga kelas
+  rekaman kilat?" → **balasan agent tiba via WS memuat "349"** → di
+  dashboard pesan agent `sent` → kontak bertag `ai-lead` → kirim "promo"
+  → balasan automation tiba, agent TIDAK menjawab ganda → PATCH mode
+  suggest → tanya garansi → saran `pending` berisi "349", TIDAK ada pesan
+  keluar → approve → saran `sent` + pesan tiba di pengunjung → saran
+  kedua → reject → `rejected` → tenant lain 404 (agents/kb/suggestions)
+  → tanpa sesi 401 → health ok.
+- DB staging terkonfirmasi untuk tenant uji: `usage_ledger` ai_token
+  `agent_response` = 3 (qty terakhir 247 token estimasi mock, cost 0),
+  audit `agent.responded` = 3, `contact.tagged` = 1,
+  `agent.suggestion_approved/rejected` = 1/1, `kb_chunks.search_vector`
+  terisi, pesan `sender_type='agent'` berstatus `sent` = 2. Worker
+  `active`; `has_table_privilege` sk_app atas 4 tabel baru = true
+  (ALTER DEFAULT PRIVILEGES Fase 1B bekerja).
+- Batas jujur: (1) staging memakai **MockProvider** — balasan "AI" saat
+  ini adalah kutipan deterministik chunk KB, BUKAN model bahasa sungguhan;
+  jalur OpenRouter selesai di kode & teruji tipe, tetapi belum pernah
+  memanggil API OpenRouter dari staging karena kuncinya memang belum
+  dipasang (keputusan: jangan minta kunci lewat chat — pasang langsung
+  di `.env.staging` server). (2) Retrieval v1 full-text OR-token +
+  ts_rank; embedding pgvector belum dipakai. (3) Latensi balasan agent
+  dibatasi relay ±2 dtk + antrean + poller ±2 dtk (umumnya <10 dtk).
+  (4) UI agent/KB belum ada (fase berikutnya) — pengelolaan fase ini
+  murni API. (5) Satu agent aktif tertua per tenant yang dipakai runtime.
