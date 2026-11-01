@@ -4,6 +4,7 @@ import { createDb } from "@sahabat-kreator/db";
 import { createLlmProvider } from "@sahabat-kreator/ai";
 import {
   evaluateInboundMessageForAutomations,
+  executeSequenceStep,
   relayUnpublishedOutboxEvents,
   respondToInboundMessage,
 } from "@sahabat-kreator/core";
@@ -11,13 +12,16 @@ import {
   AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
   MAIN_QUEUE_NAME,
+  SEQUENCE_STEP_JOB,
   createAutomationQueue,
   createRedisConnection,
   enqueueAgentRespond,
   enqueueAutomationEvaluate,
+  enqueueSequenceStep,
   type AgentRespondJobData,
   type AutomationEvaluateJobData,
   type MainJobData,
+  type SequenceStepJobData,
 } from "@sahabat-kreator/queue";
 
 /**
@@ -46,6 +50,13 @@ import {
  *    LLM (mock default / OpenRouter via env) → eksekusi tool / draf
  *    saran → metering usage_ledger + audit. Balasan agent juga berhenti
  *    sebagai pesan `queued`; poller API yang mengirimnya lewat hub WS.
+ * 4. LANGKAH SEQUENCE (Fase 2C): relay juga menerjemahkan event outbox
+ *    `sequence.step_due` menjadi job tertunda `sequence.step`
+ *    (delay = delay_minutes langkah, jobId `seq-<enrollmentId>-<posisi>`).
+ *    Processor-nya menjalankan `executeSequenceStep` di core: kirim satu
+ *    langkah sebagai pesan `queued`, majukan enrollment, jadwalkan
+ *    langkah berikut (atau selesaikan). Pesan pemicu sequence dihitung
+ *    sebagai tembakan automation — tidak diteruskan ke agent.
  *
  * Worker TIDAK mengirim pesan ke pengunjung: hub WebSocket webchat hidup
  * di proses API. Balasan automation berhenti sebagai pesan `queued`;
@@ -96,6 +107,8 @@ const bullWorker = new Worker<MainJobData>(
       // dan TIDAK ada automation yang menembak (dan bukan duplikat dari
       // tembakan sebelumnya), pesan diteruskan ke agent. Agent sendiri
       // memeriksa ulang kelayakannya (agent aktif, ai_enabled, caps).
+      // Fase 2C: pendaftaran sequence dihitung sebagai tembakan (fired),
+      // jadi pesan pemicu sequence TIDAK pernah diteruskan ke agent.
       if (
         result.evaluated &&
         result.fired.length === 0 &&
@@ -107,6 +120,25 @@ const bullWorker = new Worker<MainJobData>(
           messageId: data.messageId,
         });
       }
+      return result;
+    }
+    if (job.name === SEQUENCE_STEP_JOB) {
+      // Fase 2C: satu langkah sequence. Eksekusi, aturan berhenti, dan
+      // penjadwalan langkah berikutnya (lewat event outbox) ada di core;
+      // worker hanya menjalankan dan mencatat hasilnya.
+      const data = job.data as SequenceStepJobData;
+      const result = await executeSequenceStep(db, {
+        tenantId: data.tenantId,
+        enrollmentId: data.enrollmentId,
+        stepPosition: data.stepPosition,
+      });
+      console.log(
+        `[worker] sequence.step enrollment=${data.enrollmentId} position=${data.stepPosition} executed=${result.executed}` +
+          (result.reason ? ` reason=${result.reason}` : "") +
+          (result.nextStepPosition !== undefined
+            ? ` next=${result.nextStepPosition ?? "done"}`
+            : ""),
+      );
       return result;
     }
     if (job.name === AGENT_RESPOND_JOB) {
@@ -150,8 +182,38 @@ async function relayTick(): Promise<void> {
   relayRunning = true;
   try {
     const processed = await relayUnpublishedOutboxEvents(db, async (_tx, event) => {
-      if (event.type !== "message.received") return;
       if (!event.tenantId) return;
+      // Fase 2C: langkah sequence jatuh tempo → job BullMQ TERTUNDA.
+      // Titik mulai delay digeser ke saat event ter-relay (±2 dtk dari
+      // jadwal ideal di next_run_at) — toleransi terdokumentasi.
+      if (event.type === "sequence.step_due") {
+        const payload = event.payload as {
+          enrollmentId?: unknown;
+          stepPosition?: unknown;
+          delayMinutes?: unknown;
+        };
+        if (
+          typeof payload.enrollmentId !== "string" ||
+          typeof payload.stepPosition !== "number" ||
+          typeof payload.delayMinutes !== "number"
+        ) {
+          console.warn(
+            `[worker] event sequence.step_due ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        await enqueueSequenceStep(
+          queue,
+          {
+            tenantId: event.tenantId,
+            enrollmentId: payload.enrollmentId,
+            stepPosition: payload.stepPosition,
+          },
+          payload.delayMinutes * 60_000,
+        );
+        return;
+      }
+      if (event.type !== "message.received") return;
       const payload = event.payload as {
         conversationId?: unknown;
         messageId?: unknown;

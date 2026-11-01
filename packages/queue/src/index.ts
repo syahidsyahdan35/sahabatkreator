@@ -13,6 +13,9 @@ import { Redis } from "ioredis";
  *  - `agent.respond` — agent AI menanggapi satu pesan inbound (Fase 3A),
  *    di-enqueue processor automation.evaluate SETELAH evaluasi selesai
  *    tanpa tembakan (keyword dulu, AI kemudian).
+ *  - `sequence.step` — satu langkah sequence automation (Fase 2C), job
+ *    TERTUNDA yang di-enqueue relay dari event outbox `sequence.step_due`
+ *    dengan jobId `seq-<enrollmentId>-<position>`.
  *  - `outbox.relay` — BUKAN job yang di-enqueue siapa pun: relay adalah pola
  *    polling yang dijalankan worker. Worker membaca `outbox_events` yang
  *    belum ter-publish langsung dari Postgres (klaim FOR UPDATE SKIP
@@ -44,6 +47,7 @@ export const MAIN_QUEUE_NAME = "sahabat-kreator";
 export const OUTBOX_RELAY_JOB = "outbox.relay";
 export const AUTOMATION_EVALUATE_JOB = "automation.evaluate";
 export const AGENT_RESPOND_JOB = "agent.respond";
+export const SEQUENCE_STEP_JOB = "sequence.step";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -67,9 +71,32 @@ export interface AgentRespondJobData {
   messageId: string;
 }
 
+/**
+ * Job Fase 2C: jalankan SATU langkah sequence untuk satu enrollment.
+ * Di-enqueue oleh relay outbox dari event `sequence.step_due` (yang ditulis
+ * core saat enrollment dibuat dan setiap langkah selesai), sebagai job
+ * TERTUNDA BullMQ dengan delay = delay_minutes langkah itu. jobId
+ * deterministik `seq-<enrollmentId>-<stepPosition>`: relay yang memproses
+ * event yang sama dua kali tidak menghasilkan dua job untuk langkah yang
+ * sama; eksekusi ganda pun aman karena core menolak posisi basi.
+ */
+export interface SequenceStepJobData {
+  tenantId: string;
+  enrollmentId: string;
+  stepPosition: number;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
+}
+
+/** jobId deterministik satu langkah sequence: `seq-<enrollmentId>-<position>`. */
+export function sequenceStepJobId(
+  enrollmentId: string,
+  stepPosition: number,
+): string {
+  return `seq-${enrollmentId}-${stepPosition}`;
 }
 
 /** jobId deterministik dari id pesan pemicu agent. */
@@ -87,7 +114,10 @@ export function createRedisConnection(redisUrl: string): Redis {
 }
 
 /** Semua data job yang berjalan di antrean fisik utama. */
-export type MainJobData = AutomationEvaluateJobData | AgentRespondJobData;
+export type MainJobData =
+  | AutomationEvaluateJobData
+  | AgentRespondJobData
+  | SequenceStepJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -140,4 +170,29 @@ export async function enqueueAgentRespond(
     ...options,
   });
   return job.id ?? agentRespondJobId(data.messageId);
+}
+
+/**
+ * Meng-enqueue satu langkah sequence sebagai job TERTUNDA BullMQ.
+ * `delayMs` dihitung pemanggil dari delay_minutes langkah (relay menggeser
+ * titik mulai delay ke saat event ter-relay, ±2 dtk dari jadwal ideal —
+ * toleransi yang terdokumentasi untuk staging). Aman dipanggil berulang:
+ * jobId diturunkan dari (enrollmentId, posisi langkah).
+ */
+export async function enqueueSequenceStep(
+  queue: MainQueue,
+  data: SequenceStepJobData,
+  delayMs: number,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(SEQUENCE_STEP_JOB, data, {
+    jobId: sequenceStepJobId(data.enrollmentId, data.stepPosition),
+    delay: Math.max(0, Math.floor(delayMs)),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? sequenceStepJobId(data.enrollmentId, data.stepPosition);
 }

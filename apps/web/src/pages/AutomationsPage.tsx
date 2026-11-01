@@ -6,9 +6,11 @@ import {
   type FormEvent,
 } from "react";
 import type {
+  AutomationKind,
   AutomationMatch,
   AutomationResponse,
   AutomationRunResponse,
+  SequenceEnrollmentResponse,
 } from "@sahabat-kreator/contracts";
 import {
   formatNumber,
@@ -43,9 +45,11 @@ interface AutomationsPageProps {
 }
 
 /**
- * Halaman Automations (Fase 2B): pengelolaan automation keyword workspace
- * aktif lewat API 2A — daftar + sakelar aktif, form buat/edit, dan riwayat
- * eksekusi (runs). Semua teks lewat i18n; tanggal lewat Intl.
+ * Halaman Automations (Fase 2B; sequence Fase 2C): pengelolaan automation
+ * workspace aktif — daftar + sakelar aktif, form buat/edit untuk dua jenis
+ * (balasan keyword & rangkaian pesan/sequence), riwayat eksekusi (runs)
+ * untuk keyword, dan daftar pendaftaran (enrollments) untuk sequence.
+ * Semua teks lewat i18n; tanggal lewat Intl.
  */
 export function AutomationsPage({ t, locale }: AutomationsPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
@@ -218,6 +222,13 @@ export function AutomationsPage({ t, locale }: AutomationsPageProps) {
                     })}
                   </span>
                 </button>
+                <span className="shrink-0 rounded-full bg-elevated px-2 py-0.5 text-xs font-semibold text-ink">
+                  {t(
+                    automation.kind === "sequence"
+                      ? "automations.kindChipSequence"
+                      : "automations.kindChipKeyword",
+                  )}
+                </span>
                 <span
                   className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
                     automation.isActive
@@ -259,16 +270,33 @@ export function AutomationsPage({ t, locale }: AutomationsPageProps) {
                   ))}
                 </div>
               ) : null}
-              <p className="mt-2 line-clamp-2 text-sm text-muted">
-                {automation.text}
-              </p>
+              {automation.kind === "sequence" ? (
+                <p className="mt-2 text-sm text-muted">
+                  {t("automations.stepsCountLabel", {
+                    count: formatNumber(automation.stepCount, locale),
+                  })}
+                  {automation.steps.length > 0
+                    ? ` · ${automation.steps
+                        .map((s) => `+${s.delayMinutes}m`)
+                        .join(" → ")}`
+                    : ""}
+                </p>
+              ) : (
+                <p className="mt-2 line-clamp-2 text-sm text-muted">
+                  {automation.text}
+                </p>
+              )}
               <div className="mt-3 flex gap-2">
                 <button
                   type="button"
                   onClick={() => setRunsTarget(automation)}
                   className="rounded-lg bg-elevated px-3 py-1.5 text-xs font-medium text-ink"
                 >
-                  {t("automations.historyButton")}
+                  {t(
+                    automation.kind === "sequence"
+                      ? "automations.enrollmentsButton"
+                      : "automations.historyButton",
+                  )}
                 </button>
                 <button
                   type="button"
@@ -302,13 +330,23 @@ export function AutomationsPage({ t, locale }: AutomationsPageProps) {
       ) : null}
 
       {runsTarget ? (
-        <RunsModal
-          t={t}
-          locale={locale}
-          tenantId={active.id}
-          automation={runsTarget}
-          onClose={() => setRunsTarget(null)}
-        />
+        runsTarget.kind === "sequence" ? (
+          <EnrollmentsModal
+            t={t}
+            locale={locale}
+            tenantId={active.id}
+            automation={runsTarget}
+            onClose={() => setRunsTarget(null)}
+          />
+        ) : (
+          <RunsModal
+            t={t}
+            locale={locale}
+            tenantId={active.id}
+            automation={runsTarget}
+            onClose={() => setRunsTarget(null)}
+          />
+        )
       ) : null}
     </section>
   );
@@ -334,7 +372,14 @@ function AutomationFormModal({
   const [match, setMatch] = useState<AutomationMatch>(
     automation?.match ?? "exact",
   );
+  // Jenis hanya bisa dipilih saat MEMBUAT; saat edit mengikuti yang tersimpan.
+  const [kind, setKind] = useState<AutomationKind>(
+    automation?.kind ?? "keyword",
+  );
   const [text, setText] = useState(automation?.text ?? "");
+  const [stepRows, setStepRows] = useState<
+    { delay: string; text: string }[]
+  >([{ delay: "0", text: "" }]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -347,19 +392,61 @@ function AutomationFormModal({
       return setError(t("automations.keywordsRequired"));
     if (parsedKeywords.length > 10)
       return setError(t("automations.keywordsTooMany"));
-    if (!text.trim()) return setError(t("automations.textRequired"));
     setError(null);
     setSubmitting(true);
     try {
-      const payload = {
+      if (automation) {
+        if (automation.kind === "keyword" && !text.trim())
+          return setError(t("automations.textRequired"));
+        // Edit: nama/keywords/match untuk kedua jenis; teks hanya keyword.
+        // Langkah sequence tidak bisa diubah (catatan di formulir).
+        const saved = await api.automations.update(tenantId, automation.id, {
+          name: trimmedName,
+          keywords: parsedKeywords,
+          match,
+          ...(automation.kind === "keyword" ? { text: text.trim() } : {}),
+        });
+        onSaved(saved);
+        return;
+      }
+      if (kind === "sequence") {
+        if (stepRows.length === 0)
+          return setError(t("automations.stepsRequired"));
+        if (stepRows.length > 10)
+          return setError(t("automations.stepsTooMany"));
+        const steps = stepRows.map((row) => ({
+          delayMinutes: Number(row.delay),
+          text: row.text.trim(),
+        }));
+        if (
+          steps.some(
+            (s) =>
+              !Number.isInteger(s.delayMinutes) ||
+              s.delayMinutes < 0 ||
+              s.delayMinutes > 43200,
+          )
+        )
+          return setError(t("automations.stepDelayInvalid"));
+        if (steps.some((s) => !s.text))
+          return setError(t("automations.stepTextRequired"));
+        const saved = await api.automations.create(tenantId, {
+          kind: "sequence",
+          name: trimmedName,
+          keywords: parsedKeywords,
+          match,
+          steps,
+        });
+        onSaved(saved);
+        return;
+      }
+      if (!text.trim()) return setError(t("automations.textRequired"));
+      const saved = await api.automations.create(tenantId, {
+        kind: "keyword",
         name: trimmedName,
         keywords: parsedKeywords,
         match,
         text: text.trim(),
-      };
-      const saved = automation
-        ? await api.automations.update(tenantId, automation.id, payload)
-        : await api.automations.create(tenantId, payload);
+      });
       onSaved(saved);
     } catch (err) {
       setError(translateApiError(t, err));
@@ -401,6 +488,46 @@ function AutomationFormModal({
               className={inputClassName}
             />
           </label>
+          {!automation ? (
+            <fieldset>
+              <legend className="mb-1 text-xs font-medium text-muted">
+                {t("automations.kindLabel")}
+              </legend>
+              <div className="space-y-2">
+                {(["keyword", "sequence"] as const).map((value) => (
+                  <label
+                    key={value}
+                    className="flex cursor-pointer items-start gap-2 rounded-lg border border-line bg-surface p-3"
+                  >
+                    <input
+                      type="radio"
+                      name="automation-kind"
+                      value={value}
+                      checked={kind === value}
+                      onChange={() => setKind(value)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-ink">
+                        {t(
+                          value === "keyword"
+                            ? "automations.kindKeyword"
+                            : "automations.kindSequence",
+                        )}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-muted">
+                        {t(
+                          value === "keyword"
+                            ? "automations.kindKeywordHint"
+                            : "automations.kindSequenceHint",
+                        )}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ) : null}
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-muted">
               {t("automations.keywordsLabel")} *
@@ -453,21 +580,124 @@ function AutomationFormModal({
               ))}
             </div>
           </fieldset>
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">
-              {t("automations.textLabel")} *
-            </span>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={t("automations.textPlaceholder")}
-              rows={4}
-              className={inputClassName}
-            />
-            <span className="mt-1 block text-[11px] text-muted">
-              {t("automations.textHint")}
-            </span>
-          </label>
+          {automation?.kind === "sequence" ? (
+            <div>
+              <span className="mb-1 block text-xs font-medium text-muted">
+                {t("automations.stepsLabel")}
+              </span>
+              <ul className="space-y-2">
+                {automation.steps.map((step) => (
+                  <li
+                    key={step.position}
+                    className="rounded-lg border border-line bg-surface p-3 text-sm"
+                  >
+                    <span className="font-medium text-ink">
+                      {step.position}. +{step.delayMinutes}{" "}
+                      {t("automations.stepDelayLabel")}
+                    </span>
+                    <span className="mt-0.5 block text-muted">{step.text}</span>
+                  </li>
+                ))}
+              </ul>
+              <span className="mt-1 block text-[11px] text-muted">
+                {t("automations.stepsLockedNote")}
+              </span>
+            </div>
+          ) : kind === "sequence" ? (
+            <div>
+              <span className="mb-1 block text-xs font-medium text-muted">
+                {t("automations.stepsLabel")} *
+              </span>
+              <div className="space-y-2">
+                {stepRows.map((row, i) => (
+                  <div
+                    key={i}
+                    className="rounded-lg border border-line bg-surface p-3"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-ink">
+                        {i + 1}.
+                      </span>
+                      <label className="flex items-center gap-1 text-xs text-muted">
+                        {t("automations.stepDelayLabel")}
+                        <input
+                          type="number"
+                          min={0}
+                          max={43200}
+                          step={1}
+                          value={row.delay}
+                          onChange={(e) =>
+                            setStepRows((prev) =>
+                              prev.map((r, j) =>
+                                j === i ? { ...r, delay: e.target.value } : r,
+                              ),
+                            )
+                          }
+                          className="w-24 rounded-md border border-line bg-surface px-2 py-1 text-sm text-ink"
+                        />
+                      </label>
+                      {stepRows.length > 1 ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setStepRows((prev) =>
+                              prev.filter((_, j) => j !== i),
+                            )
+                          }
+                          className="ml-auto rounded-md bg-elevated px-2 py-1 text-xs font-medium text-ink"
+                        >
+                          {t("automations.removeStepButton")}
+                        </button>
+                      ) : null}
+                    </div>
+                    <textarea
+                      value={row.text}
+                      onChange={(e) =>
+                        setStepRows((prev) =>
+                          prev.map((r, j) =>
+                            j === i ? { ...r, text: e.target.value } : r,
+                          ),
+                        )
+                      }
+                      placeholder={t("automations.stepTextPlaceholder")}
+                      rows={2}
+                      className={`${inputClassName} mt-2`}
+                    />
+                  </div>
+                ))}
+              </div>
+              {stepRows.length < 10 ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setStepRows((prev) => [...prev, { delay: "60", text: "" }])
+                  }
+                  className="mt-2 rounded-lg bg-elevated px-3 py-1.5 text-xs font-medium text-ink"
+                >
+                  {t("automations.addStepButton")}
+                </button>
+              ) : null}
+              <span className="mt-1 block text-[11px] text-muted">
+                {t("automations.stepsHint")} {t("automations.textHint")}
+              </span>
+            </div>
+          ) : (
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-muted">
+                {t("automations.textLabel")} *
+              </span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={t("automations.textPlaceholder")}
+                rows={4}
+                className={inputClassName}
+              />
+              <span className="mt-1 block text-[11px] text-muted">
+                {t("automations.textHint")}
+              </span>
+            </label>
+          )}
           <FieldError message={error} />
           <div className="flex gap-2 pt-1">
             <button
@@ -606,6 +836,138 @@ function RunsModal({
                 <p className="text-xs text-muted">
                   {t("automations.runConversationLabel")}:{" "}
                   {shortId(run.conversationId)}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EnrollmentsModal({
+  t,
+  locale,
+  tenantId,
+  automation,
+  onClose,
+}: {
+  t: Translate;
+  locale: Locale;
+  tenantId: string;
+  automation: AutomationResponse;
+  onClose: () => void;
+}) {
+  const [enrollments, setEnrollments] = useState<SequenceEnrollmentResponse[]>(
+    [],
+  );
+  const [contactNames, setContactNames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.automations.listEnrollments(
+          tenantId,
+          automation.id,
+        );
+        if (cancelled) return;
+        setEnrollments(list);
+        // Nama kontak bersifat pelengkap: ambil per kontak unik, abaikan gagal.
+        const uniqueContactIds = [...new Set(list.map((e) => e.contactId))];
+        const names: Record<string, string> = {};
+        await Promise.all(
+          uniqueContactIds.map(async (contactId) => {
+            try {
+              const contact = await api.contacts.get(tenantId, contactId);
+              names[contactId] = contact.name;
+            } catch {
+              // biarkan fallback ke ID ringkas
+            }
+          }),
+        );
+        if (!cancelled) setContactNames(names);
+      } catch (err) {
+        if (!cancelled) setError(translateApiError(t, err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, automation.id, t]);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-ink">
+              {t("automations.enrollmentsTitle")}
+            </h2>
+            <p className="mt-0.5 text-sm text-muted">{automation.name}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-ink"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+        {loading ? (
+          <p className="mt-4 text-sm text-muted">{t("common.loading")}</p>
+        ) : error ? (
+          <p className="mt-4 text-sm text-danger">
+            {t("automations.enrollmentsLoadError")} {error}
+          </p>
+        ) : enrollments.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">
+            {t("automations.enrollmentsEmpty")}
+          </p>
+        ) : (
+          <ul className="mt-4 divide-y divide-line">
+            {enrollments.map((enrollment) => (
+              <li key={enrollment.id} className="py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      enrollment.status === "active"
+                        ? "bg-accent/10 text-accent"
+                        : "bg-elevated text-muted"
+                    }`}
+                  >
+                    {t(
+                      `automations.enrollmentStatus.${enrollment.status}` as TranslationKey,
+                    )}
+                  </span>
+                  <span className="text-xs text-muted">
+                    {formatDateTime(enrollment.createdAt, locale)}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-ink">
+                  {t("automations.enrollmentContactLabel")}:{" "}
+                  {contactNames[enrollment.contactId] ??
+                    shortId(enrollment.contactId)}
+                </p>
+                <p className="text-xs text-muted">
+                  {t("automations.enrollmentProgressLabel", {
+                    current: formatNumber(enrollment.currentStep, locale),
+                    total: formatNumber(enrollment.totalSteps, locale),
+                  })}
+                  {enrollment.status === "active" && enrollment.nextRunAt
+                    ? ` · ${t("automations.enrollmentNextLabel", {
+                        date: formatDateTime(enrollment.nextRunAt, locale),
+                      })}`
+                    : ""}
                 </p>
               </li>
             ))}

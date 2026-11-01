@@ -28,6 +28,8 @@ import type {
   ProductListResponse,
   ProductResponse,
   PublicPaymentResponse,
+  SequenceEnrollmentListResponse,
+  SequenceEnrollmentResponse,
   TenantListResponse,
   TenantResponse,
   UpdateAgentRequest,
@@ -301,6 +303,17 @@ export const api = {
         { method: "GET" },
       );
       return body.runs;
+    },
+    /** GET /api/tenants/:tenantId/automations/:id/enrollments → pendaftaran sequence (Fase 2C). */
+    async listEnrollments(
+      tenantId: string,
+      automationId: string,
+    ): Promise<SequenceEnrollmentResponse[]> {
+      const body = await request<SequenceEnrollmentListResponse>(
+        `/api/tenants/${tenantId}/automations/${automationId}/enrollments`,
+        { method: "GET" },
+      );
+      return body.enrollments;
     },
   },
   agents: {

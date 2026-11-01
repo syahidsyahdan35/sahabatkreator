@@ -92,6 +92,20 @@
       "when": 1793563206000,
       "tag": "0012_rls_products_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793576471993,
+      "tag": "0013_sequences_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793576472000,
+      "tag": "0014_rls_sequences",
+      "breakpoints": true
     }
   ]
 }

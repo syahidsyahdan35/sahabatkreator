@@ -6,16 +6,21 @@ import {
   AutomationRunListResponseSchema,
   AutomationRunResponseSchema,
   CreateAutomationRequestSchema,
+  SequenceEnrollmentListResponseSchema,
+  SequenceEnrollmentResponseSchema,
   UpdateAutomationRequestSchema,
   type AutomationResponse,
   type AutomationRunResponse,
+  type SequenceEnrollmentResponse,
 } from "@sahabat-kreator/contracts";
 import {
   createAutomation,
   listAutomationRuns,
   listAutomations,
+  listSequenceEnrollments,
   updateAutomation,
   type AutomationWithRunCount,
+  type SequenceEnrollmentWithTotal,
 } from "@sahabat-kreator/core";
 import type { AutomationRun } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
@@ -28,12 +33,37 @@ function serializeAutomation(row: AutomationWithRunCount): AutomationResponse {
     id: row.id,
     name: row.name,
     triggerType: row.triggerType,
+    kind: row.kind,
     keywords: row.triggerConfig.keywords,
     match: row.triggerConfig.match,
     actionType: row.actionType,
     text: row.actionConfig.text,
+    steps: row.steps.map((s) => ({
+      position: s.position,
+      delayMinutes: s.delayMinutes,
+      text: s.text,
+    })),
+    stepCount: row.stepCount,
     isActive: row.isActive,
     runCount: row.runCount,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+}
+
+function serializeEnrollment(
+  row: SequenceEnrollmentWithTotal,
+): SequenceEnrollmentResponse {
+  return SequenceEnrollmentResponseSchema.parse({
+    id: row.id,
+    automationId: row.automationId,
+    contactId: row.contactId,
+    conversationId: row.conversationId,
+    triggerMessageId: row.triggerMessageId,
+    status: row.status,
+    currentStep: row.currentStep,
+    totalSteps: row.totalSteps,
+    nextRunAt: row.nextRunAt ? row.nextRunAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   });
@@ -53,14 +83,22 @@ function serializeRun(row: AutomationRun): AutomationRunResponse {
 }
 
 /**
- * Modul automations (Fase 2A) — manajemen automation keyword workspace:
+ * Modul automations (Fase 2A; sequence Fase 2C) — manajemen automation
+ * workspace:
  *   POST  /tenants/:tenantId/automations            buat → 201
- *   GET   /tenants/:tenantId/automations            daftar + jumlah run
+ *         kind 'keyword' (atau tanpa kind): {name, keywords, match, text}
+ *         kind 'sequence': {name, keywords, match, steps[{delayMinutes, text}]}
+ *   GET   /tenants/:tenantId/automations            daftar + jumlah run +
+ *                                                   kind & langkah sequence
  *   PATCH /tenants/:tenantId/automations/:id        ubah isActive/name/keywords/match/text
+ *                                                   (langkah sequence TIDAK bisa
+ *                                                   diubah — buat automation baru)
  *   GET   /tenants/:tenantId/automations/:id/runs   riwayat eksekusi terbaru
+ *   GET   /tenants/:tenantId/automations/:id/enrollments
+ *                                                   pendaftaran sequence terbaru
  * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND,
  * pola Fase 1B/1D). Eksekusi automation sendiri berjalan di worker
- * (job `automation.evaluate`), bukan di proses API ini.
+ * (job `automation.evaluate` & `sequence.step`), bukan di proses API ini.
  */
 export function createAutomationsRoutes(bundle: AuthBundle | null) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -73,6 +111,7 @@ export function createAutomationsRoutes(bundle: AuthBundle | null) {
     app.get(base, notConfigured);
     app.patch(`${base}/:id`, notConfigured);
     app.get(`${base}/:id/runs`, notConfigured);
+    app.get(`${base}/:id/enrollments`, notConfigured);
     return app;
   }
 
@@ -102,9 +141,30 @@ export function createAutomationsRoutes(bundle: AuthBundle | null) {
     const created = await createAutomation(
       bundle.db,
       { tenantId: tenant.id },
-      parsed.data,
+      "steps" in parsed.data
+        ? {
+            name: parsed.data.name,
+            keywords: parsed.data.keywords,
+            match: parsed.data.match,
+            kind: "sequence",
+            steps: parsed.data.steps,
+          }
+        : {
+            name: parsed.data.name,
+            keywords: parsed.data.keywords,
+            match: parsed.data.match,
+            kind: "keyword",
+            text: parsed.data.text,
+          },
     );
-    return c.json(serializeAutomation({ ...created, runCount: 0 }), 201);
+    return c.json(
+      serializeAutomation({
+        ...created,
+        runCount: 0,
+        stepCount: created.steps.length,
+      }),
+      201,
+    );
   });
 
   app.get(base, async (c) => {
@@ -143,8 +203,30 @@ export function createAutomationsRoutes(bundle: AuthBundle | null) {
     if (!updated) return apiError(c, 404, "NOT_FOUND", "Automation not found");
     const rows = await listAutomations(bundle.db, { tenantId: tenant.id });
     const withCount =
-      rows.find((r) => r.id === updated.id) ?? { ...updated, runCount: 0 };
+      rows.find((r) => r.id === updated.id) ??
+      { ...updated, runCount: 0, steps: [], stepCount: 0 };
     return c.json(serializeAutomation(withCount));
+  });
+
+  app.get(`${base}/:id/enrollments`, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Automation not found");
+    }
+    const enrollments = await listSequenceEnrollments(
+      bundle.db,
+      { tenantId: tenant.id },
+      id,
+      { limit: 50 },
+    );
+    if (!enrollments)
+      return apiError(c, 404, "NOT_FOUND", "Automation not found");
+    const body = SequenceEnrollmentListResponseSchema.parse({
+      enrollments: enrollments.map(serializeEnrollment),
+    });
+    return c.json(body);
   });
 
   app.get(`${base}/:id/runs`, async (c) => {

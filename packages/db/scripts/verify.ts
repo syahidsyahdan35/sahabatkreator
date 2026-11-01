@@ -52,7 +52,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // conversations, messages) + 2 tabel Fase 2A (automations, automation_runs)
 // + 4 tabel Fase 3A (agents, kb_documents, kb_chunks, agent_suggestions)
 // + 2 tabel Fase 4A (products, payment_links)
-assert.equal(Number(tablesRes.rows[0].count), 29);
+// + 2 tabel Fase 2C (automation_steps, sequence_enrollments)
+assert.equal(Number(tablesRes.rows[0].count), 31);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -113,8 +114,9 @@ const policies = await db.query<{ count: string }>(
 // + policy kedua `system_relay` pada outbox_events (Fase 2A)
 // + agents, kb_documents, kb_chunks, agent_suggestions (Fase 3A)
 // + products & payment_links tenant_isolation + lengan publik
-// `public_code_lookup` pada payment_links (Fase 4A) = 24.
-assert.equal(Number(policies.rows[0].count), 24);
+// `public_code_lookup` pada payment_links (Fase 4A)
+// + automation_steps & sequence_enrollments tenant_isolation (Fase 2C) = 26.
+assert.equal(Number(policies.rows[0].count), 26);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -126,7 +128,8 @@ await db.exec(`
     channel_accounts, channel_identities, contacts, media, conversations, messages,
     automations, automation_runs,
     agents, kb_documents, kb_chunks, agent_suggestions,
-    products, payment_links
+    products, payment_links,
+    automation_steps, sequence_enrollments
   TO app_user;
 `);
 
@@ -372,6 +375,107 @@ assert.deepEqual(paySeen.productsB.rows.map((r) => r.name), ["Produk B"]);
 assert.equal(paySeen.linksB.rows[0].n, "0");
 console.log(
   "[9] Fase 4A: RLS products/payment_links per tenant + lengan publik app.payment_code hanya membuka baris berkode itu (products tetap tertutup) + check harga >= 0: OK",
+);
+
+// ---------- 9. Fase 2C: sequence — kind, steps, enrollment aktif unik, RLS ----------
+// Automation sequence tenant A dengan 2 langkah; enrollment aktif untuk
+// kontak tenant A. Uji: kind default automation lama = 'keyword'; index unik
+// parsial menolak enrollment aktif kedua untuk (automation, kontak) yang
+// sama tetapi MEMBOLEHKAN setelah yang pertama tidak aktif; check delay >= 0;
+// konteks tenant B tidak melihat steps/enrollments tenant A.
+const SEQ_AUTO_A = "66666666-6666-4666-8666-666666666666";
+const CONV_A = "77777777-7777-4777-8777-777777777777";
+const contactA = await db.query<{ id: string }>(
+  `SELECT id FROM contacts WHERE tenant_id = $1 LIMIT 1`,
+  [TENANT_A],
+);
+const CONTACT_A = contactA.rows[0].id;
+await db.query(
+  `INSERT INTO automations (tenant_id, name) VALUES ($1, 'Keyword Lama')`,
+  [TENANT_A],
+);
+await db.query(
+  `INSERT INTO automations (id, tenant_id, name, kind) VALUES ($1, $2, 'Sequence Uji', 'sequence')`,
+  [SEQ_AUTO_A, TENANT_A],
+);
+await db.query(
+  `INSERT INTO automation_steps (tenant_id, automation_id, position, delay_minutes, text)
+   VALUES ($1, $2, 1, 0, 'Langkah satu'), ($1, $2, 2, 60, 'Langkah dua')`,
+  [TENANT_A, SEQ_AUTO_A],
+);
+await assert.rejects(
+  db.query(
+    `INSERT INTO automation_steps (tenant_id, automation_id, position, delay_minutes, text)
+     VALUES ($1, $2, 3, -1, 'Negatif')`,
+    [TENANT_A, SEQ_AUTO_A],
+  ),
+  /check|delay_minutes_nonnegative/i,
+);
+await db.query(
+  `INSERT INTO channel_accounts (tenant_id, provider, external_id, display_name)
+   VALUES ($1, 'webchat', 'wc_verify2c', 'Webchat Uji')`,
+  [TENANT_A],
+);
+const chanA = await db.query<{ id: string }>(
+  `SELECT id FROM channel_accounts WHERE tenant_id = $1 LIMIT 1`,
+  [TENANT_A],
+);
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider)
+   VALUES ($1, $2, $3, $4, 'webchat')`,
+  [CONV_A, TENANT_A, chanA.rows[0].id, CONTACT_A],
+);
+await db.query(
+  `INSERT INTO sequence_enrollments (tenant_id, automation_id, contact_id, conversation_id)
+   VALUES ($1, $2, $3, $4)`,
+  [TENANT_A, SEQ_AUTO_A, CONTACT_A, CONV_A],
+);
+await assert.rejects(
+  db.query(
+    `INSERT INTO sequence_enrollments (tenant_id, automation_id, contact_id, conversation_id)
+     VALUES ($1, $2, $3, $4)`,
+    [TENANT_A, SEQ_AUTO_A, CONTACT_A, CONV_A],
+  ),
+  /duplicate key|sequence_enrollments_active_unique/i,
+);
+// Setelah enrollment pertama dibatalkan, enrollment aktif baru diperbolehkan.
+await db.query(
+  `UPDATE sequence_enrollments SET status = 'cancelled' WHERE automation_id = $1`,
+  [SEQ_AUTO_A],
+);
+await db.query(
+  `INSERT INTO sequence_enrollments (tenant_id, automation_id, contact_id, conversation_id)
+   VALUES ($1, $2, $3, $4)`,
+  [TENANT_A, SEQ_AUTO_A, CONTACT_A, CONV_A],
+);
+const kindDefault = await db.query<{ kind: string }>(
+  `SELECT kind FROM automations WHERE name = 'Keyword Lama'`,
+);
+assert.equal(kindDefault.rows[0].kind, "keyword");
+const seqSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+  const steps = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM automation_steps`,
+  );
+  const enrollments = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM sequence_enrollments`,
+  );
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  const stepsA = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM automation_steps`,
+  );
+  const enrollmentsA = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM sequence_enrollments`,
+  );
+  return { steps, enrollments, stepsA, enrollmentsA };
+});
+assert.equal(seqSeen.steps.rows[0].n, "0");
+assert.equal(seqSeen.enrollments.rows[0].n, "0");
+assert.equal(seqSeen.stepsA.rows[0].n, "2");
+assert.equal(seqSeen.enrollmentsA.rows[0].n, "2");
+console.log(
+  "[10] Fase 2C: kind default 'keyword' + steps (check delay >= 0) + index unik enrollment aktif per (automation, kontak) + RLS steps/enrollments per tenant: OK",
 );
 
 await db.close();

@@ -46,13 +46,18 @@ export {
   getAutomation,
   updateAutomation,
   listAutomationRuns,
+  listSequenceEnrollments,
   keywordMatches,
   evaluateInboundMessageForAutomations,
+  executeSequenceStep,
+  type AutomationStepInput,
   type CreateAutomationInput,
   type UpdateAutomationInput,
   type AutomationWithRunCount,
   type AutomationFiredResult,
   type EvaluateInboundResult,
+  type ExecuteSequenceStepResult,
+  type SequenceEnrollmentWithTotal,
 } from "./automations";
 export {
   relayUnpublishedOutboxEvents,
