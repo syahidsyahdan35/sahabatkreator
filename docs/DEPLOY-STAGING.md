@@ -393,3 +393,63 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   pengelolaan automation fase ini murni API. Idempotensi teruji pada
   restart worker & relay ulang; skenario dua worker balapan dilindungi
   klaim SKIP LOCKED + index unik, belum diuji beban.
+
+---
+
+## Update Fase 2B — UI Automations di web (2026-11-02)
+
+### Perubahan
+- Web saja (commit `22490ed`, API tidak berubah): halaman **Automations**
+  menggantikan placeholder — daftar automation workspace aktif (nama, chip
+  status Aktif/Nonaktif, mode pencocokan diterjemahkan, kata kunci sebagai
+  chip, cuplikan teks balasan, `runCount`, waktu dibuat via Intl) dan
+  **sakelar on/off langsung di daftar** (PATCH `isActive`, optimistis
+  dengan pengembalian + muat ulang bila server menolak).
+- Form buat/edit (modal pola Contacts): nama, kata kunci teks dipisah koma
+  (petunjuk 1–10 + tidak peka huruf), radio mode exact/contains dengan
+  penjelasan awam + contoh untuk keduanya, textarea balasan dengan
+  petunjuk placeholder `{name}`. Validasi mengikuti aturan API (nama,
+  keywords 1–10 non-kosong, text wajib) dengan pesan i18n.
+- **Riwayat eksekusi:** klik automation (atau tombol Riwayat) membuka
+  modal runs — status diterjemahkan (completed/failed/skipped), waktu
+  Intl, nama kontak (diresolusi lewat API kontak per contactId unik,
+  fallback ID ringkas) dan ID percakapan ringkas — persis field yang
+  disediakan respons API 2A, tanpa kolom karangan.
+- Klien API web ditambah `api.automations` (list/create/update/listRuns);
+  ±40 kunci i18n `automations.*` en + id lengkap (kelengkapan ditahan
+  typecheck Resources). Keadaan kosong berisi penjelasan satu kalimat cara
+  kerja trigger keyword + ajakan membuat automation pertama.
+- Deploy: build web di VM → commit `22490ed` → rsync seluruh repo →
+  proses Vite preview dihentikan → systemd `Restart=always` mengangkat
+  bundle baru `index-CAl2PrMx.js` (224,20 KB / gzip 65,72 KB). Service API
+  & worker tidak di-restart (tidak ada perubahan di sisinya);
+  `.env.staging` utuh.
+
+### Verifikasi Fase 2B
+- Lokal: `pnpm typecheck` semua proyek hijau; `pnpm --filter web build`
+  hijau. Bundle lokal terbukti memuat label automations dwibahasa (EN:
+  "New automation", "Whole message equals the keyword",
+  "No automations yet", "Run history"; ID: "Automation baru",
+  "Seluruh pesan sama dengan kata kunci", "Belum ada automation",
+  "Riwayat eksekusi", dll.).
+- Publik dari VM: `GET /` → bundle `index-CAl2PrMx.js` (sama dengan build
+  lokal), aset bundle itu terambil 200 dan memuat label EN/ID yang sama;
+  `GET /automations` → 200 judul "Sahabat Kreator" (SPA shell);
+  `GET /api/health` → ok; GET automations tanpa sesi → 401.
+- Rantai API yang dipakai UI (dari server terhadap `https://botara.my.id`,
+  skrip Bun UA browser, akun uji BARU `fase2b-*@sk.test`, pengunjung
+  "Sari Uji 2B"): **19/19 PASS** — sign-up → tenant → channel webchat →
+  POST automation (payload persis form UI: 2 keyword, exact) 201 →
+  GET daftar berisi automation dengan runCount 0 → PATCH isActive=false
+  → PATCH isActive=true + edit teks → POST keywords kosong ditolak
+  400/422 → pengunjung kirim keyword "pricelist" → balasan otomatis tiba
+  via WS dengan `{name}` ter-render → runCount naik menjadi 1 → GET runs
+  berisi 1 eksekusi `completed` yang menunjuk conversation pengunjung →
+  user tenant lain: GET automations & runs → 404 → tanpa sesi 401 →
+  health ok.
+- Batas verifikasi UI yang jujur: klik UI penuh dari VM tetap tidak bisa
+  (POST dari VM ke domain publik timeout — artefak proxy egress, sama
+  seperti fase 1E/1F). Yang terbukti: bundle baru tersaji publik, semua
+  label dwibahasa ada di bundle itu, rute SPA termuat, dan seluruh rantai
+  HTTP yang dipanggil UI (termasuk PATCH sakelar dan GET runs untuk modal
+  riwayat) lolos end-to-end terhadap URL publik asli.
