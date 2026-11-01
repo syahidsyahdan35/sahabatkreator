@@ -131,3 +131,34 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
 2. Rsync repo (termasuk `node_modules` & `dist`) ke `/home/ubuntu/sahabat-kreator/`.
 3. Di server: `sudo systemctl restart sahabat-kreator-api sahabat-kreator-web`.
 4. Ulangi verifikasi di atas.
+
+---
+
+## Update Fase 1C — Halaman auth & workspace di web (2026-11-02)
+
+### Perubahan
+- Web kini punya halaman `/login` & `/register` (di luar shell), proteksi
+  shell via `GET /api/auth/get-session`, area profil + logout, dan pemilih
+  workspace (GET/POST /api/tenants) dengan konteks workspace aktif di
+  Dashboard. API tidak berubah pada fase ini.
+- Deploy: build web di VM → commit `f7fda3e` → rsync seluruh repo →
+  service web di-restart (proses Vite preview milik `ubuntu` dihentikan,
+  systemd `Restart=always` mengangkat ulang dari file baru — setara
+  `systemctl restart sahabat-kreator-web`). `.env.staging` di server utuh.
+
+### Verifikasi Fase 1C (publik, dari server terhadap https://botara.my.id)
+- Rantai penuh dengan akun uji BARU `fase1c-pub1@sk.test`: sign-up → 200 +
+  cookie sesi; get-session → sesi+user; `POST /api/tenants` → 201
+  ("Studio Fase 1C", role owner); `GET /api/tenants` berisi workspace itu;
+  sign-in ulang → 200; password salah → 401; tanpa sesi → 401 kontrak.
+- Sign-out terbukti dengan akun `fase1c-pub2@sk.test`: sesi aktif →
+  `POST /api/auth/sign-out` → `{success:true}` → get-session `null` →
+  tenants 401. CATATAN: Better Auth menolak POST tanpa header `Origin`
+  (`MISSING_OR_NULL_ORIGIN`) — curl manual wajib `-H "Origin: https://botara.my.id"`;
+  browser selalu mengirim header ini, jadi logout dari UI tidak terdampak.
+- GET publik dari VM: `/` dan `/login` → 200, judul "Sahabat Kreator",
+  bundle `index-CsCqnH_Y.js`. Render UI terkonfirmasi via teks halaman
+  hasil render: /login menampilkan form "Welcome back" (Email/Password),
+  /register menampilkan "Create your account" (Full name/Email/Password)
+  dalam bahasa Inggris (default). Uji klik UI penuh dari VM tetap dibatasi
+  artefak POST proxy egress VM seperti fase sebelumnya.
