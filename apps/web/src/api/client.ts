@@ -1,6 +1,14 @@
 import type {
+  ContactListResponse,
+  ContactResponse,
+  ConversationListResponse,
+  ConversationResponse,
+  CreateContactRequest,
+  MessageListResponse,
+  MessageResponse,
   TenantListResponse,
   TenantResponse,
+  UpdateContactRequest,
 } from "@sahabat-kreator/contracts";
 
 /**
@@ -122,6 +130,90 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ name }),
       });
+    },
+  },
+  contacts: {
+    /** GET /api/tenants/:tenantId/contacts?search=&limit=&offset= → {contacts,total} */
+    list(
+      tenantId: string,
+      opts?: { search?: string; limit?: number; offset?: number },
+    ): Promise<ContactListResponse> {
+      const q = new URLSearchParams();
+      if (opts?.search) q.set("search", opts.search);
+      if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+      if (opts?.offset !== undefined) q.set("offset", String(opts.offset));
+      const qs = q.toString();
+      return request<ContactListResponse>(
+        `/api/tenants/${tenantId}/contacts${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    create(
+      tenantId: string,
+      input: CreateContactRequest,
+    ): Promise<ContactResponse> {
+      return request<ContactResponse>(`/api/tenants/${tenantId}/contacts`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    get(tenantId: string, contactId: string): Promise<ContactResponse> {
+      return request<ContactResponse>(
+        `/api/tenants/${tenantId}/contacts/${contactId}`,
+        { method: "GET" },
+      );
+    },
+    update(
+      tenantId: string,
+      contactId: string,
+      input: UpdateContactRequest,
+    ): Promise<ContactResponse> {
+      return request<ContactResponse>(
+        `/api/tenants/${tenantId}/contacts/${contactId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+  },
+  conversations: {
+    /** GET /api/tenants/:tenantId/conversations?status= */
+    async list(
+      tenantId: string,
+      opts?: { status?: string },
+    ): Promise<ConversationResponse[]> {
+      const q = new URLSearchParams();
+      if (opts?.status) q.set("status", opts.status);
+      const qs = q.toString();
+      const body = await request<ConversationListResponse>(
+        `/api/tenants/${tenantId}/conversations${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+      return body.conversations;
+    },
+    /** GET .../conversations/:id/messages?limit= → pesan kronologis menaik. */
+    async listMessages(
+      tenantId: string,
+      conversationId: string,
+      opts?: { limit?: number },
+    ): Promise<MessageResponse[]> {
+      const q = new URLSearchParams();
+      if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      const body = await request<MessageListResponse>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/messages${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+      return body.messages;
+    },
+    /** POST .../conversations/:id/messages {contentText} → pesan outbound `queued`. */
+    sendMessage(
+      tenantId: string,
+      conversationId: string,
+      contentText: string,
+    ): Promise<MessageResponse> {
+      return request<MessageResponse>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/messages`,
+        { method: "POST", body: JSON.stringify({ contentText }) },
+      );
     },
   },
 };

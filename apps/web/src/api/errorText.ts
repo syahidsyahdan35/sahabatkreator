@@ -36,6 +36,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.INTERNAL_ERROR");
     case "TENANT_NOT_FOUND":
       return t("errors.TENANT_NOT_FOUND");
+    case "NOT_FOUND":
+      return t("errors.NOT_FOUND");
     case "RATE_LIMITED":
       return t("errors.RATE_LIMITED");
     default:

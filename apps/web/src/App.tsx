@@ -12,13 +12,21 @@ import { MoreSheet } from "./components/MoreSheet";
 import { ProfileBlock } from "./components/ProfileBlock";
 import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
+import { ContactsPage } from "./pages/ContactsPage";
+import { InboxPage } from "./pages/InboxPage";
+import {
+  UnreadBadgeProvider,
+  useUnreadBadge,
+} from "./inbox/UnreadBadgeProvider";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { useTheme, type ThemeMode } from "./theme";
 
-// Badge demo Fase 0 — nanti berasal dari query yang sama untuk desktop & mobile (§10.1).
-const DEMO_BADGES = { unreadInbox: 3, pendingApprovals: 1 } as const;
+// Badge persetujuan agent masih demo Fase 0. Badge unread Inbox SEJAK Fase 1E
+// berasal dari API conversations workspace aktif (UnreadBadgeProvider) —
+// query yang sama untuk desktop & mobile (§10.1).
+const DEMO_BADGES = { pendingApprovals: 1 } as const;
 
 /**
  * Router path sederhana (Fase 1C): hanya tiga permukaan —
@@ -55,9 +63,7 @@ interface ShellProps {
 
 /** Shell dashboard TERPROTEKSI: wajib sesi; belum login → dialihkan ke /login. */
 function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
-  const { status, user, signOut } = useAuth();
-  const [activeId, setActiveId] = useState("dashboard");
-  const [moreOpen, setMoreOpen] = useState(false);
+  const { status } = useAuth();
 
   useEffect(() => {
     if (status === "anonymous") onNavigateTo("/login");
@@ -70,7 +76,32 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
       </div>
     );
   }
-  if (status !== "authenticated" || !user) return null;
+  if (status !== "authenticated") return null;
+
+  return (
+    <WorkspaceProvider>
+      <UnreadBadgeProvider>
+        <ShellMain
+          t={t}
+          locale={locale}
+          controls={controls}
+          onNavigateTo={onNavigateTo}
+        />
+      </UnreadBadgeProvider>
+    </WorkspaceProvider>
+  );
+}
+
+/** Isi shell (sidebar + konten + bottom bar) — berjalan di dalam provider workspace & badge. */
+function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
+  const { user, signOut } = useAuth();
+  const { totalUnread } = useUnreadBadge();
+  const [activeId, setActiveId] = useState("dashboard");
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  if (!user) return null;
+
+  const badges = { ...DEMO_BADGES, unreadInbox: totalUnread };
 
   const activeItem: NavItem =
     NAV_REGISTRY.find((i) => i.id === activeId) ?? NAV_REGISTRY[0]!;
@@ -92,48 +123,50 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
   const workspace = <WorkspaceSwitcher t={t} />;
 
   return (
-    <WorkspaceProvider>
-      <div className="flex min-h-screen bg-bg text-ink">
-        <Sidebar
-          t={t}
-          activeId={activeId}
-          onNavigate={navigate}
-          badges={DEMO_BADGES}
-          controls={controls}
-          workspace={workspace}
-          profile={profile}
-        />
-        <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
-          <div className="mb-6 md:hidden">
-            <div className="text-lg font-bold">{t("app.name")}</div>
-            <div className="text-xs text-muted">{t("app.tagline")}</div>
-          </div>
-          {activeId === "dashboard" ? (
-            <DashboardPage t={t} locale={locale} />
-          ) : (
-            <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
-          )}
-        </main>
-        <MobileBottomBar
-          t={t}
-          activeId={activeId}
-          moreActive={moreActive}
-          onNavigate={navigate}
-          onMore={() => setMoreOpen(true)}
-          badges={DEMO_BADGES}
-        />
-        <MoreSheet
-          t={t}
-          open={moreOpen}
-          activeId={activeId}
-          onClose={() => setMoreOpen(false)}
-          onNavigate={navigate}
-          controls={controls}
-          workspace={workspace}
-          profile={profile}
-        />
-      </div>
-    </WorkspaceProvider>
+    <div className="flex min-h-screen bg-bg text-ink">
+      <Sidebar
+        t={t}
+        activeId={activeId}
+        onNavigate={navigate}
+        badges={badges}
+        controls={controls}
+        workspace={workspace}
+        profile={profile}
+      />
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
+        <div className="mb-6 md:hidden">
+          <div className="text-lg font-bold">{t("app.name")}</div>
+          <div className="text-xs text-muted">{t("app.tagline")}</div>
+        </div>
+        {activeId === "dashboard" ? (
+          <DashboardPage t={t} locale={locale} />
+        ) : activeId === "contacts" ? (
+          <ContactsPage t={t} locale={locale} />
+        ) : activeId === "inbox" ? (
+          <InboxPage t={t} locale={locale} />
+        ) : (
+          <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
+        )}
+      </main>
+      <MobileBottomBar
+        t={t}
+        activeId={activeId}
+        moreActive={moreActive}
+        onNavigate={navigate}
+        onMore={() => setMoreOpen(true)}
+        badges={badges}
+      />
+      <MoreSheet
+        t={t}
+        open={moreOpen}
+        activeId={activeId}
+        onClose={() => setMoreOpen(false)}
+        onNavigate={navigate}
+        controls={controls}
+        workspace={workspace}
+        profile={profile}
+      />
+    </div>
   );
 }
 
