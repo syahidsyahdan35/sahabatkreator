@@ -1,0 +1,34 @@
+import { z } from "zod";
+
+/** Versi aplikasi (semver paket root). */
+export const APP_VERSION = "0.1.0";
+
+/**
+ * Baseline Meta Graph API: v26.0 (RANCANGAN §12.1).
+ * Ter-pin secara eksplisit — TIDAK ada panggilan unversioned ke Meta.
+ * Upgrade versi adalah proses terjadwal: cek changelog Meta + contract test.
+ */
+export const META_GRAPH_API_VERSION = "v26.0" as const;
+
+export const META_GRAPH_API_VERSION_BY_CHANNEL = {
+  whatsapp: META_GRAPH_API_VERSION,
+  instagram: META_GRAPH_API_VERSION,
+  messenger: META_GRAPH_API_VERSION,
+} as const;
+
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  API_PORT: z.coerce.number().int().positive().default(3001),
+  DATABASE_URL: z.string().url().optional(),
+  REDIS_URL: z.string().url().optional(),
+  /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
+  OPENROUTER_API_KEY: z.string().min(1).optional(),
+  OPENROUTER_MODEL: z.string().min(1).optional(),
+});
+
+export type Env = z.infer<typeof EnvSchema>;
+
+/** Parse & validasi env; gagal cepat (throw) bila ada nilai yang tidak valid. */
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  return EnvSchema.parse(source);
+}

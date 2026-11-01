@@ -1,0 +1,34 @@
+import type { IconName } from "../navigation/registry";
+
+const PATHS: Record<IconName, string> = {
+  home: "M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-9z",
+  inbox: "M3 13l2.6-8.5A1 1 0 0 1 6.5 4h11a1 1 0 0 1 .9.5L21 13v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6zM3 13h6l1.6 2.7a1 1 0 0 0 .9.5h1a1 1 0 0 0 .9-.5L15 13h6",
+  bot: "M12 3v2.5M5.5 11a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7zM9.3 13.5h.01M14.7 13.5h.01M9.5 16.8h5",
+  megaphone: "M4 10.5v3.5a1 1 0 0 0 1 1h2l7.5 4.5v-15L7 10H5a1 1 0 0 0-1 .5zM17.5 9.5a4 4 0 0 1 0 5.5",
+  users: "M9.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM3.5 19.5c.7-3.1 3.1-4.8 6-4.8s5.3 1.7 6 4.8M15.5 4.7a3.5 3.5 0 0 1 0 6.3M17.8 15.2c1.5.7 2.4 2 2.7 4.3",
+  workflow: "M5 3.5h5V8.5H5zM14 15.5h5V20.5h-5zM7.5 8.5v3A2.5 2.5 0 0 0 10 14h6.5v1.5",
+  book: "M5 20.5A2.5 2.5 0 0 1 7.5 18H20V3.5H7.5A2.5 2.5 0 0 0 5 6v14.5zM5 20.5A2.5 2.5 0 0 0 7.5 23H20v-5",
+  bag: "M5.8 8h12.4l-1.1 12.1a2 2 0 0 1-2 1.9H8.9a2 2 0 0 1-2-1.9L5.8 8zM9 10V6.5a3 3 0 0 1 6 0V10",
+  link: "M10.2 13.8a4 4 0 0 0 5.7 0l3-3a4 4 0 1 0-5.7-5.7l-1.7 1.7M13.8 10.2a4 4 0 0 0-5.7 0l-3 3a4 4 0 1 0 5.7 5.7l1.7-1.7",
+  chart: "M4 20.5h16.5M7.5 20v-5.5M12 20V5M16.5 20v-8.5",
+  card: "M3.5 6h17a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-17a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM2.5 10h19",
+  settings: "M12 14.8a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6zM12 3v2.8M12 18.2V21M3 12h2.8M18.2 12H21M5.2 5.2l2 2M16.8 16.8l2 2M18.8 5.2l-2 2M7.2 16.8l-2 2",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+};
+
+export function NavIcon({ name, className = "h-5 w-5" }: { name: IconName; className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={name === "more" ? 2.8 : 1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden={true}
+    >
+      <path d={PATHS[name]} />
+    </svg>
+  );
+}
