@@ -60,6 +60,46 @@ export {
   type OutboxRelayHandler,
 } from "./outbox";
 export {
+  createAgent,
+  listAgents,
+  getAgent,
+  updateAgent,
+  getActiveAgent,
+  type CreateAgentInput,
+  type UpdateAgentInput,
+} from "./agents";
+export {
+  chunkText,
+  createKbDocument,
+  listKbDocuments,
+  getKbDocument,
+  deleteKbDocument,
+  searchKbChunks,
+  buildFtsOrQuery,
+  KB_CHUNK_SIZE,
+  KB_CHUNK_OVERLAP,
+  type KbDocumentWithChunkCount,
+  type KbSearchHit,
+} from "./kb";
+export {
+  respondToInboundMessage,
+  executeAgentToolCall,
+  AGENT_DAILY_RESPONSE_CAP,
+  AGENT_USAGE_REF_TYPE,
+  type AgentToolContext,
+  type AgentToolOutcome,
+  type AgentRespondResult,
+  type AgentSkipReason,
+} from "./agent-runtime";
+export {
+  listSuggestions,
+  getSuggestion,
+  approveSuggestion,
+  rejectSuggestion,
+  type ApproveSuggestionOutcome,
+  type RejectSuggestionOutcome,
+} from "./suggestions";
+export {
   createWebchatChannelAccount,
   listChannelAccounts,
   generateWebchatSiteKey,

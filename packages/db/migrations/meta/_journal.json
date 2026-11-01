@@ -64,6 +64,20 @@
       "when": 1793563202000,
       "tag": "0008_rls_automations_outbox_relay",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793563203000,
+      "tag": "0009_agents_kb_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793563204000,
+      "tag": "0010_rls_agents_kb",
+      "breakpoints": true
     }
   ]
 }

@@ -26,6 +26,11 @@ const EnvSchema = z.object({
   /** Secret HMAC untuk token sesi pengunjung webchat (Fase 1F). */
   WEBCHAT_SECRET: z.string().min(16).optional(),
   REDIS_URL: z.string().url().optional(),
+  /**
+   * Pemilihan provider LLM agent (Fase 3A): 'mock' (default, deterministik,
+   * tanpa biaya) atau 'openrouter' (model sungguhan via OpenRouter).
+   */
+  LLM_PROVIDER: z.enum(["mock", "openrouter"]).default("mock"),
   /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   OPENROUTER_MODEL: z.string().min(1).optional(),

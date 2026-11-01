@@ -7,9 +7,12 @@ import { Redis } from "ioredis";
  * Satu antrean fisik `sahabat-kreator` menampung semua job aplikasi; nama
  * job membedakan jenisnya:
  *  - `automation.evaluate` — evaluasi satu pesan inbound terhadap automation
- *    tenant (Fase 2A). Job berikutnya (ai.reply, broadcast.send,
- *    sequence.step, ...) ditambahkan sebagai nama job baru di antrean yang
- *    sama, bukan antrean fisik baru.
+ *    tenant (Fase 2A). Job berikutnya (broadcast.send, sequence.step, ...)
+ *    ditambahkan sebagai nama job baru di antrean yang sama, bukan antrean
+ *    fisik baru.
+ *  - `agent.respond` — agent AI menanggapi satu pesan inbound (Fase 3A),
+ *    di-enqueue processor automation.evaluate SETELAH evaluasi selesai
+ *    tanpa tembakan (keyword dulu, AI kemudian).
  *  - `outbox.relay` — BUKAN job yang di-enqueue siapa pun: relay adalah pola
  *    polling yang dijalankan worker. Worker membaca `outbox_events` yang
  *    belum ter-publish langsung dari Postgres (klaim FOR UPDATE SKIP
@@ -40,6 +43,7 @@ export const MAIN_QUEUE_NAME = "sahabat-kreator";
 
 export const OUTBOX_RELAY_JOB = "outbox.relay";
 export const AUTOMATION_EVALUATE_JOB = "automation.evaluate";
+export const AGENT_RESPOND_JOB = "agent.respond";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -49,9 +53,28 @@ export interface AutomationEvaluateJobData {
   outboxEventId: string;
 }
 
+/**
+ * Job Fase 3A: agent AI menanggapi satu pesan inbound. Di-enqueue oleh
+ * processor `automation.evaluate` di worker SETELAH evaluasi automation
+ * selesai TANPA tembakan apa pun (urutan pasti: keyword → AI; pesan yang
+ * sudah dijawab automation tidak dijawab lagi oleh agent). jobId
+ * deterministik dari id PESAN pemicu (`agent-respond-<messageId>`):
+ * enqueue ganda untuk pesan yang sama selalu menunjuk job yang sama.
+ */
+export interface AgentRespondJobData {
+  tenantId: string;
+  conversationId: string;
+  messageId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
+}
+
+/** jobId deterministik dari id pesan pemicu agent. */
+export function agentRespondJobId(messageId: string): string {
+  return `agent-respond-${messageId}`;
 }
 
 /**
@@ -63,11 +86,19 @@ export function createRedisConnection(redisUrl: string): Redis {
   return new Redis(redisUrl, { maxRetriesPerRequest: null });
 }
 
-export type AutomationQueue = Queue<AutomationEvaluateJobData>;
+/** Semua data job yang berjalan di antrean fisik utama. */
+export type MainJobData = AutomationEvaluateJobData | AgentRespondJobData;
 
-export function createAutomationQueue(connection: Redis): AutomationQueue {
-  return new Queue<AutomationEvaluateJobData>(MAIN_QUEUE_NAME, { connection });
+export type MainQueue = Queue<MainJobData>;
+
+export function createMainQueue(connection: Redis): MainQueue {
+  return new Queue<MainJobData>(MAIN_QUEUE_NAME, { connection });
 }
+
+export type AutomationQueue = MainQueue;
+
+/** Alias kompatibilitas (nama Fase 2A) untuk createMainQueue. */
+export const createAutomationQueue = createMainQueue;
 
 /**
  * Meng-enqueue evaluasi automation untuk satu event `message.received`.
@@ -75,7 +106,7 @@ export function createAutomationQueue(connection: Redis): AutomationQueue {
  * di-enqueue (BullMQ dedupe) — pemanggil tidak perlu mengecek duplikasi.
  */
 export async function enqueueAutomationEvaluate(
-  queue: AutomationQueue,
+  queue: MainQueue,
   data: AutomationEvaluateJobData,
   options?: JobsOptions,
 ): Promise<string> {
@@ -88,4 +119,25 @@ export async function enqueueAutomationEvaluate(
     ...options,
   });
   return job.id ?? automationEvaluateJobId(data.outboxEventId);
+}
+
+/**
+ * Meng-enqueue respons agent untuk satu pesan inbound. Aman dipanggil
+ * berulang: jobId diturunkan dari id pesan, BullMQ mengembalikan job yang
+ * sudah ada.
+ */
+export async function enqueueAgentRespond(
+  queue: MainQueue,
+  data: AgentRespondJobData,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(AGENT_RESPOND_JOB, data, {
+    jobId: agentRespondJobId(data.messageId),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? agentRespondJobId(data.messageId);
 }

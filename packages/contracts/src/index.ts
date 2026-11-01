@@ -392,3 +392,128 @@ export const AutomationRunListResponseSchema = z.object({
 export type AutomationRunListResponse = z.infer<
   typeof AutomationRunListResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// AI Agents (Fase 3A) — konfigurasi agent per tenant. Runtime memakai agent
+// aktif tertua; mode 'auto' mengirim langsung, mode 'suggest' membuat draf
+// di agent_suggestions yang menunggu persetujuan manusia.
+// ---------------------------------------------------------------------------
+
+export const AgentModeSchema = z.enum(["auto", "suggest"]);
+export type AgentMode = z.infer<typeof AgentModeSchema>;
+
+export const AgentConfigSchema = z.object({
+  maxReplyChars: z.number().int().positive().max(100_000).optional(),
+  language: z.string().trim().min(2).max(16).optional(),
+});
+export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+
+export const CreateAgentRequestSchema = z.object({
+  name: z.string().trim().min(1).max(255),
+  systemPrompt: z.string().max(20_000).optional(),
+  model: z.string().trim().max(128).optional(),
+  mode: AgentModeSchema.optional(),
+  isActive: z.boolean().optional(),
+  config: AgentConfigSchema.optional(),
+});
+export type CreateAgentRequest = z.infer<typeof CreateAgentRequestSchema>;
+
+export const UpdateAgentRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(255).optional(),
+    systemPrompt: z.string().max(20_000).optional(),
+    model: z.string().trim().max(128).optional(),
+    mode: AgentModeSchema.optional(),
+    isActive: z.boolean().optional(),
+    config: AgentConfigSchema.optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "At least one field must be provided",
+  });
+export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>;
+
+export const AgentResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  systemPrompt: z.string(),
+  model: z.string(),
+  mode: AgentModeSchema,
+  isActive: z.boolean(),
+  config: AgentConfigSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type AgentResponse = z.infer<typeof AgentResponseSchema>;
+
+export const AgentListResponseSchema = z.object({
+  agents: z.array(AgentResponseSchema),
+});
+export type AgentListResponse = z.infer<typeof AgentListResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Knowledge Base (Fase 3A) — dokumen teks yang di-chunk untuk retrieval
+// full-text (pgvector embedding menyusul; kolom sudah disiapkan di DB).
+// ---------------------------------------------------------------------------
+
+export const CreateKbDocumentRequestSchema = z.object({
+  title: z.string().trim().min(1).max(255),
+  content: z.string().trim().min(1).max(200_000),
+});
+export type CreateKbDocumentRequest = z.infer<
+  typeof CreateKbDocumentRequestSchema
+>;
+
+export const KbDocumentResponseSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  content: z.string(),
+  /** Jumlah chunk hasil pemecahan dokumen ini (untuk retrieval). */
+  chunkCount: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type KbDocumentResponse = z.infer<typeof KbDocumentResponseSchema>;
+
+export const KbDocumentListResponseSchema = z.object({
+  documents: z.array(KbDocumentResponseSchema),
+});
+export type KbDocumentListResponse = z.infer<
+  typeof KbDocumentListResponseSchema
+>;
+
+// ---------------------------------------------------------------------------
+// Agent suggestions (Fase 3A) — draf balasan dari agent mode 'suggest'.
+// Approve = kirim teks saran sebagai pesan outbound agent (status saran
+// menjadi 'sent'); tool call yang diusulkan agent TIDAK ikut dieksekusi.
+// ---------------------------------------------------------------------------
+
+export const AgentSuggestionStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+  "sent",
+]);
+export type AgentSuggestionStatus = z.infer<typeof AgentSuggestionStatusSchema>;
+
+export const AgentSuggestionResponseSchema = z.object({
+  id: z.string().uuid(),
+  agentId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  triggerMessageId: z.string().uuid().nullable(),
+  contactId: z.string().uuid().nullable(),
+  suggestedText: z.string(),
+  status: AgentSuggestionStatusSchema,
+  detail: z.record(z.string(), z.unknown()),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type AgentSuggestionResponse = z.infer<
+  typeof AgentSuggestionResponseSchema
+>;
+
+export const AgentSuggestionListResponseSchema = z.object({
+  suggestions: z.array(AgentSuggestionResponseSchema),
+});
+export type AgentSuggestionListResponse = z.infer<
+  typeof AgentSuggestionListResponseSchema
+>;

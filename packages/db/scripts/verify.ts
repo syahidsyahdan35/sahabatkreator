@@ -15,6 +15,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
+import { vector } from "@electric-sql/pglite/vector";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrationsDir = path.join(here, "..", "migrations");
@@ -25,7 +26,10 @@ const USER_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const PLAN_ID = "99999999-9999-4999-8999-999999999999";
 
-const db = new PGlite();
+// Ekstensi `vector` (pgvector) didaftarkan eksplisit: migrasi 0009 menjalankan
+// CREATE EXTENSION vector dan membuat kolom vector(1536) di kb_chunks.
+// Di staging ekstensi yang sama tersedia dari image pgvector/pgvector:pg16.
+const db = new PGlite({ extensions: { vector } });
 
 // ---------- 1. Terapkan migrasi dari nol ----------
 const files = (await readdir(migrationsDir))
@@ -46,7 +50,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // 11 tabel Fase 1A + 4 tabel Better Auth Fase 1B (auth_user/session/account/verification)
 // + 6 tabel Fase 1D (channel_accounts, channel_identities, contacts, media,
 // conversations, messages) + 2 tabel Fase 2A (automations, automation_runs)
-assert.equal(Number(tablesRes.rows[0].count), 23);
+// + 4 tabel Fase 3A (agents, kb_documents, kb_chunks, agent_suggestions)
+assert.equal(Number(tablesRes.rows[0].count), 27);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -104,8 +109,9 @@ const policies = await db.query<{ count: string }>(
   `SELECT count(*)::text AS count FROM pg_policies WHERE schemaname = 'public'`,
 );
 // 14 policy Fase 1A–1F + automations & automation_runs (Fase 2A)
-// + policy kedua `system_relay` pada outbox_events (Fase 2A) = 17.
-assert.equal(Number(policies.rows[0].count), 17);
+// + policy kedua `system_relay` pada outbox_events (Fase 2A)
+// + agents, kb_documents, kb_chunks, agent_suggestions (Fase 3A) = 21.
+assert.equal(Number(policies.rows[0].count), 21);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -115,7 +121,8 @@ await db.exec(`
     subscriptions, webhook_inbox, outbox_events, audit_logs, usage_ledger,
     auth_user, auth_session, auth_account, auth_verification,
     channel_accounts, channel_identities, contacts, media, conversations, messages,
-    automations, automation_runs
+    automations, automation_runs,
+    agents, kb_documents, kb_chunks, agent_suggestions
   TO app_user;
 `);
 
@@ -241,6 +248,58 @@ assert.equal(relaySeen.without, "0");
 assert.deepEqual(relaySeen.tenants, [TENANT_A, TENANT_B]);
 console.log(
   "[7] RLS system_relay: tanpa setting outbox tak terlihat; dengan app.system_relay='outbox' event semua tenant terbaca: OK",
+);
+
+// ---------- 7. Fase 3A: RLS agents/KB + retrieval full-text ----------
+const AGENT_A = "33333333-3333-4333-8333-333333333333";
+const KB_DOC_A = "44444444-4444-4444-8444-444444444444";
+await db.query(
+  `INSERT INTO agents (id, tenant_id, name, system_prompt, mode, is_active)
+   VALUES ($1, $2, 'Agent A', 'Kamu CS Kelas Rekaman Kilat.', 'auto', true)`,
+  [AGENT_A, TENANT_A],
+);
+await db.query(
+  `INSERT INTO agents (tenant_id, name, mode, is_active) VALUES ($1, 'Agent B', 'suggest', true)`,
+  [TENANT_B],
+);
+await db.query(
+  `INSERT INTO kb_documents (id, tenant_id, title, content)
+   VALUES ($1, $2, 'Harga', 'Harga kelas Rekaman Kilat adalah Rp349 ribu dan garansi 7 hari.')`,
+  [KB_DOC_A, TENANT_A],
+);
+await db.query(
+  `INSERT INTO kb_chunks (tenant_id, document_id, chunk_index, content)
+   VALUES ($1, $2, 0, 'Harga kelas Rekaman Kilat adalah Rp349 ribu dan garansi 7 hari.')`,
+  [TENANT_A, KB_DOC_A],
+);
+// search_vector harus ter-generate dan memuat leksem '349' & 'harga'.
+const sv = await db.query<{ ok: boolean }>(
+  `SELECT (search_vector @@ to_tsquery('simple', 'harga | 349')) AS ok FROM kb_chunks`,
+);
+assert.equal(sv.rows[0].ok, true);
+
+const kbSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  const agentsA = await tx.query<{ name: string }>(`SELECT name FROM agents`);
+  const chunksA = await tx.query<{ content: string }>(
+    `SELECT content FROM kb_chunks
+     WHERE search_vector @@ to_tsquery('simple', 'berapa | harga | kelas | rekaman | kilat')
+     ORDER BY ts_rank(search_vector, to_tsquery('simple', 'berapa | harga | kelas | rekaman | kilat')) DESC
+     LIMIT 5`,
+  );
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+  const agentsB = await tx.query<{ name: string }>(`SELECT name FROM agents`);
+  const chunksB = await tx.query<{ content: string }>(`SELECT content FROM kb_chunks`);
+  return { agentsA, chunksA, agentsB, chunksB };
+});
+assert.deepEqual(kbSeen.agentsA.rows.map((r) => r.name), ["Agent A"]);
+assert.equal(kbSeen.chunksA.rows.length, 1);
+assert.ok(kbSeen.chunksA.rows[0].content.includes("349"));
+assert.deepEqual(kbSeen.agentsB.rows.map((r) => r.name), ["Agent B"]);
+assert.equal(kbSeen.chunksB.rows.length, 0);
+console.log(
+  "[8] Fase 3A: RLS agents/KB per tenant + search_vector ter-generate + retrieval FTS (OR + ts_rank) menemukan chunk yang benar: OK",
 );
 
 await db.close();

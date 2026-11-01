@@ -4,6 +4,7 @@ Abstraksi BullMQ + kosakata job aplikasi (Fase 2A — nyata, bukan lagi placehol
 
 - Satu antrean fisik `sahabat-kreator` (BullMQ di atas Redis proyek sendiri).
 - Job `automation.evaluate` `{tenantId, conversationId, messageId, outboxEventId}` — jobId deterministik `automation-evaluate-<outboxEventId>` sebagai fondasi idempotensi relay.
+- Job `agent.respond` `{tenantId, conversationId, messageId}` (Fase 3A) — jobId deterministik `agent-respond-<messageId>`; di-enqueue processor `automation.evaluate` setelah evaluasi tanpa tembakan (keyword dulu, AI kemudian).
 - `outbox.relay` adalah pola polling worker (bukan job): worker mengklaim `outbox_events` yang belum ter-publish dari Postgres dengan `FOR UPDATE SKIP LOCKED` lewat helper `relayUnpublishedOutboxEvents` di `@sahabat-kreator/core`, menerjemahkan event `message.received` menjadi job di atas, lalu menandai event published — semua dalam satu transaksi klaim.
 
 ## Jembatan pengiriman lintas proses

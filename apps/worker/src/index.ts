@@ -1,17 +1,23 @@
 import { Worker } from "bullmq";
 import { loadEnv } from "@sahabat-kreator/config";
 import { createDb } from "@sahabat-kreator/db";
+import { createLlmProvider } from "@sahabat-kreator/ai";
 import {
   evaluateInboundMessageForAutomations,
   relayUnpublishedOutboxEvents,
+  respondToInboundMessage,
 } from "@sahabat-kreator/core";
 import {
+  AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
   MAIN_QUEUE_NAME,
   createAutomationQueue,
   createRedisConnection,
+  enqueueAgentRespond,
   enqueueAutomationEvaluate,
+  type AgentRespondJobData,
   type AutomationEvaluateJobData,
+  type MainJobData,
 } from "@sahabat-kreator/queue";
 
 /**
@@ -33,6 +39,13 @@ import {
  *    menjalankan `evaluateInboundMessageForAutomations` di core — pencocokan
  *    keyword, pembuatan balasan `queued`, run, dan audit terjadi di sana
  *    dalam konteks RLS tenant.
+ * 3. RESPONS AGENT (Fase 3A): bila evaluasi automation selesai TANPA
+ *    tembakan, processor yang sama meng-enqueue job `agent.respond`
+ *    (jobId deterministik dari id pesan). Job itu menjalankan
+ *    `respondToInboundMessage` di core: retrieval KB full-text → provider
+ *    LLM (mock default / OpenRouter via env) → eksekusi tool / draf
+ *    saran → metering usage_ledger + audit. Balasan agent juga berhenti
+ *    sebagai pesan `queued`; poller API yang mengirimnya lewat hub WS.
  *
  * Worker TIDAK mengirim pesan ke pengunjung: hub WebSocket webchat hidup
  * di proses API. Balasan automation berhenti sebagai pesan `queued`;
@@ -55,23 +68,64 @@ const queueConnection = createRedisConnection(env.REDIS_URL);
 const workerConnection = createRedisConnection(env.REDIS_URL);
 const queue = createAutomationQueue(queueConnection);
 
-const bullWorker = new Worker<AutomationEvaluateJobData>(
+// Provider LLM agent (Fase 3A): LLM_PROVIDER=mock (default, deterministik)
+// atau openrouter (wajib OPENROUTER_API_KEY — fail-fast di createLlmProvider).
+const llmProvider = createLlmProvider({
+  provider: env.LLM_PROVIDER,
+  openrouterApiKey: env.OPENROUTER_API_KEY,
+  openrouterModel: env.OPENROUTER_MODEL,
+});
+console.log(`[worker] provider LLM agent: ${llmProvider.name}`);
+
+const bullWorker = new Worker<MainJobData>(
   MAIN_QUEUE_NAME,
   async (job) => {
-    if (job.name !== AUTOMATION_EVALUATE_JOB) {
-      throw new Error(`[worker] job tidak dikenal: ${job.name}`);
+    if (job.name === AUTOMATION_EVALUATE_JOB) {
+      const data = job.data as AutomationEvaluateJobData;
+      const result = await evaluateInboundMessageForAutomations(db, {
+        tenantId: data.tenantId,
+        conversationId: data.conversationId,
+        messageId: data.messageId,
+      });
+      if (result.fired.length > 0 || result.skippedDuplicates > 0) {
+        console.log(
+          `[worker] automation.evaluate event=${data.outboxEventId} fired=${result.fired.length} duplicates=${result.skippedDuplicates}`,
+        );
+      }
+      // Fase 3A — urutan pasti keyword → AI: hanya bila evaluasi berjalan
+      // dan TIDAK ada automation yang menembak (dan bukan duplikat dari
+      // tembakan sebelumnya), pesan diteruskan ke agent. Agent sendiri
+      // memeriksa ulang kelayakannya (agent aktif, ai_enabled, caps).
+      if (
+        result.evaluated &&
+        result.fired.length === 0 &&
+        result.skippedDuplicates === 0
+      ) {
+        await enqueueAgentRespond(queue, {
+          tenantId: data.tenantId,
+          conversationId: data.conversationId,
+          messageId: data.messageId,
+        });
+      }
+      return result;
     }
-    const result = await evaluateInboundMessageForAutomations(db, {
-      tenantId: job.data.tenantId,
-      conversationId: job.data.conversationId,
-      messageId: job.data.messageId,
-    });
-    if (result.fired.length > 0 || result.skippedDuplicates > 0) {
-      console.log(
-        `[worker] automation.evaluate event=${job.data.outboxEventId} fired=${result.fired.length} duplicates=${result.skippedDuplicates}`,
-      );
+    if (job.name === AGENT_RESPOND_JOB) {
+      const data = job.data as AgentRespondJobData;
+      const result = await respondToInboundMessage(db, llmProvider, {
+        tenantId: data.tenantId,
+        conversationId: data.conversationId,
+        messageId: data.messageId,
+      });
+      if (result.responded || result.reason) {
+        console.log(
+          `[worker] agent.respond message=${data.messageId} responded=${result.responded}` +
+            (result.reason ? ` reason=${result.reason}` : "") +
+            (result.mode ? ` mode=${result.mode}` : ""),
+        );
+      }
+      return result;
     }
-    return result;
+    throw new Error(`[worker] job tidak dikenal: ${job.name}`);
   },
   { connection: workerConnection, concurrency: 5 },
 );

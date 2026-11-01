@@ -18,6 +18,8 @@ import { createContactsRoutes } from "./modules/contacts/routes";
 import { createInboxRoutes } from "./modules/inbox/routes";
 import { createChannelsRoutes } from "./modules/channels/routes";
 import { createAutomationsRoutes } from "./modules/automations/routes";
+import { createAgentsRoutes } from "./modules/agents/routes";
+import { createKnowledgeRoutes } from "./modules/knowledge/routes";
 import { WebchatHub } from "./modules/webchat/hub";
 import { startWebchatDeliveryPoller } from "./modules/webchat/poller";
 import {
@@ -77,6 +79,9 @@ routes.route("/", createInboxRoutes(authBundle, webchatHub));
 routes.route("/", createChannelsRoutes(authBundle));
 // Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
 routes.route("/", createAutomationsRoutes(authBundle));
+// Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
+routes.route("/", createAgentsRoutes(authBundle));
+routes.route("/", createKnowledgeRoutes(authBundle));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 
