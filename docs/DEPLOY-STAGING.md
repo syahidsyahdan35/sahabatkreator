@@ -200,3 +200,64 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   Cloudflare (403); dengan UA browser lolos. Bukan isu aplikasi.
 - PGlite lokal: migrasi 0000–0005 bersih, isolasi RLS `contacts` antar
   tenant terbukti (hanya melihat tenant sendiri; insert lintas ditolak).
+
+---
+
+## Update Fase 1E — UI Contacts & Inbox di web (2026-11-02)
+
+### Perubahan
+- Web (commit `72c3379`, API tidak berubah): halaman **Contacts** menggantikan
+  placeholder — daftar kontak workspace aktif (nama, phone, email, chip tags,
+  chip pipeline stage), pencarian server-side (`?search=`, debounce 350ms),
+  pagination offset ("Muat lebih banyak", 20/halaman), form tambah kontak
+  (nama wajib; phone/email/tags opsional; error diterjemahkan dari kode API),
+  dan modal detail dengan edit nama/tags/stage/opt-in via PATCH.
+- Halaman **Inbox** menggantikan placeholder — dua kolom responsif: daftar
+  percakapan (nama kontak, cuplikan pesan terakhir, waktu via Intl, badge
+  unread per percakapan, label provider & status) dan utas kronologis
+  (inbound kiri / outbound kanan, status outbound diterjemahkan:
+  queued/sent/delivered/read/failed) + kotak balas (POST → pesan tampil
+  berstatus `queued`, lalu utas & daftar dimuat ulang dari server). Di layar
+  kecil daftar/utas bergantian dengan tombol kembali; bottom bar tetap ada.
+  Catatan kejujuran di UI: balasan disimpan sebagai `queued` karena
+  pengiriman ke channel masih stub (label `inbox.deliveryNote`).
+- **Badge unread navigasi kini asli**: `UnreadBadgeProvider` (di dalam
+  WorkspaceProvider) menjumlahkan `unreadCount` dari API conversations
+  workspace aktif dan menyuplai angka ke Sidebar & MobileBottomBar lewat
+  prop `badges` yang sudah ada; isi registry navigasi tidak diubah. Badge
+  `pendingApprovals` di menu Agents masih demo Fase 0.
+- Semua string baru lewat kunci i18n `contacts.*`/`inbox.*` + beberapa
+  `common.*` (en + id lengkap; ketidaklengkapan ditahan typecheck Resources).
+  Tanggal/jam selalu lewat `Intl` per locale aktif.
+- Deploy: build web di VM → commit `72c3379` → rsync seluruh repo →
+  proses Vite preview dihentikan → systemd `Restart=always` mengangkat
+  bundle baru `index-uxDhTCyl.js`. `.env.staging` di server utuh; service
+  API tidak di-restart (tidak ada perubahan API).
+
+### Verifikasi Fase 1E
+- Lokal: `pnpm typecheck` (semua proyek) hijau; `pnpm --filter web build`
+  hijau (JS 200,37 KB / gzip 60,70 KB). Bundle hasil build terbukti memuat
+  label dwibahasa baru (EN: "Add contact", "No contacts yet",
+  "No conversations yet", "Write a reply…"; ID: "Tambah kontak",
+  "Belum ada kontak", "Belum ada percakapan", "Tulis balasan…").
+- Publik dari VM: `GET /` & `GET /login` → 200, judul "Sahabat Kreator",
+  bundle `index-uxDhTCyl.js` (sama dengan yang dilayani origin);
+  `GET /api/health` → ok. Ekstrak teks render `/login` menampilkan form
+  "Welcome back" berbahasa Inggris (default) — salinan crawler berumur
+  ±27 menit dari bundle sebelumnya; kesegaran bundle baru dibuktikan dari
+  hash aset di atas, bukan dari ekstrak itu.
+- Rantai API yang dipakai UI (dari server terhadap `https://botara.my.id`,
+  skrip Python UA browser, akun uji baru `fase1e-pub1-*@sk.test` &
+  `fase1e-pub2-*@sk.test`): **19/19 PASS** — sign-up → buat tenant →
+  POST kontak 201 (stage default `new`) → GET search menemukan & search
+  kosong → PATCH stage/opt-in/tags → seed SQL (channel webchat +
+  conversation unread=2 + 2 pesan inbound) → GET conversations cocok
+  (nama, preview pesan terakhir, unread, provider) → GET messages
+  kronologis → POST balasan 201 status `queued` → GET messages = 3 dengan
+  balasan terakhir → preview percakapan terupdate → user kedua 404 untuk
+  kontak & conversations tenant pertama → tanpa sesi 401 → health ok.
+- Batas verifikasi UI yang jujur: klik UI penuh dari VM tetap tidak bisa
+  (POST dari VM ke domain publik timeout — artefak proxy egress, sama
+  seperti fase sebelumnya). Yang terbukti: bundle baru tersaji publik,
+  semua label dwibahasa ada di bundle itu, dan seluruh rantai HTTP yang
+  dipanggil UI lolos end-to-end terhadap URL publik asli.
