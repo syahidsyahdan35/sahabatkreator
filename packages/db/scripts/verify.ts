@@ -43,7 +43,8 @@ const tablesRes = await db.query<{ count: string }>(
    WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
 );
 console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
-assert.equal(Number(tablesRes.rows[0].count), 11);
+// 11 tabel Fase 1A + 4 tabel Better Auth Fase 1B (auth_user/session/account/verification)
+assert.equal(Number(tablesRes.rows[0].count), 15);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -103,7 +104,8 @@ await db.exec(`
   CREATE ROLE app_user NOLOGIN;
   GRANT SELECT, INSERT, UPDATE, DELETE ON
     tenants, users, plans, tenant_members, invitations, api_keys,
-    subscriptions, webhook_inbox, outbox_events, audit_logs, usage_ledger
+    subscriptions, webhook_inbox, outbox_events, audit_logs, usage_ledger,
+    auth_user, auth_session, auth_account, auth_verification
   TO app_user;
 `);
 
@@ -155,6 +157,38 @@ assert.deepEqual(seen.auditTenants, [TENANT_A]);
 assert.equal(seen.crossInsertBlocked, true);
 console.log(
   "[5] RLS: konteks tenant A hanya melihat data A (members/usage/audit), insert lintas tenant ditolak: OK",
+);
+
+// ---------- 5. Lengan app.user_id pada policy tenant_members (Fase 1B) ----------
+// Konteks daftar-keanggotaan: tanpa app.tenant_id, hanya app.user_id.
+// User A harus melihat HANYA baris keanggotaannya sendiri (tenant A),
+// dan tetap tidak bisa menulis member lintas konteks (WITH CHECK tenant-only).
+const selfSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.user_id', $1, true)`, [USER_A]);
+  const members = await tx.query<{ tenant_id: string; user_id: string }>(
+    `SELECT tenant_id, user_id FROM tenant_members`,
+  );
+  let crossInsertBlocked = false;
+  await tx.query(`SAVEPOINT sp2`);
+  try {
+    await tx.query(
+      `INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'owner')`,
+      [TENANT_B, USER_B],
+    );
+  } catch (err) {
+    crossInsertBlocked = /row-level security/i.test(String(err));
+    await tx.query(`ROLLBACK TO SAVEPOINT sp2`);
+  }
+  return { members: members.rows, crossInsertBlocked };
+});
+assert.deepEqual(
+  selfSeen.members.map((r) => `${r.tenant_id}:${r.user_id}`),
+  [`${TENANT_A}:${USER_A}`],
+);
+assert.equal(selfSeen.crossInsertBlocked, true);
+console.log(
+  "[6] RLS app.user_id: user hanya melihat keanggotaannya sendiri, insert via konteks user ditolak: OK",
 );
 
 await db.close();

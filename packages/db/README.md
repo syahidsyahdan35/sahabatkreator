@@ -1,7 +1,7 @@
 # @sahabat-kreator/db
 
 Drizzle schema, migrasi, dan client PostgreSQL untuk Sahabat Kreator.
-Status: **Fase 1A terimplementasi** — kelompok Identity & Tenant + Sistem fondasi (RANCANGAN §6). Kelompok Channels / Audience / Automation / Agent / Campaign menyusul di fase berikutnya (termasuk pgvector untuk `knowledge_chunks`).
+Status: **Fase 1A + 1B terimplementasi** — kelompok Identity & Tenant + Sistem fondasi (RANCANGAN §6) dan tabel autentikasi Better Auth. Kelompok Channels / Audience / Automation / Agent / Campaign menyusul di fase berikutnya (termasuk pgvector untuk `knowledge_chunks`).
 
 ## Isi
 
@@ -9,7 +9,8 @@ Status: **Fase 1A terimplementasi** — kelompok Identity & Tenant + Sistem fond
 - `src/schema/tenants.ts` — `tenants` (slug unik, default_locale, timezone default `Asia/Jakarta`), `tenant_members` (role enum `owner|admin|agent|viewer`, unik tenant+user), `invitations` (token hash, expires_at, accepted_at), `api_keys` (key hash, scopes text[], last_used_at, revoked_at), `subscriptions` (plan, status enum, current_period_end).
 - `src/schema/system.ts` — `webhook_inbox` (unik provider + provider_event_id untuk dedup), `outbox_events` (Transactional Outbox, index published_at), `audit_logs` (actor user/agent/system), `usage_ledger` (**append-only** — tanpa `updated_at`; qty + cost_model + cost_provider).
 - `src/client.ts` — `createDb(connectionString)` → `{ db, pool }` (drizzle + node-postgres).
-- `migrations/` — SQL ter-generate drizzle-kit (`0000`) + migrasi custom RLS (`0001`). **Jangan edit file migrasi yang sudah ter-commit; buat migrasi baru.**
+- `src/schema/auth.ts` — tabel milik Better Auth (Fase 1B): `auth_user`, `auth_session`, `auth_account`, `auth_verification`. Terpisah dari `users` kita; penghubungnya kolom `users.auth_user_id` (unik, nullable).
+- `migrations/` — `0000` skema awal, `0001` custom RLS, `0002` tabel auth (generate), `0003` custom: policy `tenant_members` ditambah lengan `app.user_id` (user boleh membaca baris keanggotaannya sendiri untuk daftar workspace; WITH CHECK tetap hanya konteks tenant). **Jangan edit file migrasi yang sudah ter-commit; buat migrasi baru.**
 
 Semua tabel tenant-scoped punya `tenant_id` + index; semua PK `uuid defaultRandom`; timestamps konsisten (`timestamptz`, default now).
 
@@ -35,7 +36,7 @@ untuk `USING` maupun `WITH CHECK` (select/insert/update/delete sama-sama terkunc
 
 Konsekuensi wajib untuk kode aplikasi:
 
-1. **API men-set `app.tenant_id` di setiap transaksi** sebelum query tenant mana pun — transaction-local via `set_config('app.tenant_id', $1, true)`. Gunakan helper `withTenant(db, tenantId, fn)` dari `@sahabat-kreator/core`; jangan query tabel tenant-scoped di luar transaksi seperti itu.
+1. **API men-set `app.tenant_id` di setiap transaksi** sebelum query tenant mana pun — transaction-local via `set_config('app.tenant_id', $1, true)`. Gunakan helper `withTenant(db, tenantId, fn)` dari `@sahabat-kreator/core`; jangan query tabel tenant-scoped di luar transaksi seperti itu. Satu pengecualian terkontrol (migrasi `0003`): daftar keanggotaan lintas workspace milik user yang login memakai `set_config('app.user_id', <users.id>, true)` — policy `tenant_members` lalu hanya memperlihatkan baris milik user itu sendiri (tulis tetap ditolak dari konteks ini). Lihat `listTenantsForUser` di `@sahabat-kreator/core`.
 2. **Role koneksi aplikasi harus non-superuser dan bukan pemilik tabel** — superuser dan pemilik tabel melewati RLS. Role migrasi (pemilik) hanya untuk `db:migrate`; worker sistem yang memang lintas tenant memakai koneksi pemilik secara sadar & terbatas.
 3. Konteks yang belum di-set menghasilkan **nol baris** (fail closed), bukan error.
 

@@ -11,3 +11,11 @@ export {
   type TenantDb,
   type TenantTx,
 } from "./tenant";
+export {
+  createTenant,
+  listTenantsForUser,
+  getTenantForUser,
+  slugifyWorkspaceName,
+  type MemberRole,
+  type TenantWithRole,
+} from "./tenants";

@@ -78,6 +78,53 @@ sudo systemctl enable --now botara-app-web.service
 Setelah rollback, botara.my.id kembali melayani Vite preview botara-app lama
 dari port 5180.
 
+---
+
+## Update Fase 1B — Auth + Tenant API + Postgres staging (2026-11-01)
+
+### Database staging (di server, Docker)
+
+- Container `sahabat-kreator-pg` — image `pgvector/pgvector:pg16`, volume
+  `sahabat-kreator-pgdata`, port **hanya** `127.0.0.1:5434`, database
+  `sahabat_kreator_staging`, `--restart unless-stopped`. Container/service
+  proyek lain tidak disentuh.
+- Dua role: `sk_migration` (pemilik/superuser container — hanya untuk
+  migrasi) dan `sk_app` (**non-superuser, tanpa BYPASSRLS** — koneksi API,
+  agar RLS benar-benar berlaku). Grant `sk_app`: SELECT/INSERT/UPDATE/DELETE
+  semua tabel + usage sequences, plus `ALTER DEFAULT PRIVILEGES` dari role
+  migrasi agar tabel migrasi berikutnya otomatis ter-grant.
+- Kredensial digenerate acak **di server** dan hanya disimpan di
+  `/home/ubuntu/sahabat-kreator/.env.staging` (chmod 600, tidak masuk repo):
+  `DATABASE_URL` (role `sk_app`), `MIGRATION_DATABASE_URL`,
+  `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL=https://botara.my.id`,
+  `API_PORT=3101`, `NODE_ENV=production`.
+- Migrasi repo (0000–0003) dijalankan dari VM pengembangan memakai role
+  migrasi lewat SSH port-forward (`ssh -L 5434:127.0.0.1:5434`).
+
+### Unit API
+
+`sahabat-kreator-api.service` kini memakai
+`EnvironmentFile=/home/ubuntu/sahabat-kreator/.env.staging` (ditambah
+`After=docker.service`). Tanpa file itu API tetap hidup tetapi modul
+tenants menjawab 503 — perilaku fail-safe yang disengaja.
+Peringatan operasional: menulis unit dengan `sudo tee` + heredoc bersamaan
+gagal (stdin sudo tertabrak heredoc) — tulis file ke home dulu, lalu
+`sudo cp`.
+
+### Verifikasi Fase 1B (publik)
+
+Alur penuh terhadap `https://botara.my.id` lulus: sign-up & sign-in
+Better Auth (cookie sesi), `POST /api/tenants` → 201 + slug,
+`GET /api/tenants` & `GET /api/tenants/:id` → 200, tanpa cookie → 401,
+user kedua → 404 pada tenant user pertama & daftar kosong. Akun uji:
+`fase1b-pub1@sk.test`, `fase1b-pub2@sk.test` (staging).
+
+Catatan lingkungan: POST dari VM pengembangan ke domain publik timeout
+karena proxy egress VM (GET normal; request yang sama dari server ke URL
+publik berhasil <2 detik). Ini artefak proxy VM, bukan aplikasi/tunnel —
+verifikasi POST publik dijalankan dari server terhadap URL publik asli
+(melewati Cloudflare edge + tunnel).
+
 ## Deploy ulang berikutnya
 
 1. Di VM pengembangan: ubah kode → `pnpm build` (api+web) → commit & push.

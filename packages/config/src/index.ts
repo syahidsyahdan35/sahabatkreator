@@ -20,6 +20,9 @@ const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_PORT: z.coerce.number().int().positive().default(3001),
   DATABASE_URL: z.string().url().optional(),
+  /** Better Auth (Fase 1B): secret penandatanganan sesi & URL publik aplikasi. */
+  BETTER_AUTH_SECRET: z.string().min(16).optional(),
+  BETTER_AUTH_URL: z.string().url().optional(),
   REDIS_URL: z.string().url().optional(),
   /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
   OPENROUTER_API_KEY: z.string().min(1).optional(),

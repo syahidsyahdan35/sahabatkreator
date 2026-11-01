@@ -2,6 +2,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  text,
   timestamp,
   uuid,
   varchar,
@@ -17,6 +18,12 @@ export const userThemeEnum = pgEnum("user_theme", ["system", "light", "dark"]);
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 320 }).notNull().unique(),
+  /**
+   * Penghubung ke tabel Better Auth `auth_user` (Fase 1B): id teks milik
+   * Better Auth. NULL untuk user yang dibuat tanpa jalur auth (seed/sistem).
+   * Sumber kebenaran workspace tetap tabel ini; autentikasi milik Better Auth.
+   */
+  authUserId: text("auth_user_id").unique(),
   name: varchar("name", { length: 255 }),
   /** Bahasa UI pengguna: default & fallback aplikasi adalah 'en' (RANCANGAN §11). */
   locale: varchar("locale", { length: 10 }).notNull().default("en"),
