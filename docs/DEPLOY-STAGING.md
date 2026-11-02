@@ -1506,3 +1506,82 @@ workspace user; webhook hidup menunjuk akun terbaru `10be58d5`
 - Akun berstatus 'error' ikut menghalangi workspace lain (mereka masih
   memegang klaim bot + webhook terdaftar sebagian) — jalan keluarnya
   disconnect dari workspace pemilik, sesuai pesan error dwibahasa.
+
+---
+
+## Hotfix Dashboard Realtime — polling penyegaran langsung inbox & badge (2026-11-02)
+
+### Perubahan (web saja, commit `04a9ab0`; API TIDAK berubah)
+- **Akar masalah:** `apps/web/src` tidak punya setInterval/WebSocket/
+  polling sama sekali — daftar percakapan, utas pesan, badge unread, dan
+  badge persetujuan AI hanya dimuat saat halaman dibuka/pindah/aksi
+  sendiri, sehingga pesan masuk baru hanya terlihat setelah refresh
+  manual browser (dilaporkan user 2026-11-02). Sisi pengunjung webchat
+  sudah realtime (WS hub di API); sisi agen yang statis.
+- **Hook bersama baru `apps/web/src/hooks/usePolling.ts`** —
+  `usePolling(callback, LIVE_REFRESH_INTERVAL_MS = 5_000, enabled)`:
+  siklus berjalan hanya saat tab terlihat, satu penyegaran segera saat
+  tab kembali terlihat / jendela fokus (`visibilitychange` + `focus`),
+  guard in-flight anti-tumpuk, error latar ditelan diam, cleanup penuh
+  saat unmount. Komentar di konstanta menegaskan statusnya: **jembatan
+  menuju Fase 6G (apps/realtime)** — nanti transport utama menjadi push
+  WebSocket dan polling ini turun menjadi fallback; semua penyegaran
+  berkala wajib lewat hook ini agar penggantiannya satu tempat.
+- **InboxPage:** polling ±5 dtk menjalankan dua penyegaran SENYAP —
+  (a) daftar percakapan diganti dari server (urutan, preview, unread per
+  percakapan ikut baru) dengan satu koreksi: percakapan yang sedang
+  dibuka dipaksa unread lokal 0 (server sudah menandainya terbaca lewat
+  GET messages — mencegah chip & badge berkedip naik pada percakapan
+  yang sedang dibaca); total badge disinkronkan lewat
+  `setFromConversations` seperti sebelumnya. (b) pesan percakapan
+  terbuka digabung PER ID: salinan server menimpa versi lama (status
+  queued→sent ikut segar), pesan baru menempel di akhir kronologis,
+  tanpa duplikat dan tanpa mengganti seluruh daftar (tidak ada kedip,
+  status memuat awal tidak ditampilkan ulang). Draf balasan tidak pernah
+  disentuh penyegaran; pilihan percakapan tidak berpindah sendiri.
+- **Scroll utas dijaga:** penanda "menempel di bawah" (`stickToBottom`,
+  ambang 120px, diperbarui dari event scroll) — auto-scroll ke pesan
+  terbaru HANYA bila agen memang di dekat dasar; agen yang scroll ke
+  atas membaca riwayat tidak diseret turun. Berpindah percakapan dan
+  selesai mengirim balasan mengembalikan penanda ke menempel.
+- **Badge global ikut polling:** `UnreadBadgeProvider` dan
+  `PendingApprovalsProvider` kini menjalankan `refresh()`-nya sendiri
+  lewat `usePolling` yang sama selama ada workspace aktif — badge segar
+  di halaman mana pun, bukan hanya saat Inbox/Agents dibuka.
+- Deploy: build web di VM → commit `04a9ab0` → push → rsync repo
+  (`.env.staging` server dikecualikan & utuh) → proses Vite preview
+  di-restart → origin menyajikan bundle baru `index-BGh3Vs6D.js`.
+  Service API & worker tidak di-restart (tidak ada perubahan di sisinya).
+
+### Verifikasi (tanpa Playwright — keputusan user: rantai API + bundle)
+- Lokal: `pnpm typecheck` SEMUA proyek hijau; build web hijau. Bundle
+  lokal memuat kode polling: `visibilitychange` ×2, `setInterval` ×1,
+  konstanta `5e3` ×3 (tiga pemakai hook).
+- Rantai API dari server terhadap `https://botara.my.id` (akun uji BARU
+  `hotfixrt-*@sk.test`, pengunjung "Pengunjung Realtime"): **14/14
+  PASS** — health 200; conversations tanpa sesi 401; sign-up → tenant →
+  channel webchat → sesi pengunjung → pesan #1 → GET conversations
+  dashboard: percakapan tampil dengan unread=1 & preview pesan #1 →
+  pesan #2 → GET conversations BERIKUTNYA langsung unread=2 & preview
+  pesan #2 (data sumber seketika; header `cache-control` tidak ada —
+  tidak ada lapisan cache yang menahan kesegaran yang akan dikonsumsi
+  polling) → GET messages memuat kedua pesan kronologis → setelah GET
+  messages unread percakapan terbuka = 0 (perilaku mark-read yang
+  konsisten dengan logika merge polling) → GET suggestions
+  `?status=pending` 200 array (sumber polling badge AI) → GET / publik
+  menyajikan bundle baru.
+- Publik dari VM: bundle `index-BGh3Vs6D.js` terunduh dari
+  `https://botara.my.id/assets/…` (371.085 byte) dan grep-nya identik
+  dengan build lokal (`visibilitychange` ×2, `setInterval` ×1, `5e3` ×3);
+  `GET /` & `GET /api/health` → 200.
+
+### Batas jujur
+- Latensi kesegaran dashboard kini ≤ ±5 dtk (siklus polling) + segar
+  seketika saat tab kembali fokus — BUKAN push seketika; itu jatah Fase
+  6G (apps/realtime), setelahnya polling ini menjadi fallback.
+- Sesuai pembagian tugas baru (user menguji UI/UX sendiri), pembuktian
+  visual akhir — pesan & badge benar-benar muncul di browser tanpa
+  refresh, draf & scroll tidak terganggu — menunggu uji langsung user
+  di staging; yang terbukti di sini: kode polling ada di bundle yang
+  tersaji publik dan seluruh sumber data yang dikonsumsinya segar
+  seketika di URL publik asli.
