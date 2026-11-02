@@ -4364,3 +4364,82 @@ en+id penuh.
   sebagai konteks, bukan pesan terbaru percakapan; (5) cap langkah
   menghitung node yang dieksekusi, bukan waktu — flow delay-panjang
   yang sah tidak terpotong cap.
+
+## Hotfix 7B.6 — Snapshot Kutipan Cadangan (2026-11-02)
+
+- Latar (diagnosis parent dari data live): uji live user 16:27 —
+  user mengutip pesan bot "Pagi juga gaes" di Telegram; payload
+  webhook terekam lengkap di integration_log (`reply_to_message`
+  membawa message_id 30 + teks asal), tetapi tautan 7B.5 gugur
+  karena baris target adalah pesan keluar pra-6A.2 yang
+  `provider_message_id`-nya kosong. Quote untuk pesan yang lebih
+  baru bekerja (dikonfirmasi user). Hotfix ini membuat kutipan yang
+  targetnya tidak tertaut tetap TERLIHAT isinya.
+- Migrasi 0032: kolom nullable `messages.reply_to_snapshot` jsonb
+  {authorLabel, contentPreview}; tanpa policy baru (ternaungi
+  `tenant_isolation` yang ada; PGlite verify seksi [25] baru).
+  Jurnal kini 33 baris; staging tetap 39 tabel / 51 policy.
+- **Keputusan desain: snapshot disimpan SELALU** setiap kali payload
+  Telegram membawa `reply_to_message` (bukan hanya saat tautan
+  gagal) — alasan: bila baris target kelak terhapus (purge channel
+  6I), FK tautan menjadi NULL oleh SET NULL, tetapi snapshot
+  bertahan sehingga kutipan tetap terlihat; biaya datanya sepele
+  (label + cuplikan ≤200 char). Serializer & UI SELALU mendahulukan
+  tautan teresolusi; snapshot murni cadangan. Snapshot yang kedua
+  bidangnya kosong (payload minimal hanya membawa id) dinormalisasi
+  menjadi NULL di core (`normalizeReplyToSnapshot`) — blok label
+  umum akan menyesatkan untuk isi yang memang tidak diketahui.
+- Semantik builder (SATU sumber: `buildTelegramReplyToSnapshot` di
+  channel-telegram, dipakai parser pesan, parser channel_post,
+  ingest live, dan backfill): label penulis — bot → `@username`
+  bila ada, selain itu nama tampil (nama lengkap → @username);
+  tanpa `from` → `sender_chat` (judul chat → @username);
+  channel_post tanpa label jatuh ke judul channel-nya. Cuplikan:
+  `text` → `caption`, terpotong 200 karakter; media tanpa caption
+  → null. Kontrak: `MessageResponse.replyToSnapshot` terpisah dari
+  `replyTo` agar klien membedakan tertaut vs cadangan. UI Inbox:
+  blok snapshot adalah `<div>` NON-klik (bukan tombol) bergaya sama
+  dengan blok tertaut + title/aria dwibahasa
+  `inbox.quoteOriginalUnavailable` ("Pesan asal tidak tersedia").
+- **WhatsApp & Meta TIDAK dapat snapshot** — payload kutipan mereka
+  hanya membawa id (`context.id` / `reply_to.mid`) tanpa teks;
+  ketimpangan ini apa adanya, tidak dikarang. Widget webchat tidak
+  berubah (tidak ada jalur snapshot di sana).
+- Backfill sekali jalan: `apps/api/scripts/backfill-reply-snapshots.ts`
+  (script npm `backfill:reply-snapshots` di paket api — ditempatkan
+  di api karena lapisan itulah yang sudah menggabungkan core +
+  channel-telegram seperti `process.ts`). Membaca baris
+  integration_log telegram arah 'in' berpayload lengkap (bukan
+  penanda truncated), mencocokkan baris pesan PERSIS lewat
+  provider_message_id majemuk `telegram:<botId>:<message_id>` +
+  tenant sama, dan hanya mengisi baris ber-`reply_to_message_id`
+  NULL & snapshot NULL. Dijalankan dengan `MIGRATION_DATABASE_URL`
+  (RLS integration_log memang tanpa lengan baca lintas tenant;
+  pola perbaikan data role migrasi seperti fase sebelumnya).
+  Hasil di staging: 138 baris log terpindai, **2 baris terisi**
+  (satu baris mock rantai lama dibersihkan kembali karena snapshot
+  kedua-bidang-kosong, menyisakan **1 baris nyata terisi**), 2
+  terhitung sudah-tertaut pada run pertama; run kedua membuktikan
+  idempotensi (0 terisi). Bukti kasus user: pesan
+  `telegram:8808425227:35` ("Test balas quota", akun bot asli
+  8fb9b81c…) kini ber-snapshot
+  `{"authorLabel": "@botaramyid_bot", "contentPreview": "Pagi juga gaes"}`
+  dengan tautan tetap NULL — persis perilaku yang dirancang.
+- Verifikasi (tanpa Playwright): typecheck semua paket hijau;
+  build semua paket hijau (bundle publik `index-1y34ujAJ.js`
+  memuat render snapshot); PGlite verify 25/25 seksi (baru [25]);
+  **rantai mock Telegram dari server 20/20 PASS** — quote target
+  hilang → snapshot persis; quote target ada → tautan menang +
+  snapshot tersimpan; pesan polos → keduanya null; replay update
+  sama → tetap satu baris; quote media bercaption → preview dari
+  caption; channel_post berkutipan → snapshot berlabel judul
+  channel. Jendela mock ditutup bersih: `.env.staging` pulih
+  byte-identik (sha256 `9c1ded2a…` sebelum = sesudah), port mock
+  tertutup, bot asli user (@botaramyid_bot) tetap `connected`.
+- Batas jujur: (1) backfill hanya menjangkau payload yang masih
+  tersimpan di integration_log (retensi 30 hari) — kutipan yang
+  lebih tua dari itu tidak bisa dipulihkan snapshot-nya;
+  (2) snapshot pra-6A.2 tetap tidak bisa menjadi tautan klik (tidak
+  ada data pemetaan id yang tersimpan dari era itu) — yang berubah
+  hanya keterlihatannya; (3) bukti visual UI (render blok snapshot,
+  tema gelap/terang) menunggu uji user sesuai pembagian kerja.
