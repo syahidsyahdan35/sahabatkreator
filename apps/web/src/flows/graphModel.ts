@@ -1,4 +1,5 @@
 import type {
+  FlowEdgeBranch,
   FlowGraph,
   FlowGraphIssue,
   FlowNode,
@@ -31,6 +32,12 @@ export const FLOW_NODE_LABEL_KEYS: Record<FlowNodeType, TranslationKey> = {
   ai_response: "flows.nodeAiResponse",
   handoff: "flows.nodeHandoff",
   end: "flows.nodeEnd",
+  set_field: "flows.nodeSetField",
+  http_request: "flows.nodeHttpRequest",
+  goto_flow: "flows.nodeGotoFlow",
+  ab_split: "flows.nodeAbSplit",
+  send_payment_link: "flows.nodeSendPaymentLink",
+  wait_reply: "flows.nodeWaitReply",
 };
 
 /** Tipe yang boleh ditambahkan dari palet (trigger dibuat otomatis & tunggal). */
@@ -45,7 +52,45 @@ export const ADDABLE_NODE_TYPES: FlowNodeType[] = [
   "ai_response",
   "handoff",
   "end",
+  "set_field",
+  "http_request",
+  "goto_flow",
+  "ab_split",
+  "send_payment_link",
+  "wait_reply",
 ];
+
+/**
+ * Node bercabang (Fase 12A menggeneralisasi condition 8B): himpunan
+ * branch yang wajib ada pada edge keluar + kunci label chip-nya.
+ * Dipakai kartu node (handle sumber berlabel), penurun branch saat
+ * connect, dan label edge.
+ */
+export const FLOW_BRANCHED_TYPES: Partial<
+  Record<FlowNodeType, { branch: FlowEdgeBranch; labelKey: TranslationKey }[]>
+> = {
+  condition: [
+    { branch: "yes", labelKey: "flows.branchYes" },
+    { branch: "no", labelKey: "flows.branchNo" },
+  ],
+  ab_split: [
+    { branch: "a", labelKey: "flows.branchA" },
+    { branch: "b", labelKey: "flows.branchB" },
+  ],
+  wait_reply: [
+    { branch: "replied", labelKey: "flows.branchReplied" },
+    { branch: "timeout", labelKey: "flows.branchTimeout" },
+  ],
+};
+
+/** Label chip untuk satu branch (semua tipe bercabang); null bila tak dikenal. */
+export function branchLabelKey(branch: string): TranslationKey | null {
+  for (const list of Object.values(FLOW_BRANCHED_TYPES)) {
+    const found = list?.find((b) => b.branch === branch);
+    if (found) return found.labelKey;
+  }
+  return null;
+}
 
 /** Config bawaan saat node baru ditambahkan ke kanvas. */
 export function defaultNodeConfig(
@@ -67,6 +112,18 @@ export function defaultNodeConfig(
       return { stage: "contacted" };
     case "enroll_sequence":
       return { automationId: "" };
+    case "set_field":
+      return { field: "name", value: "" };
+    case "http_request":
+      return { method: "POST", url: "", body: "" };
+    case "goto_flow":
+      return { flowId: "" };
+    case "ab_split":
+      return { percentA: 50 };
+    case "send_payment_link":
+      return { productId: "" };
+    case "wait_reply":
+      return { amount: 1, unit: "hours" };
     default:
       return {};
   }
@@ -81,15 +138,23 @@ function truncate(text: string, max = 90): string {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
+/** Pemetaan id → nama untuk ringkasan node rujukan (Fase 12A). */
+export interface NodeSummaryResolvers {
+  flowName?: (flowId: string) => string | undefined;
+  productName?: (productId: string) => string | undefined;
+}
+
 /**
  * Ringkasan config SATU baris untuk badan node di kanvas & daftar flow.
  * `sequenceName` memetakan automationId → nama sequence (dari daftar
- * automations tenant) bila pemanggil memilikinya.
+ * automations tenant) bila pemanggil memilikinya; `resolvers`
+ * memetakan rujukan node 12A (flow goto / produk) ke namanya.
  */
 export function summarizeNodeConfig(
   t: Translate,
   node: Pick<FlowNode, "type" | "config">,
   sequenceName?: (automationId: string) => string | undefined,
+  resolvers?: NodeSummaryResolvers,
 ): string {
   const c = node.config;
   switch (node.type) {
@@ -174,6 +239,50 @@ export function summarizeNodeConfig(
       const id = asString(c.automationId);
       if (!id) return t("flows.summaryNotConfigured");
       return sequenceName?.(id) ?? `${id.slice(0, 8)}…`;
+    }
+    case "set_field": {
+      const field = asString(c.field);
+      const value = asString(c.value);
+      if (!field) return t("flows.summaryNotConfigured");
+      return truncate(`${field} = ${value}`);
+    }
+    case "http_request": {
+      const method = asString(c.method) || "POST";
+      const url = asString(c.url);
+      return url
+        ? truncate(t("flows.summaryHttp", { method, url }), 60)
+        : t("flows.summaryNotConfigured");
+    }
+    case "goto_flow": {
+      const id = asString(c.flowId);
+      if (!id) return t("flows.summaryNotConfigured");
+      return resolvers?.flowName?.(id) ?? `${id.slice(0, 8)}…`;
+    }
+    case "ab_split": {
+      const percentA = typeof c.percentA === "number" ? c.percentA : 50;
+      return t("flows.summaryAbSplit", {
+        percentA,
+        percentB: 100 - percentA,
+      });
+    }
+    case "send_payment_link": {
+      const id = asString(c.productId);
+      if (!id) return t("flows.summaryNotConfigured");
+      return resolvers?.productName?.(id) ?? `${id.slice(0, 8)}…`;
+    }
+    case "wait_reply": {
+      const amount = typeof c.amount === "number" ? c.amount : 0;
+      const unit = asString(c.unit) || "hours";
+      const unitKey =
+        unit === "seconds"
+          ? "flows.unitSeconds"
+          : unit === "minutes"
+            ? "flows.unitMinutes"
+            : "flows.unitHours";
+      return t("flows.summaryWaitReply", {
+        amount,
+        unit: t(unitKey as TranslationKey),
+      });
     }
     default:
       return "";

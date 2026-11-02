@@ -28,12 +28,14 @@ import {
 import "@xyflow/react/dist/style.css";
 import type {
   AutomationResponse,
+  FlowEdgeBranch,
   FlowGraph,
   FlowGraphIssue,
   FlowNodeType,
   FlowResponse,
   FlowRunResponse,
   FlowRunStepResponse,
+  ProductResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
@@ -43,7 +45,9 @@ import { useWorkspace } from "../workspace/WorkspaceProvider";
 import { usePolling } from "../hooks/usePolling";
 import {
   ADDABLE_NODE_TYPES,
+  FLOW_BRANCHED_TYPES,
   FLOW_NODE_LABEL_KEYS,
+  branchLabelKey,
   defaultNodeConfig,
   issuesFromError,
   splitIssues,
@@ -70,12 +74,14 @@ interface FlowNodeData extends Record<string, unknown> {
 }
 
 type FlowRfNode = Node<FlowNodeData, "flowNode">;
-type FlowRfEdge = Edge<{ branch?: "yes" | "no" }>;
+type FlowRfEdge = Edge<{ branch?: FlowEdgeBranch }>;
 
 interface BuilderShared {
   t: Translate;
   readOnly: boolean;
   sequenceName: (automationId: string) => string | undefined;
+  flowName: (flowId: string) => string | undefined;
+  productName: (productId: string) => string | undefined;
 }
 
 const BuilderCtx = createContext<BuilderShared | null>(null);
@@ -101,17 +107,31 @@ const NODE_ICON_PATHS: Record<FlowNodeType, string> = {
   handoff:
     "M9.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM3.5 19.5c.7-3.1 3.1-4.8 6-4.8s5.3 1.7 6 4.8",
   end: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.2 9.2h5.6v5.6H9.2z",
+  set_field:
+    "M4.5 19.5h4L19 9a2.12 2.12 0 0 0-3-3L5.5 16.5v3zM13.8 6.7l3 3M3.5 21h17",
+  http_request:
+    "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3.3 9.3h17.4M3.3 14.7h17.4M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5S9.6 5.8 12 3.5z",
+  goto_flow:
+    "M9 5.2H5.5A1.5 1.5 0 0 0 4 6.7v10.6A1.5 1.5 0 0 0 5.5 18.8H9M14.5 8.2 18 11.7l-3.5 3.5M18 11.7H9.5",
+  ab_split:
+    "M6.5 3.5v5.2a4 4 0 0 0 4 4H17M17 12.7l-2.7-2.7M17 12.7 14.3 15.4M6.5 12.7a4 4 0 0 0 4 4H17",
+  send_payment_link:
+    "M10.5 13.5a4.24 4.24 0 0 0 6 0l3-3a4.24 4.24 0 1 0-6-6L11.8 6.2M13.5 10.5a4.24 4.24 0 0 0-6 0l-3 3a4.24 4.24 0 1 0 6 6l1.7-1.7",
+  wait_reply:
+    "M20.5 11.5a8.5 8.5 0 0 1-12.3 7.5L3.5 20.5l1.5-4.7A8.5 8.5 0 1 1 20.5 11.5zM12 7.8V12l2.8 1.8",
 };
 
 /** Node kustom kanvas: label tipe dwibahasa + ringkasan config satu baris. */
 function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
-  const { t, sequenceName } = useBuilderShared();
+  const { t, sequenceName, flowName, productName } = useBuilderShared();
   const type = data.nodeType;
   const summary = summarizeNodeConfig(
     t,
     { type, config: data.config },
     sequenceName,
+    { flowName, productName },
   );
+  const branches = FLOW_BRANCHED_TYPES[type];
   const borderClass =
     data.issueSeverity === "error"
       ? "border-danger"
@@ -134,7 +154,9 @@ function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
               ? "bg-accent text-white"
               : type === "condition"
                 ? "bg-warning/15 text-warning"
-                : "bg-elevated text-muted"
+                : branches
+                  ? "bg-accent/15 text-accent"
+                  : "bg-elevated text-muted"
           }`}
         >
           <svg
@@ -161,20 +183,20 @@ function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
       ) : (
         <div className="pb-2.5" />
       )}
-      {type === "condition" ? (
+      {branches ? (
         <>
           <div className="flex items-center justify-between px-8 pb-1 text-[10px] font-semibold">
-            <span className="text-success">{t("flows.branchYes")}</span>
-            <span className="text-danger">{t("flows.branchNo")}</span>
+            <span className="text-success">{t(branches[0].labelKey)}</span>
+            <span className="text-danger">{t(branches[1].labelKey)}</span>
           </div>
           <Handle
-            id="yes"
+            id={branches[0].branch}
             type="source"
             position={Position.Bottom}
             style={{ left: "28%" }}
           />
           <Handle
-            id="no"
+            id={branches[1].branch}
             type="source"
             position={Position.Bottom}
             style={{ left: "72%" }}
@@ -246,6 +268,22 @@ function graphToRf(graph: FlowGraph): { nodes: FlowRfNode[]; edges: FlowRfEdge[]
   return { nodes, edges };
 }
 
+/** Props label chip untuk edge bercabang (muat awal & koneksi baru). */
+function branchEdgeLabelProps(t: Translate, branch: FlowEdgeBranch) {
+  const key = branchLabelKey(branch);
+  return {
+    label: key ? t(key) : branch,
+    labelBgPadding: [6, 3] as [number, number],
+    labelBgBorderRadius: 6,
+    labelBgStyle: { fill: "rgb(var(--color-surface))" },
+    labelStyle: {
+      fill: "rgb(var(--color-text-muted))",
+      fontSize: 11,
+      fontWeight: 600,
+    },
+  };
+}
+
 function rfToGraph(nodes: FlowRfNode[], edges: FlowRfEdge[]): FlowGraph {
   return {
     nodes: nodes.map((node) => ({
@@ -279,6 +317,12 @@ interface TenantMeta {
   tags: string[];
   stages: string[];
   sequences: AutomationResponse[];
+  /** Flow AKTIF tenant (pemilih goto_flow); flow yang diedit ditambah terpisah. */
+  flows: FlowResponse[];
+  /** Flow yang sedang diedit (boleh jadi tujuan goto dirinya sendiri). */
+  selfFlow: { id: string; name: string } | null;
+  /** Produk aktif tenant (pemilih send_payment_link). */
+  products: ProductResponse[];
 }
 
 interface NodeConfigPanelProps {
@@ -308,6 +352,8 @@ function NodeConfigPanel({
   const set = (patch: Record<string, unknown>) =>
     onChange(node.id, { ...config, ...patch });
   const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const numVal = (v: unknown, fallback: number) =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
 
   const stageOptions = useMemo(() => {
     const set = new Set<string>([...KNOWN_STAGES, ...meta.stages]);
@@ -801,6 +847,335 @@ function NodeConfigPanel({
         </div>
       ) : null}
 
+      {type === "set_field" ? (
+        <>
+          <div>
+            <label className={labelClass} htmlFor="cfg-setfield-field">
+              {t("flows.setFieldFieldLabel")}
+            </label>
+            <select
+              id="cfg-setfield-field"
+              className={inputClass}
+              disabled={readOnly}
+              value={
+                str(config.field).startsWith("custom:")
+                  ? "custom"
+                  : str(config.field) || "name"
+              }
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "custom") {
+                  const prev = str(config.field);
+                  set({
+                    field: prev.startsWith("custom:")
+                      ? prev
+                      : "custom:field_baru",
+                  });
+                } else {
+                  set({ field: v });
+                }
+              }}
+            >
+              <option value="name">{t("flows.fieldName")}</option>
+              <option value="phone">{t("flows.fieldPhone")}</option>
+              <option value="email">{t("flows.fieldEmail")}</option>
+              <option value="custom">custom:*</option>
+            </select>
+          </div>
+          {str(config.field).startsWith("custom:") ? (
+            <div>
+              <label className={labelClass} htmlFor="cfg-setfield-key">
+                {t("flows.setFieldCustomKeyLabel")}
+              </label>
+              <input
+                id="cfg-setfield-key"
+                className={inputClass}
+                disabled={readOnly}
+                placeholder={t("flows.setFieldCustomKeyPlaceholder")}
+                value={str(config.field).slice("custom:".length)}
+                onChange={(e) =>
+                  set({ field: `custom:${e.target.value}` })
+                }
+              />
+            </div>
+          ) : null}
+          <div>
+            <label className={labelClass} htmlFor="cfg-setfield-value">
+              {t("flows.setFieldValueLabel")}
+            </label>
+            <input
+              id="cfg-setfield-value"
+              className={inputClass}
+              disabled={readOnly}
+              value={str(config.value)}
+              onChange={(e) => set({ value: e.target.value })}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t("flows.setFieldValueHint")}
+            </p>
+          </div>
+        </>
+      ) : null}
+
+      {type === "http_request" ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-[110px_minmax(0,1fr)] gap-3">
+            <div>
+              <label className={labelClass} htmlFor="cfg-http-method">
+                {t("flows.httpMethodLabel")}
+              </label>
+              <select
+                id="cfg-http-method"
+                className={inputClass}
+                disabled={readOnly}
+                value={str(config.method) || "POST"}
+                onChange={(e) => set({ method: e.target.value })}
+              >
+                {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="cfg-http-url">
+                {t("flows.httpUrlLabel")}
+              </label>
+              <input
+                id="cfg-http-url"
+                className={inputClass}
+                disabled={readOnly}
+                placeholder={t("flows.httpUrlPlaceholder")}
+                value={str(config.url)}
+                onChange={(e) => set({ url: e.target.value })}
+              />
+            </div>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-http-headers">
+              {t("flows.httpHeadersLabel")}
+            </label>
+            <textarea
+              id="cfg-http-headers"
+              className={inputClass}
+              rows={2}
+              disabled={readOnly}
+              placeholder={t("flows.httpHeadersPlaceholder")}
+              value={
+                typeof config.headers === "object" &&
+                config.headers !== null &&
+                !Array.isArray(config.headers)
+                  ? Object.entries(
+                      config.headers as Record<string, unknown>,
+                    )
+                      .filter(([, v]) => typeof v === "string")
+                      .map(([k, v]) => `${k}: ${v as string}`)
+                      .join("\n")
+                  : ""
+              }
+              onChange={(e) => {
+                const headers: Record<string, string> = {};
+                for (const line of e.target.value.split("\n")) {
+                  const idx = line.indexOf(":");
+                  if (idx <= 0) continue;
+                  const name = line.slice(0, idx).trim();
+                  if (name) headers[name] = line.slice(idx + 1).trim();
+                }
+                set({ headers });
+              }}
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-http-body">
+              {t("flows.httpBodyLabel")}
+            </label>
+            <textarea
+              id="cfg-http-body"
+              className={inputClass}
+              rows={4}
+              disabled={readOnly}
+              value={str(config.body)}
+              onChange={(e) => set({ body: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-http-save">
+              {t("flows.httpSaveToFieldLabel")}
+            </label>
+            <input
+              id="cfg-http-save"
+              className={inputClass}
+              disabled={readOnly}
+              placeholder={t("flows.httpSaveToFieldPlaceholder")}
+              value={
+                str(config.saveToField).startsWith("custom:")
+                  ? str(config.saveToField).slice("custom:".length)
+                  : str(config.saveToField)
+              }
+              onChange={(e) => {
+                const key = e.target.value.trim();
+                set({ saveToField: key ? `custom:${key}` : "" });
+              }}
+            />
+          </div>
+          <p className="text-xs text-muted">{t("flows.httpHint")}</p>
+        </div>
+      ) : null}
+
+      {type === "goto_flow" ? (
+        <div>
+          <label className={labelClass} htmlFor="cfg-goto-flow">
+            {t("flows.gotoFlowLabel")}
+          </label>
+          {meta.flows.length === 0 && !meta.selfFlow ? (
+            <p className="text-sm text-muted">{t("flows.gotoNone")}</p>
+          ) : (
+            <select
+              id="cfg-goto-flow"
+              className={inputClass}
+              disabled={readOnly}
+              value={str(config.flowId)}
+              onChange={(e) => set({ flowId: e.target.value })}
+            >
+              <option value="">{t("flows.gotoFlowPlaceholder")}</option>
+              {meta.selfFlow &&
+              !meta.flows.some((f) => f.id === meta.selfFlow!.id) ? (
+                <option value={meta.selfFlow.id}>
+                  {meta.selfFlow.name} ({t("flows.gotoSelfNote")})
+                </option>
+              ) : null}
+              {meta.flows.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                  {meta.selfFlow && f.id === meta.selfFlow.id
+                    ? ` (${t("flows.gotoSelfNote")})`
+                    : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          <p className="mt-1 text-xs text-muted">{t("flows.gotoHint")}</p>
+        </div>
+      ) : null}
+
+      {type === "ab_split" ? (
+        <div>
+          <label className={labelClass} htmlFor="cfg-ab-percent">
+            {t("flows.abPercentLabel")}
+          </label>
+          <div className="mt-1 flex items-center gap-3">
+            <input
+              id="cfg-ab-percent"
+              type="range"
+              min={1}
+              max={99}
+              step={1}
+              className="flex-1"
+              disabled={readOnly}
+              value={numVal(config.percentA, 50)}
+              onChange={(e) =>
+                set({ percentA: Math.floor(Number(e.target.value) || 50) })
+              }
+            />
+            <input
+              type="number"
+              min={1}
+              max={99}
+              step={1}
+              className="w-20 rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink disabled:opacity-60"
+              disabled={readOnly}
+              value={numVal(config.percentA, 50)}
+              onChange={(e) =>
+                set({
+                  percentA: Math.min(
+                    99,
+                    Math.max(1, Math.floor(Number(e.target.value) || 50)),
+                  ),
+                })
+              }
+            />
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            A {numVal(config.percentA, 50)}% · B{" "}
+            {100 - numVal(config.percentA, 50)}% — {t("flows.abPercentHint")}
+          </p>
+        </div>
+      ) : null}
+
+      {type === "send_payment_link" ? (
+        <div>
+          <label className={labelClass} htmlFor="cfg-pay-product">
+            {t("flows.paymentProductLabel")}
+          </label>
+          {meta.products.length === 0 ? (
+            <p className="text-sm text-muted">{t("flows.paymentNone")}</p>
+          ) : (
+            <select
+              id="cfg-pay-product"
+              className={inputClass}
+              disabled={readOnly}
+              value={str(config.productId)}
+              onChange={(e) => set({ productId: e.target.value })}
+            >
+              <option value="">{t("flows.paymentProductPlaceholder")}</option>
+              {meta.products.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <p className="mt-1 text-xs text-muted">{t("flows.paymentHint")}</p>
+        </div>
+      ) : null}
+
+      {type === "wait_reply" ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass} htmlFor="cfg-wait-amount">
+                {t("flows.waitReplyAmountLabel")}
+              </label>
+              <input
+                id="cfg-wait-amount"
+                type="number"
+                min={0}
+                step={1}
+                className={inputClass}
+                disabled={readOnly}
+                value={numVal(config.amount, 1)}
+                onChange={(e) =>
+                  set({
+                    amount: Math.max(
+                      0,
+                      Math.floor(Number(e.target.value) || 0),
+                    ),
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="cfg-wait-unit">
+                {t("flows.delayUnitLabel")}
+              </label>
+              <select
+                id="cfg-wait-unit"
+                className={inputClass}
+                disabled={readOnly}
+                value={str(config.unit) || "hours"}
+                onChange={(e) => set({ unit: e.target.value })}
+              >
+                <option value="seconds">{t("flows.unitSeconds")}</option>
+                <option value="minutes">{t("flows.unitMinutes")}</option>
+                <option value="hours">{t("flows.unitHours")}</option>
+              </select>
+            </div>
+          </div>
+          <p className="text-xs text-muted">{t("flows.waitReplyHint")}</p>
+        </div>
+      ) : null}
+
       {type === "ai_response" ? (
         <p className="text-sm text-muted">{t("flows.staticAiResponse")}</p>
       ) : null}
@@ -853,6 +1228,14 @@ const STEP_OUTCOME_LABEL_KEYS: Record<string, TranslationKey> = {
   responded: "flows.stepOutcomeResponded",
   failed: "flows.stepOutcomeFailed",
   cap_exceeded: "flows.stepOutcomeCapExceeded",
+  field_set: "flows.stepOutcomeFieldSet",
+  split: "flows.stepOutcomeSplit",
+  goto: "flows.stepOutcomeGoto",
+  http_response: "flows.stepOutcomeHttpResponse",
+  http_error: "flows.stepOutcomeHttpError",
+  payment_link_sent: "flows.stepOutcomePaymentLinkSent",
+  replied: "flows.stepOutcomeReplied",
+  timeout: "flows.stepOutcomeTimeout",
 };
 
 interface FlowRunsPanelProps {
@@ -982,6 +1365,22 @@ function FlowRunsPanel({ t, locale, tenantId, flowId, graph }: FlowRunsPanelProp
       parts.push(
         d.result === true ? t("flows.stepResultYes") : t("flows.stepResultNo"),
       );
+    }
+    if (outcome === "split") {
+      parts.push(
+        d.branch === "a" ? t("flows.stepResultA") : t("flows.stepResultB"),
+      );
+    }
+    if (outcome === "replied") parts.push(t("flows.stepResultReplied"));
+    if (outcome === "timeout") parts.push(t("flows.stepResultTimeout"));
+    if (
+      (outcome === "http_response" || outcome === "http_error") &&
+      typeof d.status === "number"
+    ) {
+      parts.push(`HTTP ${d.status}`);
+    }
+    if (outcome === "field_set" && typeof d.field === "string" && d.field) {
+      parts.push(d.field);
     }
     if (typeof d.tag === "string" && d.tag) parts.push(d.tag);
     if (typeof d.stage === "string" && d.stage)
@@ -1173,18 +1572,7 @@ function BuilderInner({
     const { nodes: rfNodes, edges: rfEdges } = graphToRf(flow.graph);
     const labeledEdges = rfEdges.map((e) =>
       e.data?.branch
-        ? {
-            ...e,
-            label: t(e.data.branch === "yes" ? "flows.branchYes" : "flows.branchNo"),
-            labelBgPadding: [6, 3] as [number, number],
-            labelBgBorderRadius: 6,
-            labelBgStyle: { fill: "rgb(var(--color-surface))" },
-            labelStyle: {
-              fill: "rgb(var(--color-text-muted))",
-              fontSize: 11,
-              fontWeight: 600,
-            },
-          }
+        ? { ...e, ...branchEdgeLabelProps(t, e.data.branch) }
         : e,
     );
     setNodes(rfNodes);
@@ -1213,6 +1601,20 @@ function BuilderInner({
     (automationId: string) =>
       meta.sequences.find((s) => s.id === automationId)?.name,
     [meta.sequences],
+  );
+
+  const flowName = useCallback(
+    (flowId: string) =>
+      flowId === flow.id
+        ? flow.name
+        : meta.flows.find((f) => f.id === flowId)?.name,
+    [meta.flows, flow.id, flow.name],
+  );
+
+  const productName = useCallback(
+    (productId: string) =>
+      meta.products.find((p) => p.id === productId)?.name,
+    [meta.products],
   );
 
   // Tandai node yang disebut issue (klik issue juga memilih node itu).
@@ -1294,31 +1696,21 @@ function BuilderInner({
       const targetNode = nodes.find((n) => n.id === connection.target);
       if (!sourceNode || !targetNode) return;
       if (targetNode.data.nodeType === "trigger") return;
-      const branch =
-        sourceNode.data.nodeType === "condition"
-          ? connection.sourceHandle === "no"
-            ? ("no" as const)
-            : ("yes" as const)
-          : undefined;
+      // Node bercabang: branch berasal dari handle sumber yang
+      // dipakai; koneksi tanpa handle spesifik jatuh ke cabang
+      // pertama tipe itu (perilaku condition 8B digeneralisasi).
+      const branched = FLOW_BRANCHED_TYPES[sourceNode.data.nodeType];
+      const branch: FlowEdgeBranch | undefined = branched
+        ? (branched.find((b) => b.branch === connection.sourceHandle)
+            ?.branch ?? branched[0].branch)
+        : undefined;
       counterRef.current += 1;
       const newEdge: FlowRfEdge = {
         id: `e-${connection.source}-${branch ?? "next"}-${connection.target}-${Date.now()}-${counterRef.current}`,
         source: connection.source,
         target: connection.target,
         ...(branch ? { sourceHandle: branch } : {}),
-        ...(branch
-          ? {
-              label: t(branch === "yes" ? "flows.branchYes" : "flows.branchNo"),
-              labelBgPadding: [6, 3] as [number, number],
-              labelBgBorderRadius: 6,
-              labelBgStyle: { fill: "rgb(var(--color-surface))" },
-              labelStyle: {
-                fill: "rgb(var(--color-text-muted))",
-                fontSize: 11,
-                fontWeight: 600,
-              },
-            }
-          : {}),
+        ...(branch ? branchEdgeLabelProps(t, branch) : {}),
         data: branch ? { branch } : {},
       };
       setEdges((prev) => {
@@ -1546,7 +1938,13 @@ function BuilderInner({
     </ul>
   );
 
-  const shared: BuilderShared = { t, readOnly, sequenceName };
+  const shared: BuilderShared = {
+    t,
+    readOnly,
+    sequenceName,
+    flowName,
+    productName,
+  };
 
   return (
     <section>
@@ -1856,6 +2254,9 @@ export function FlowBuilderPage({
     tags: [],
     stages: [],
     sequences: [],
+    flows: [],
+    selfFlow: null,
+    products: [],
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1866,11 +2267,16 @@ export function FlowBuilderPage({
     setLoading(true);
     (async () => {
       try {
-        const [flowRes, automations, contacts] = await Promise.all([
-          api.flows.get(tenantId, flowId),
-          api.automations.list(tenantId).catch(() => []),
-          api.contacts.list(tenantId, { limit: 200 }).catch(() => null),
-        ]);
+        const [flowRes, automations, contacts, flowsRes, products] =
+          await Promise.all([
+            api.flows.get(tenantId, flowId),
+            api.automations.list(tenantId).catch(() => []),
+            api.contacts.list(tenantId, { limit: 200 }).catch(() => null),
+            api.flows
+              .list(tenantId, { status: "active", limit: 100 })
+              .catch(() => null),
+            api.products.list(tenantId).catch(() => [] as ProductResponse[]),
+          ]);
         if (cancelled) return;
         setFlow(flowRes);
         const tags = new Set<string>();
@@ -1885,6 +2291,9 @@ export function FlowBuilderPage({
           sequences: automations.filter(
             (a) => a.kind === "sequence" && a.isActive,
           ),
+          flows: flowsRes?.flows ?? [],
+          selfFlow: { id: flowRes.id, name: flowRes.name },
+          products: products.filter((p) => p.isActive),
         });
       } catch (err) {
         if (!cancelled) setError(translateApiError(t, err));
