@@ -957,3 +957,74 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
 - `packages/db` verify (PGlite): 17 migrasi bersih, 31 tabel, 27 policy,
   termasuk seksi baru yang membuktikan lengan `app.api_key_hash` hanya
   membuka baris ber-hash yang disajikan.
+
+---
+
+## Update Fase 5B — SDK TypeScript + MCP server (stdio) (2026-11-02)
+
+### Perubahan
+- **Tidak ada perubahan perilaku API/web/worker dan tidak ada service baru
+  yang berjalan permanen di server.** Fase ini murni tambahan sisi klien:
+  MCP server stdio dijalankan lokal oleh klien MCP (Claude Desktop/Cursor)
+  di mesin pengguna, bukan di server staging.
+- **`packages/sdk` nyata** (`@sahabat-kreator/sdk`): `SahabatKreatorClient`
+  tipis di atas API publik v1 — `me`, `listContacts`, `createContact`,
+  `listConversations`, `listMessages`, `sendMessage`, `listProducts`.
+  Semua tipe request/response DIIMPOR dari `@sahabat-kreator/contracts`
+  (kontrak ditambah skema query v1: `V1ListContactsQuerySchema` dkk. +
+  tipe `ListContactsQuery`/`ListConversationsQuery`/`ListMessagesQuery`
+  turunan `z.infer`); yang ditulis tangan hanya transport (Bearer API key,
+  pemetaan error). Error dilempar sebagai `SahabatKreatorApiError` bertipe
+  membawa `code` kontrak + status HTTP. Tanpa dependensi runtime (fetch
+  bawaan). Ada `verify:sdk` (tsx) untuk uji integrasi terhadap server live.
+- **`apps/mcp-server` nyata** (`@sahabat-kreator/mcp-server`): server MCP
+  **stdio** memakai SDK resmi `@modelcontextprotocol/sdk@1.32.2`
+  (`McpServer.registerTool` + `StdioServerTransport`), dibangun DI ATAS
+  `@sahabat-kreator/sdk` — membuktikan pola adapter tipis RANCANGAN §2/§8.
+  Konfigurasi hanya env: `SAHABAT_KREATOR_API_KEY` (wajib) +
+  `SAHABAT_KREATOR_BASE_URL` (default `https://botara.my.id`). 7 tools:
+  `whoami`, `list_contacts`, `create_contact`, `list_conversations`,
+  `list_messages`, `send_message`, `list_products` — persis kemampuan v1;
+  scope kunci API menegakkan izinnya (tool yang scope-nya kurang menerima
+  403 dari API). Error API menjadi hasil tool `isError` berisi kode
+  kontrak, BUKAN crash. Build tsup (paket workspace dibundel, SDK MCP
+  eksternal); `verify:mcp` (ter-commit) memulai dist server sebagai proses
+  anak dan mengujinya dengan klien MCP resmi dari SDK yang sama.
+  Log server hanya ke stderr (stdout = kanal protokol).
+
+### Verifikasi Fase 5B (publik, dari server terhadap https://botara.my.id)
+- Typecheck + build SEMUA proyek hijau (termasuk sdk & mcp-server);
+  smoke lokal lebih dulu: initialize + tools/list lulus, kunci palsu →
+  tool error `API_KEY_INVALID` tanpa crash.
+- Orkestrasi Bun sekali-pakai di server (akun uji BARU `fase5b-*@sk.test`,
+  sudah dihapus setelah jalan): sign-up → tenant → channel webchat →
+  produk → API key full-scope (prefix `sk_live_ZvVD4…`) + API key default
+  read-only (prefix `sk_live_Re-Sj…`) → sesi pengunjung webchat + pesan
+  masuk → WebSocket pengunjung dibuka selama uji.
+- **`verify:mcp` 14/14 PASS**: initialize OK (`sahabat-kreator@0.1.0`) →
+  tools/list = 7 tools → `whoami` tenant "Studio Uji 5B" dengan 5 scope →
+  `list_contacts` → `create_contact` → kontak muncul lagi via pencarian →
+  `list_conversations`/`list_messages` → `send_message` berstatus `sent` →
+  pesan terbaca kembali via `list_messages` → `list_products`. Negatif:
+  kunci terbatas → tools/list tetap jalan; `send_message` dan
+  `create_contact` menjadi tool error berisi `API_KEY_SCOPE_DENIED`.
+- **Pengiriman nyata**: pengunjung webchat menerima pesan MCP lewat WS
+  selama uji, dan status pesan terkonfirmasi `sent` lewat
+  `GET /api/v1/conversations/:id/messages`. (Catatan: payload event WS
+  membawa snapshot status `queued` — pola Fase 1F yang sudah ada; status
+  otoritatif di DB adalah `sent`.)
+- **`verify:sdk` 3/3 PASS**: `me()` + `listContacts()` dengan kunci uji;
+  kunci salah → `SahabatKreatorApiError` dengan `code=API_KEY_INVALID`,
+  status 401.
+- Penutup: `GET https://botara.my.id/api/health` ok; kunci utuh tidak
+  pernah dicetak (hanya prefix di log verifikasi).
+
+### Batas jujur
+- Transport MCP v1 hanya **stdio** (standar klien lokal). Streamable HTTP
+  menyusul bila ada kebutuhan klien jarak jauh; tools/SDK tidak berubah.
+- Di server staging tidak ada `node` di PATH user ubuntu — proses anak
+  pada `verify:mcp` dijalankan lewat Bun (dist server adalah ESM murni;
+  skrip mendukung override `SAHABAT_KREATOR_MCP_COMMAND`). Di mesin
+  pengguna umum, `node dist/index.js` adalah jalur standarnya.
+- SDK belum punya retry/pagination otomatis — pemanggil memakai
+  `limit`/`offset` secara eksplisit (sesuai kontrak v1).
