@@ -646,6 +646,34 @@ export async function getConversationDeliveryTarget(
 }
 
 /**
+ * Fase 7C: validasi ulang satu pesan terhadap snapshot batch poller —
+ * true hanya bila barisnya masih ada dan masih `queued`. Poller
+ * pengiriman memanggil ini tepat sebelum mengirim SETIAP pesan:
+ * snapshot batch bisa berumur detik (pengiriman sekuensial + jeda
+ * provider), dan pembatalan broadcast MENGHAPUS pesan yang masih
+ * queued — pesan yang sudah hilang/berubah status tidak boleh tetap
+ * dikirim dari snapshot basi. Sisa balapan yang tak terhindarkan:
+ * tepat satu permintaan provider yang sudah terlanjur terbang saat
+ * pembatalan tiba (tidak bisa ditarik dari jaringan).
+ */
+export async function isOutboundMessageQueued(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  messageId: string,
+): Promise<boolean> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select({ status: messages.status })
+      .from(messages)
+      .where(
+        and(eq(messages.tenantId, ctx.tenantId), eq(messages.id, messageId)),
+      )
+      .limit(1);
+    return row?.status === "queued";
+  });
+}
+
+/**
  * Menandai satu pesan outbound `queued` sebagai `sent` setelah transport
  * sungguhan mengirimnya (Fase 1F: hub WebSocket webchat) + audit
  * `message.sent`. Mengembalikan baris terbaru, atau null bila pesan tidak

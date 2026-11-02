@@ -2,6 +2,7 @@ import {
   decryptChannelSecret,
   extractRawProviderMessageId,
   getMessageProviderMessageId,
+  isOutboundMessageQueued,
   listQueuedTelegramDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
@@ -105,6 +106,14 @@ export function startTelegramDeliveryPoller(
       }
       for (const delivery of deliveries) {
         const ctx = { tenantId: delivery.tenantId };
+        // Fase 7C: validasi ulang snapshot batch — pesan yang sudah
+        // tidak queued (mis. dihapus pembatalan broadcast) TIDAK
+        // dikirim. Lihat isOutboundMessageQueued di core.
+        if (
+          !(await isOutboundMessageQueued(bundle.db, ctx, delivery.messageId))
+        ) {
+          continue;
+        }
         // Fase 6G: setiap perubahan status final diterbitkan sebagai
         // nudge agar dashboard menyegar tanpa menunggu polling.
         const nudgeStatus = async (kind: "message.sent" | "message.failed") => {

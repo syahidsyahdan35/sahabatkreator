@@ -2,6 +2,7 @@ import {
   decryptChannelSecret,
   extractRawProviderMessageId,
   getMessageProviderMessageId,
+  isOutboundMessageQueued,
   listQueuedMetaDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
@@ -116,6 +117,14 @@ export function startMetaDeliveryPoller(
       }
       for (const delivery of deliveries) {
         const ctx = { tenantId: delivery.tenantId };
+        // Fase 7C: validasi ulang snapshot batch — pesan yang sudah
+        // tidak queued (mis. dihapus pembatalan broadcast) TIDAK
+        // dikirim. Lihat isOutboundMessageQueued di core.
+        if (
+          !(await isOutboundMessageQueued(bundle.db, ctx, delivery.messageId))
+        ) {
+          continue;
+        }
         const nudgeStatus = async (kind: "message.sent" | "message.failed") => {
           if (opts.publisher) {
             await opts.publisher.publishNudge({

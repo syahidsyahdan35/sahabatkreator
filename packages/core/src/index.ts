@@ -40,6 +40,7 @@ export {
   markConversationRead,
   markOutboundMessageSent,
   markOutboundMessageFailed,
+  isOutboundMessageQueued,
   RETRYABLE_FAILED_PROVIDERS,
   listFailedOutboundMessages,
   retryFailedOutboundMessage,
