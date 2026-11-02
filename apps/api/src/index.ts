@@ -37,6 +37,7 @@ import { createAdminRoutes } from "./modules/admin/routes";
 import { createLogsRoutes } from "./modules/logs/routes";
 import { createAuditRoutes } from "./modules/audit/routes";
 import { createBroadcastsRoutes } from "./modules/broadcasts/routes";
+import { createWhatsAppTemplatesRoutes } from "./modules/whatsapp-templates/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
 import { createNotesRoutes } from "./modules/notes/routes";
@@ -151,6 +152,15 @@ routes.route(
 // Modul broadcasts (Fase 7C) — kampanye siaran /tenants/:tenantId/broadcasts;
 // eksekusi dispatch ada di worker (event outbox broadcast.dispatch_due).
 routes.route("/", createBroadcastsRoutes(authBundle));
+// Modul whatsapp-templates (Fase 10A) — template pesan resmi WhatsApp
+// /tenants/:tenantId/whatsapp-templates (cermin lokal + Graph Meta).
+routes.route(
+  "/",
+  createWhatsAppTemplatesRoutes(authBundle, {
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    metaApiBase: env.META_API_BASE,
+  }),
+);
 // Modul flows (Fase 8A) — definisi flow graf /tenants/:tenantId/flows +
 // run & langkah; eksekusi oleh worker (job flow.step dari event outbox).
 routes.route("/", createFlowsRoutes(authBundle));

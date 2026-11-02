@@ -204,14 +204,28 @@ export function startMetaDeliveryPoller(
               apiVersion: opts.graphApiVersion,
               accessToken: token,
             });
-            rawProviderId = (
-              await waClient.sendTextMessage({
-                phoneNumberId: delivery.accountExternalId,
-                to: delivery.recipientExternalId,
-                text: delivery.contentText,
-                ...(quotedRawId ? { contextMessageId: quotedRawId } : {}),
-              })
-            ).providerMessageId;
+            // Fase 10A: pesan bertemplatePayload dikirim sebagai
+            // pesan TEMPLATE resmi (satu-satunya bentuk proaktif di
+            // luar jendela 24 jam); kutipan tidak berlaku untuk
+            // template. Selain itu teks bebas seperti biasa.
+            rawProviderId = delivery.templatePayload
+              ? (
+                  await waClient.sendTemplateMessage({
+                    phoneNumberId: delivery.accountExternalId,
+                    to: delivery.recipientExternalId,
+                    templateName: delivery.templatePayload.name,
+                    languageCode: delivery.templatePayload.languageCode,
+                    bodyParams: delivery.templatePayload.bodyParams,
+                  })
+                ).providerMessageId
+              : (
+                  await waClient.sendTextMessage({
+                    phoneNumberId: delivery.accountExternalId,
+                    to: delivery.recipientExternalId,
+                    text: delivery.contentText,
+                    ...(quotedRawId ? { contextMessageId: quotedRawId } : {}),
+                  })
+                ).providerMessageId;
           } else {
             const client = new MetaGraphClient({
               baseUrl: opts.metaApiBase,

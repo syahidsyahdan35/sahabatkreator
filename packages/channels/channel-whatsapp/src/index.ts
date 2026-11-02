@@ -23,10 +23,11 @@ import type {
  *   (sent/delivered/read/failed) tiba sebagai event terpisah.
  * - Jendela layanan 24 jam: teks bebas hanya sah <24 jam sejak pesan
  *   terakhir pengguna; di luar itu Graph menolak (mis. kode 131047)
- *   dan pemanggil menandai pesan failed — template message adalah
- *   fase broadcast, BUKAN di sini.
- * - Routing kategori template (RANCANGAN §12.6) belum berlaku: v1
- *   hanya teks layanan (service conversation) lewat Cloud API.
+ *   dan pemanggil menandai pesan failed — di luar jendela, jalur
+ *   resminya adalah pesan TEMPLATE (Fase 10A: manajemen template +
+ *   `sendTemplateMessage` di klien ini; dipakai broadcast).
+ * - Routing kategori template (RANCANGAN §12.6) belum berlaku: kirim
+ *   teks adalah percakapan layanan (service) lewat Cloud API.
  *
  * KEAMANAN: Access Token (System User) dikirim sebagai header
  * `Authorization: Bearer` — tidak pernah sebagai query `access_token=`
@@ -83,6 +84,100 @@ export interface WhatsAppPhoneNumberProfile {
   verifiedName: string | null;
   /** Nomor tampil terformat (display_phone_number, mis. "+62 812-3456-7890"). */
   displayPhoneNumber: string | null;
+}
+
+/** Satu tombol komponen BUTTONS template (URL / QUICK_REPLY / PHONE_NUMBER / COPY_CODE …). */
+export interface WhatsAppTemplateButton {
+  type: string;
+  text?: string;
+  url?: string;
+  phone_number?: string;
+}
+
+/**
+ * Satu komponen template Meta (HEADER / BODY / FOOTER / BUTTONS) —
+ * disimpan apa adanya di cermin lokal; hanya field yang kita baca
+ * yang dideklarasikan, sisanya lolos lewat index signature tidak ada —
+ * parser di bawah membaca defensif dari `unknown`.
+ */
+export interface WhatsAppTemplateComponent {
+  type: string;
+  format?: string;
+  text?: string;
+  example?: {
+    body_text?: string[][];
+    header_text?: string[];
+  };
+  buttons?: WhatsAppTemplateButton[];
+}
+
+/** Satu template pesan resmi Meta dari `GET /{waba-id}/message_templates`. */
+export interface WhatsAppMessageTemplate {
+  /** Id template di Meta; null bila respons tidak menyertakannya. */
+  id: string | null;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  components: WhatsAppTemplateComponent[];
+}
+
+/** Hasil pembuatan template di Meta (`POST /{waba-id}/message_templates`). */
+export interface WhatsAppTemplateCreateResult {
+  id: string | null;
+  status: string;
+  category: string;
+}
+
+/** Payload pembuatan template (bentuk Graph `message_templates`). */
+export interface WhatsAppTemplateCreateInput {
+  name: string;
+  language: string;
+  category: "UTILITY" | "MARKETING" | "AUTHENTICATION";
+  components: WhatsAppTemplateComponent[];
+}
+
+const TEMPLATE_PLACEHOLDER_RE = /\{\{(\d+)\}\}/g;
+
+/**
+ * Jumlah variabel sebuah teks template = indeks {{n}} TERBESAR yang
+ * muncul (Meta menomori variabel mulai 1 tanpa celah; teks tanpa
+ * placeholder = 0). Murni — dipakai parser komponen di bawah.
+ */
+export function countTemplateVariables(text: string | null | undefined): number {
+  if (!text) return 0;
+  let max = 0;
+  for (const match of text.matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Turunan lokal dari komponen template: teks BODY + jumlah variabel
+ * BODY-nya (untuk pratinjau & pemetaan parameter broadcast Fase 10A).
+ * Komponen dibaca defensif (respons Graph diperlakukan `unknown`
+ * sampai divalidasi bentuknya di listMessageTemplates).
+ */
+export function deriveTemplateBody(components: WhatsAppTemplateComponent[]): {
+  bodyText: string | null;
+  variableCount: number;
+} {
+  const body = components.find((c) => c.type === "BODY");
+  const bodyText = typeof body?.text === "string" ? body.text : null;
+  return { bodyText, variableCount: countTemplateVariables(bodyText) };
+}
+
+/** Render pratinjau teks template: ganti {{n}} dengan parameter ke-n (1-based). */
+export function renderTemplatePreview(
+  bodyText: string,
+  bodyParams: string[],
+): string {
+  return bodyText.replace(TEMPLATE_PLACEHOLDER_RE, (_whole, raw: string) => {
+    const idx = Number(raw) - 1;
+    return idx >= 0 && idx < bodyParams.length ? bodyParams[idx] : "";
+  });
 }
 
 /** Klien WhatsApp Cloud API tipis di atas fetch. Satu instance per token. */
@@ -160,6 +255,144 @@ export class WhatsAppCloudClient {
     } catch {
       throw new WhatsAppGraphError(response.status, null, "invalid_response");
     }
+  }
+
+  private async deleteJson<T>(path: string): Promise<T> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
+        method: "DELETE",
+        headers: this.headers(),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch {
+      throw new WhatsAppGraphError(0, null, "network_error");
+    }
+    if (!response.ok) throw await this.parseError(response);
+    try {
+      return (await response.json()) as T;
+    } catch {
+      throw new WhatsAppGraphError(response.status, null, "invalid_response");
+    }
+  }
+
+  /**
+   * Daftar template WABA (`GET /{waba-id}/message_templates`) — sumber
+   * sinkronisasi cermin lokal Fase 10A. Satu halaman `limit=200`
+   * (WABA kreator jauh di bawah itu; paging lanjutan dicatat sebagai
+   * batas jujur fase ini). Baris tanpa nama/bahasa dilewati defensif.
+   */
+  async listMessageTemplates(
+    wabaId: string,
+  ): Promise<WhatsAppMessageTemplate[]> {
+    const body = await this.getJson<{
+      data?: Array<Record<string, unknown>>;
+    }>(
+      `${encodeURIComponent(wabaId)}/message_templates?fields=id,name,language,category,status,components&limit=200`,
+    );
+    const out: WhatsAppMessageTemplate[] = [];
+    for (const row of body.data ?? []) {
+      if (typeof row?.name !== "string" || !row.name) continue;
+      if (typeof row?.language !== "string" || !row.language) continue;
+      out.push({
+        id: typeof row.id === "string" ? row.id : null,
+        name: row.name,
+        language: row.language,
+        category: typeof row.category === "string" ? row.category : "UTILITY",
+        status: typeof row.status === "string" ? row.status : "PENDING",
+        components: Array.isArray(row.components)
+          ? (row.components as WhatsAppTemplateComponent[])
+          : [],
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Buat template baru di Meta (`POST /{waba-id}/message_templates`).
+   * Meta menjawab `{ id, status, category }` — status awal nyaris
+   * selalu PENDING (tinjauan Meta); penolakan bentuk (nama ganda,
+   * variabel tanpa contoh, …) melempar WhatsAppGraphError berkode
+   * Graph resmi untuk diterjemahkan lapisan API menjadi kode
+   * terkontrol META_TEMPLATE_INVALID.
+   */
+  async createMessageTemplate(
+    wabaId: string,
+    input: WhatsAppTemplateCreateInput,
+  ): Promise<WhatsAppTemplateCreateResult> {
+    const body = await this.postJson<{
+      id?: string;
+      status?: string;
+      category?: string;
+    }>(`${encodeURIComponent(wabaId)}/message_templates`, {
+      name: input.name,
+      language: input.language,
+      category: input.category,
+      components: input.components,
+    });
+    return {
+      id: typeof body.id === "string" ? body.id : null,
+      status: typeof body.status === "string" ? body.status : "PENDING",
+      category: typeof body.category === "string" ? body.category : input.category,
+    };
+  }
+
+  /**
+   * Hapus template di Meta (`DELETE /{waba-id}/message_templates?name=…`).
+   * Meta menghapus template berdasarkan NAMA (semua bahasa) — pemanggil
+   * menyelaraskan cermin lokalnya dengan semantik yang sama.
+   */
+  async deleteMessageTemplate(wabaId: string, name: string): Promise<void> {
+    await this.deleteJson<{ success?: boolean }>(
+      `${encodeURIComponent(wabaId)}/message_templates?name=${encodeURIComponent(name)}`,
+    );
+  }
+
+  /**
+   * Kirim pesan TEMPLATE (Cloud API): `POST /{phone_number_id}/messages`
+   * `type: "template"` — satu-satunya bentuk pesan proaktif yang sah di
+   * luar jendela layanan 24 jam (Fase 10A; dipakai broadcast).
+   * `bodyParams` = nilai variabel BODY {{1}}, {{2}}, … secara berurutan;
+   * array kosong → komponen body tidak dikirim sama sekali (template
+   * tanpa variabel). Mengembalikan wamid seperti sendTextMessage.
+   */
+  async sendTemplateMessage(input: {
+    phoneNumberId: string;
+    to: string;
+    templateName: string;
+    languageCode: string;
+    bodyParams: string[];
+  }): Promise<{ providerMessageId: string }> {
+    const body = await this.postJson<{
+      messages?: Array<{ id?: string }>;
+    }>(`${encodeURIComponent(input.phoneNumberId)}/messages`, {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: input.to,
+      type: "template",
+      template: {
+        name: input.templateName,
+        language: { code: input.languageCode },
+        ...(input.bodyParams.length > 0
+          ? {
+              components: [
+                {
+                  type: "body",
+                  parameters: input.bodyParams.map((text) => ({
+                    type: "text",
+                    text,
+                  })),
+                },
+              ],
+            }
+          : {}),
+      },
+    });
+    const wamid = body.messages?.[0]?.id;
+    if (typeof wamid !== "string" || !wamid) {
+      throw new WhatsAppGraphError(200, null, "missing_message_id");
+    }
+    return { providerMessageId: wamid };
   }
 
   /**

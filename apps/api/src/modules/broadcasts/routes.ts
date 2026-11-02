@@ -54,11 +54,14 @@ import { resolveTenantForUser } from "../tenants/guard";
  * data kampanye bersama, selaras daftar kontak/automation. Non-member
  * selalu 404 TENANT_NOT_FOUND agar eksistensi tenant tidak bocor.
  *
- * Gerbang channel ditegakkan core: provider whatsapp/webchat →
- * 422 BROADCAST_CHANNEL_UNSUPPORTED (whatsapp menunggu template
- * resmi; webchat tanpa semantik push); jadwalkan pada channel yang
- * tidak `connected` → 409 CHANNEL_DISCONNECTED; transisi status tidak
- * sah → 409 BROADCAST_INVALID_STATE.
+ * Gerbang channel ditegakkan core: provider webchat →
+ * 422 BROADCAST_CHANNEL_UNSUPPORTED (tanpa semantik push);
+ * WhatsApp (Fase 10A) hanya lewat template: tanpa template →
+ * 422 BROADCAST_TEMPLATE_REQUIRED, template belum APPROVED →
+ * 422 BROADCAST_TEMPLATE_NOT_APPROVED (diperiksa saat buat/edit/
+ * jadwalkan); jadwalkan pada channel yang tidak `connected` →
+ * 409 CHANNEL_DISCONNECTED; transisi status tidak sah →
+ * 409 BROADCAST_INVALID_STATE.
  */
 
 function serializeBroadcast(
@@ -72,6 +75,8 @@ function serializeBroadcast(
     channelDisplayName: broadcast.channelDisplayName,
     name: broadcast.name,
     messageText: broadcast.messageText,
+    whatsappTemplateId: broadcast.whatsappTemplateId ?? null,
+    templateVariableSources: broadcast.templateVariableSources ?? [],
     audienceFilter: broadcast.audienceFilter ?? {},
     status: broadcast.status,
     scheduledAt: broadcast.scheduledAt?.toISOString() ?? null,
@@ -239,6 +244,8 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
       name: parsed.data.name,
       channelAccountId: parsed.data.channelAccountId,
       messageText: parsed.data.messageText,
+      whatsappTemplateId: parsed.data.whatsappTemplateId,
+      templateVariableSources: parsed.data.templateVariableSources,
       filter: parsed.data.audienceFilter,
     });
     switch (result.kind) {
@@ -252,6 +259,29 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
           422,
           "BROADCAST_CHANNEL_UNSUPPORTED",
           `Broadcasts are not supported for provider '${result.provider}' yet`,
+        );
+      case "template_required":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_REQUIRED",
+          "WhatsApp broadcasts require an approved message template",
+        );
+      case "template_not_approved":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_NOT_APPROVED",
+          `WhatsApp template is not approved (status '${result.status}')`,
+        );
+      case "template_not_found":
+        return apiError(c, 404, "NOT_FOUND", "WhatsApp template not found");
+      case "message_required":
+        return apiError(
+          c,
+          400,
+          "VALIDATION_ERROR",
+          "Message text is required for this provider",
         );
     }
   });
@@ -293,6 +323,8 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
         name: parsed.data.name,
         channelAccountId: parsed.data.channelAccountId,
         messageText: parsed.data.messageText,
+        whatsappTemplateId: parsed.data.whatsappTemplateId,
+        templateVariableSources: parsed.data.templateVariableSources,
         filter: parsed.data.audienceFilter,
       },
     });
@@ -319,6 +351,22 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
           "BROADCAST_CHANNEL_UNSUPPORTED",
           `Broadcasts are not supported for provider '${result.provider}' yet`,
         );
+      case "template_required":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_REQUIRED",
+          "WhatsApp broadcasts require an approved message template",
+        );
+      case "template_not_approved":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_NOT_APPROVED",
+          `WhatsApp template is not approved (status '${result.status}')`,
+        );
+      case "template_not_found":
+        return apiError(c, 404, "NOT_FOUND", "WhatsApp template not found");
     }
   });
 
@@ -395,6 +443,20 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
           422,
           "BROADCAST_CHANNEL_UNSUPPORTED",
           `Broadcasts are not supported for provider '${result.provider}' yet`,
+        );
+      case "template_required":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_REQUIRED",
+          "WhatsApp broadcasts require an approved message template",
+        );
+      case "template_not_approved":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_NOT_APPROVED",
+          `WhatsApp template is not approved (status '${result.status}')`,
         );
     }
   });
