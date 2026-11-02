@@ -133,6 +133,15 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "saved_reply.created": "audit.actionSavedReplyCreated",
   "saved_reply.updated": "audit.actionSavedReplyUpdated",
   "saved_reply.deleted": "audit.actionSavedReplyDeleted",
+  "conversation.assigned": "audit.actionConversationAssigned",
+  "conversation.unassigned": "audit.actionConversationUnassigned",
+  "conversation.note_created": "audit.actionConversationNoteCreated",
+  "conversation.note_deleted": "audit.actionConversationNoteDeleted",
+  "team.invited": "audit.actionTeamInvited",
+  "team.invitation_revoked": "audit.actionTeamInvitationRevoked",
+  "team.member_joined": "audit.actionTeamMemberJoined",
+  "team.role_changed": "audit.actionTeamRoleChanged",
+  "team.member_removed": "audit.actionTeamMemberRemoved",
   "agent.batched": "audit.actionAgentBatched",
 };
 
@@ -154,6 +163,9 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   flow: "audit.targetFlow",
   flow_run: "audit.targetFlowRun",
   saved_reply: "audit.targetSavedReply",
+  invitation: "audit.targetInvitation",
+  member: "audit.targetMember",
+  conversation_note: "audit.targetConversationNote",
 };
 
 /** Warna chip actor mengikuti token semantik (pola chip Logs). */

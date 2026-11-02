@@ -88,6 +88,22 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.FLOW_INVALID_STATE");
     case "FLOW_GRAPH_INVALID":
       return t("errors.FLOW_GRAPH_INVALID");
+    case "ASSIGNEE_NOT_MEMBER":
+      return t("errors.ASSIGNEE_NOT_MEMBER");
+    case "INVITATION_EXPIRED":
+      return t("errors.INVITATION_EXPIRED");
+    case "INVITATION_REVOKED":
+      return t("errors.INVITATION_REVOKED");
+    case "INVITATION_ALREADY_ACCEPTED":
+      return t("errors.INVITATION_ALREADY_ACCEPTED");
+    case "INVITATION_EMAIL_MISMATCH":
+      return t("errors.INVITATION_EMAIL_MISMATCH");
+    case "INVITATION_ALREADY_MEMBER":
+      return t("errors.INVITATION_ALREADY_MEMBER");
+    case "TEAM_OWNER_PROTECTED":
+      return t("errors.TEAM_OWNER_PROTECTED");
+    case "TEAM_SELF_ACTION":
+      return t("errors.TEAM_SELF_ACTION");
     default:
       break;
   }

@@ -6,10 +6,12 @@ import {
   type FormEvent,
 } from "react";
 import type {
+  ConversationNoteResponse,
   ConversationResponse,
   MessageReplyTo,
   MessageResponse,
   SavedReplyResponse,
+  TeamMemberResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
@@ -129,14 +131,41 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
   // ke atas membaca riwayat, penyegaran latar TIDAK boleh menyeretnya.
   const stickToBottomRef = useRef(true);
 
+  // Fase 9C — penugasan & catatan internal: filter daftar (semua / milik
+  // saya / belum ditugaskan), daftar member untuk pemilih penerima tugas,
+  // dan tab panel (Pesan | Catatan). Filter disimpan juga di ref agar
+  // penyegaran latar menghormatinya (daftar tidak boleh "melompat"
+  // kembali ke Semua setiap siklus polling).
+  const [assignmentFilter, setAssignmentFilter] = useState<
+    "all" | "mine" | "unassigned"
+  >("all");
+  const assignmentFilterRef = useRef<"all" | "mine" | "unassigned">("all");
+  const [members, setMembers] = useState<TeamMemberResponse[]>([]);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<"messages" | "notes">("messages");
+  const [notes, setNotes] = useState<ConversationNoteResponse[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const myMember = members.find((m) => m.isSelf) ?? null;
+  const canModerateNotes =
+    myMember?.role === "owner" || myMember?.role === "admin";
+
   const loadConversations = useCallback(async () => {
     if (!tenantId) return;
     setLoading(true);
     setError(null);
     try {
-      const list = await api.conversations.list(tenantId);
+      const filter = assignmentFilterRef.current;
+      const list = await api.conversations.list(
+        tenantId,
+        filter === "all" ? undefined : { assignment: filter },
+      );
       setConversations(list);
-      setFromConversations(list);
+      // Badge navigasi menghitung unread SELURUH workspace — hanya
+      // daftar tak-terfilter yang boleh menyinkronkannya.
+      if (filter === "all") setFromConversations(list);
     } catch (err) {
       setError(translateApiError(t, err));
       setConversations([]);
@@ -193,7 +222,9 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
             c.id === conversationId ? { ...c, unreadCount: 0 } : c,
           );
           setConversations(next);
-          setFromConversations(next);
+          if (assignmentFilterRef.current === "all") {
+            setFromConversations(next);
+          }
         }
       } catch (err) {
         if (selectedRef.current !== conversationId) return;
@@ -220,6 +251,129 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
     if (selectedId) void loadMessages(selectedId);
   }, [selectedId, loadMessages]);
 
+  // Fase 9C: daftar member workspace untuk pemilih penerima tugas.
+  // Kegagalan ditelan — inbox tetap berfungsi, pemilih hanya kosong.
+  useEffect(() => {
+    if (!tenantId) {
+      setMembers([]);
+      return;
+    }
+    let cancelled = false;
+    api.team
+      .listMembers(tenantId)
+      .then((rows) => {
+        if (!cancelled) setMembers(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setMembers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const changeAssignmentFilter = useCallback(
+    (filter: "all" | "mine" | "unassigned") => {
+      assignmentFilterRef.current = filter;
+      setAssignmentFilter(filter);
+      void loadConversations();
+    },
+    [loadConversations],
+  );
+
+  const handleAssign = useCallback(
+    async (conversationId: string, assigneeUserId: string | null) => {
+      if (!tenantId) return;
+      setAssignError(null);
+      try {
+        const updated = await api.conversations.assign(
+          tenantId,
+          conversationId,
+          assigneeUserId,
+        );
+        setConversations((prev) => {
+          const next = prev.map((c) => (c.id === updated.id ? updated : c));
+          // Filter aktif bisa membuat baris ini tidak lagi cocok (mis.
+          // melepas tugas saat filter "Milik saya") — keluarkan dari
+          // daftar agar tampilan konsisten dengan filter.
+          const filter = assignmentFilterRef.current;
+          if (filter === "mine") {
+            const mineId = members.find((m) => m.isSelf)?.userId;
+            return next.filter((c) => c.assigneeUserId === mineId);
+          }
+          if (filter === "unassigned") {
+            return next.filter((c) => c.assigneeUserId === null);
+          }
+          return next;
+        });
+      } catch (err) {
+        setAssignError(translateApiError(t, err));
+      }
+    },
+    [tenantId, t, members],
+  );
+
+  // Fase 9C: catatan internal — dimuat saat percakapan berganti (tab
+  // Catatan langsung siap) dan direset bersama pilihan.
+  const loadNotes = useCallback(
+    async (conversationId: string) => {
+      if (!tenantId) return;
+      setNotesLoading(true);
+      setNotesError(null);
+      try {
+        const list = await api.conversations.listNotes(tenantId, conversationId);
+        if (selectedRef.current !== conversationId) return;
+        setNotes(list);
+      } catch (err) {
+        if (selectedRef.current !== conversationId) return;
+        setNotesError(translateApiError(t, err));
+        setNotes([]);
+      } finally {
+        if (selectedRef.current === conversationId) setNotesLoading(false);
+      }
+    },
+    [tenantId, t],
+  );
+
+  useEffect(() => {
+    setPanelTab("messages");
+    setNotes([]);
+    setNoteDraft("");
+    setNotesError(null);
+    if (selectedId) void loadNotes(selectedId);
+  }, [selectedId, loadNotes]);
+
+  const handleNoteCreate = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!tenantId || !selectedId || !noteDraft.trim()) return;
+    setNoteSaving(true);
+    setNotesError(null);
+    try {
+      const created = await api.conversations.createNote(
+        tenantId,
+        selectedId,
+        noteDraft.trim(),
+      );
+      setNotes((prev) => [...prev, created]);
+      setNoteDraft("");
+    } catch (err) {
+      setNotesError(translateApiError(t, err));
+    } finally {
+      setNoteSaving(false);
+    }
+  };
+
+  const handleNoteDelete = async (note: ConversationNoteResponse) => {
+    if (!tenantId || !selectedId) return;
+    setNotesError(null);
+    try {
+      await api.conversations.deleteNote(tenantId, selectedId, note.id);
+      setNotes((prev) => prev.filter((n) => n.id !== note.id));
+    } catch (err) {
+      setNotesError(translateApiError(t, err));
+    }
+  };
+
   // --- Penyegaran latar (Hotfix Dashboard Realtime → Fase 6G) ----------
   // Versi SENYAP dari pemuatan awal: tidak menyalakan status memuat,
   // tidak memasang error, tidak menyentuh draf balasan maupun pilihan
@@ -230,7 +384,11 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
   const refreshConversationsInBackground = useCallback(async () => {
     if (!tenantId) return;
     try {
-      const list = await api.conversations.list(tenantId);
+      const filter = assignmentFilterRef.current;
+      const list = await api.conversations.list(
+        tenantId,
+        filter === "all" ? undefined : { assignment: filter },
+      );
       const openId = selectedRef.current;
       // Percakapan yang sedang dibuka sudah ditandai terbaca di server
       // oleh GET messages — paksa unread lokalnya 0 agar chip daftar &
@@ -241,7 +399,7 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
           ? list
           : list.map((c) => (c.id === openId ? { ...c, unreadCount: 0 } : c));
       setConversations(next);
-      setFromConversations(next);
+      if (assignmentFilterRef.current === "all") setFromConversations(next);
     } catch {
       /* senyap — kegagalan latar bukan urusan agen */
     }
@@ -539,7 +697,7 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
 
       {loading && conversations.length === 0 ? (
         <p className="mt-6 text-sm text-muted">{t("common.loading")}</p>
-      ) : conversations.length === 0 && !error ? (
+      ) : conversations.length === 0 && !error && assignmentFilter === "all" ? (
         <div className="mt-6 rounded-xl border border-dashed border-line bg-surface p-8 text-center">
           <h2 className="text-base font-semibold text-ink">{t("inbox.emptyTitle")}</h2>
           <p className="mx-auto mt-1 max-w-md text-sm text-muted">{t("inbox.emptyBody")}</p>
@@ -552,6 +710,29 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
               selected ? "hidden md:flex" : "flex"
             }`}
           >
+            {/* Fase 9C: filter penugasan — Semua | Milik saya | Belum ditugaskan */}
+            <div className="flex gap-1 border-b border-line px-3 py-2">
+              {(
+                [
+                  ["all", "inbox.assignment.filterAll"],
+                  ["mine", "inbox.assignment.filterMine"],
+                  ["unassigned", "inbox.assignment.filterUnassigned"],
+                ] as const
+              ).map(([value, labelKey]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => changeAssignmentFilter(value)}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                    assignmentFilter === value
+                      ? "bg-accent text-white"
+                      : "bg-elevated text-muted hover:text-ink"
+                  }`}
+                >
+                  {t(labelKey as TranslationKey)}
+                </button>
+              ))}
+            </div>
             <ul className="flex-1 divide-y divide-line overflow-y-auto">
               {conversations.map((conv) => {
                 const isActive = conv.id === selectedId;
@@ -599,6 +780,16 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                           <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-medium text-muted">
                             {t(`inbox.status.${conv.status}` as TranslationKey)}
                           </span>
+                          {conv.assigneeUserId ? (
+                            <span
+                              className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent"
+                              title={t("inbox.assignment.assignedTo", {
+                                name: conv.assigneeName ?? "",
+                              })}
+                            >
+                              @{conv.assigneeName ?? "—"}
+                            </span>
+                          ) : null}
                         </span>
                       </span>
                       {conv.unreadCount > 0 ? (
@@ -651,8 +842,143 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                         : ""}
                     </div>
                   </div>
+                  {/* Fase 9C: pemilih penerima tugas */}
+                  <div className="ml-auto flex shrink-0 flex-col items-end gap-1">
+                    <label
+                      htmlFor="inbox-assignee"
+                      className="text-[11px] font-medium text-muted"
+                    >
+                      {t("inbox.assignment.assignLabel")}
+                    </label>
+                    <select
+                      id="inbox-assignee"
+                      value={selected.assigneeUserId ?? ""}
+                      onChange={(e) =>
+                        void handleAssign(
+                          selected.id,
+                          e.target.value === "" ? null : e.target.value,
+                        )
+                      }
+                      className="max-w-44 rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-ink"
+                    >
+                      <option value="">
+                        {t("inbox.assignment.unassigned")}
+                      </option>
+                      {members.map((m) => (
+                        <option key={m.userId} value={m.userId}>
+                          {(m.name ?? m.email) +
+                        (m.isSelf ? ` (${t("settings.team.youLabel")})` : "")}
+                        </option>
+                      ))}
+                    </select>
+                    {assignError ? (
+                      <span className="text-[11px] text-danger">{assignError}</span>
+                    ) : null}
+                  </div>
                 </div>
 
+                {/* Fase 9C: tab panel — Pesan | Catatan internal */}
+                <div className="flex gap-1 border-b border-line bg-surface px-4 pt-2">
+                  {(
+                    [
+                      ["messages", "inbox.notes.tabMessages"],
+                      ["notes", "inbox.notes.tabNotes"],
+                    ] as const
+                  ).map(([value, labelKey]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setPanelTab(value)}
+                      className={`rounded-t-lg px-3 py-1.5 text-xs font-semibold ${
+                        panelTab === value
+                          ? "bg-bg text-accent"
+                          : "text-muted hover:text-ink"
+                      }`}
+                    >
+                      {t(labelKey as TranslationKey)}
+                      {value === "notes" && notes.length > 0
+                        ? ` (${notes.length})`
+                        : ""}
+                    </button>
+                  ))}
+                </div>
+
+                {panelTab === "notes" ? (
+                  <div className="flex min-h-0 flex-1 flex-col bg-bg">
+                    <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+                      <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
+                        {t("inbox.notes.hint")}
+                      </p>
+                      {notesLoading ? (
+                        <p className="text-sm text-muted">{t("common.loading")}</p>
+                      ) : notesError && notes.length === 0 ? (
+                        <p className="text-sm text-danger">{notesError}</p>
+                      ) : notes.length === 0 ? (
+                        <p className="text-sm text-muted">{t("inbox.notes.empty")}</p>
+                      ) : (
+                        <ul className="space-y-3">
+                          {notes.map((note) => (
+                            <li
+                              key={note.id}
+                              className="rounded-xl border border-warning/30 bg-warning/10 px-3 py-2"
+                            >
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="text-xs font-semibold text-ink">
+                                  {note.authorName ??
+                                    t("inbox.notes.formerMember")}
+                                </span>
+                                <span className="flex shrink-0 items-center gap-2 text-[11px] text-muted">
+                                  {formatTime(note.createdAt, locale)}
+                                  {note.authorUserId === myMember?.userId ||
+                                  canModerateNotes ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleNoteDelete(note)}
+                                      className="font-medium text-danger"
+                                    >
+                                      {t("inbox.notes.deleteButton")}
+                                    </button>
+                                  ) : null}
+                                </span>
+                              </div>
+                              <p className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">
+                                {note.body}
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {notesError && notes.length > 0 ? (
+                        <p className="text-sm text-danger">{notesError}</p>
+                      ) : null}
+                    </div>
+                    <form
+                      onSubmit={handleNoteCreate}
+                      className="border-t border-line bg-surface px-4 py-3"
+                    >
+                      <div className="flex items-end gap-2">
+                        <textarea
+                          value={noteDraft}
+                          onChange={(e) => setNoteDraft(e.target.value)}
+                          placeholder={t("inbox.notes.placeholder")}
+                          rows={2}
+                          maxLength={4000}
+                          className={`${inputClassName} resize-none`}
+                        />
+                        <button
+                          type="submit"
+                          disabled={noteSaving || !noteDraft.trim()}
+                          className="shrink-0 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                        >
+                          {noteSaving
+                            ? t("inbox.notes.adding")
+                            : t("inbox.notes.addButton")}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                ) : (
+                <>
                 <div
                   ref={threadRef}
                   onScroll={handleThreadScroll}
@@ -1082,6 +1408,8 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                       : t("inbox.deliveryNote")}
                   </p>
                 </form>
+                </>
+                )}
               </>
             ) : (
               <div className="flex flex-1 items-center justify-center p-8 text-center">

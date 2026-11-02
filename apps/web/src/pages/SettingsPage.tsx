@@ -10,6 +10,10 @@ import {
   type ApiKeyResponse,
   type ApiKeyScope,
   type CreatedApiKeyResponse,
+  type InvitationResponse,
+  type InvitableRole,
+  type MemberRole,
+  type TeamMemberResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
@@ -193,6 +197,11 @@ export function SettingsPage({ t, locale }: SettingsPageProps) {
           </ul>
         )}
       </section>
+
+      {/* Fase 9C: seksi Tim — member, peran, undangan */}
+      {tenantId ? (
+        <TeamSection t={t} locale={locale} tenantId={tenantId} canManage={canManage} />
+      ) : null}
 
       {formOpen && tenantId ? (
         <CreateApiKeyModal
@@ -463,6 +472,425 @@ function RevokeApiKeyModal({
             className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
           >
             {t("common.cancel")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Seksi Tim (Fase 9C): daftar member + peran, undangan bertoken, ganti
+ * peran, keluarkan member. Seluruh mutasi owner/admin (server
+ * menegakkan; UI menyembunyikan kontrol untuk peran lain). Tautan
+ * undangan ditampilkan SEKALI sesudah dibuat — server hanya menyimpan
+ * hash tokennya, jadi panel "tautan siap" adalah satu-satunya tempat
+ * tautan itu pernah terlihat; hilang → cabut & undang ulang.
+ */
+function roleLabelKey(role: MemberRole): TranslationKey {
+  switch (role) {
+    case "owner":
+      return "settings.team.roleOwner";
+    case "admin":
+      return "settings.team.roleAdmin";
+    case "agent":
+      return "settings.team.roleAgent";
+    case "viewer":
+      return "settings.team.roleViewer";
+  }
+}
+
+const INVITABLE_ROLES: InvitableRole[] = ["admin", "agent", "viewer"];
+
+function TeamSection({
+  t,
+  locale,
+  tenantId,
+  canManage,
+}: {
+  t: Translate;
+  locale: Locale;
+  tenantId: string;
+  canManage: boolean;
+}) {
+  const [members, setMembers] = useState<TeamMemberResponse[]>([]);
+  const [invitations, setInvitations] = useState<InvitationResponse[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<InvitableRole>("agent");
+  const [inviting, setInviting] = useState(false);
+  const [createdLink, setCreatedLink] = useState<{
+    url: string;
+    email: string;
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<TeamMemberResponse | null>(
+    null,
+  );
+  const requestSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const memberRows = await api.team.listMembers(tenantId);
+      if (requestSeq.current !== seq) return;
+      setMembers(memberRows);
+      if (canManage) {
+        const invitationRows = await api.team.listInvitations(tenantId);
+        if (requestSeq.current !== seq) return;
+        setInvitations(invitationRows);
+      }
+    } catch (err) {
+      if (requestSeq.current !== seq) return;
+      setError(translateApiError(t, err));
+    } finally {
+      if (requestSeq.current === seq) setLoading(false);
+    }
+  }, [tenantId, canManage, t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleRoleChange = async (member: TeamMemberResponse, role: InvitableRole) => {
+    setActionError(null);
+    try {
+      const updated = await api.team.updateMemberRole(tenantId, member.userId, role);
+      setMembers((prev) =>
+        prev.map((m) => (m.userId === updated.userId ? updated : m)),
+      );
+    } catch (err) {
+      setActionError(translateApiError(t, err));
+    }
+  };
+
+  const handleInvite = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!inviteEmail.trim()) return;
+    setInviting(true);
+    setActionError(null);
+    try {
+      const created = await api.team.invite(tenantId, inviteEmail.trim(), inviteRole);
+      setCreatedLink({
+        url: created.inviteUrl ?? "",
+        email: created.email,
+      });
+      setCopied(false);
+      setInviteEmail("");
+      void load();
+    } catch (err) {
+      setActionError(translateApiError(t, err));
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleRevoke = async (invitation: InvitationResponse) => {
+    setActionError(null);
+    try {
+      await api.team.revokeInvitation(tenantId, invitation.id);
+      void load();
+    } catch (err) {
+      setActionError(translateApiError(t, err));
+    }
+  };
+
+  const copyLink = async () => {
+    if (!createdLink) return;
+    try {
+      await navigator.clipboard.writeText(createdLink.url);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <section className="mt-10">
+      <h2 className="text-base font-semibold text-ink">{t("settings.team.title")}</h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted">{t("settings.team.body")}</p>
+
+      {!canManage ? (
+        <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-muted">
+          {t("settings.team.adminOnlyNote")}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-red-600">
+          {error}
+        </p>
+      ) : null}
+      <FieldError message={actionError} />
+
+      <h3 className="mt-5 text-sm font-semibold text-ink">
+        {t("settings.team.membersTitle")}
+      </h3>
+      {loading && members.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">{t("common.loading")}</p>
+      ) : (
+        <ul className="mt-3 space-y-3">
+          {members.map((member) => (
+            <li
+              key={member.userId}
+              className="flex flex-wrap items-center gap-3 rounded-xl bg-surface p-4"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold text-ink">
+                  {member.name ?? member.email}
+                  {member.isSelf ? (
+                    <span className="ml-2 rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">
+                      {t("settings.team.youLabel")}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="truncate text-xs text-muted">{member.email}</div>
+              </div>
+              {canManage && member.role !== "owner" && !member.isSelf ? (
+                <>
+                  <select
+                    value={member.role}
+                    onChange={(e) =>
+                      void handleRoleChange(member, e.target.value as InvitableRole)
+                    }
+                    className="rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-ink"
+                    aria-label={t("settings.team.roleLabel")}
+                  >
+                    {INVITABLE_ROLES.map((role) => (
+                      <option key={role} value={role}>
+                        {t(roleLabelKey(role))}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setRemoveTarget(member)}
+                    className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-danger"
+                  >
+                    {t("settings.team.removeButton")}
+                  </button>
+                </>
+              ) : (
+                <span className="rounded-full bg-elevated px-2.5 py-1 text-xs font-medium text-ink">
+                  {t(roleLabelKey(member.role))}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {canManage ? (
+        <>
+          <h3 className="mt-6 text-sm font-semibold text-ink">
+            {t("settings.team.inviteTitle")}
+          </h3>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            {t("settings.team.inviteBody")}
+          </p>
+          <form
+            onSubmit={handleInvite}
+            className="mt-3 flex flex-wrap items-end gap-2"
+          >
+            <label className="flex min-w-56 flex-1 flex-col gap-1">
+              <span className="text-xs font-medium text-muted">
+                {t("settings.team.emailLabel")}
+              </span>
+              <input
+                type="email"
+                required
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder={t("settings.team.emailPlaceholder")}
+                className={inputClassName}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-muted">
+                {t("settings.team.roleLabel")}
+              </span>
+              <select
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value as InvitableRole)}
+                className="rounded-lg border border-line bg-surface px-2 py-2 text-sm text-ink"
+              >
+                {INVITABLE_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {t(roleLabelKey(role))}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="submit"
+              disabled={inviting || !inviteEmail.trim()}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            >
+              {inviting
+                ? t("settings.team.inviting")
+                : t("settings.team.inviteButton")}
+            </button>
+          </form>
+
+          {createdLink ? (
+            <div className="mt-4 rounded-xl border border-accent/40 bg-accent/10 p-4">
+              <div className="text-sm font-semibold text-ink">
+                {t("settings.team.linkReadyTitle")}
+              </div>
+              <p className="mt-1 text-sm text-muted">
+                {t("settings.team.linkReadyBody", { email: createdLink.email })}
+              </p>
+              <div className="mt-3 break-all rounded-lg bg-surface p-3 font-mono text-xs text-ink">
+                {createdLink.url}
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={copyLink}
+                  className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
+                >
+                  {copied
+                    ? t("settings.team.copiedLabel")
+                    : t("settings.team.copyButton")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreatedLink(null)}
+                  className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
+                >
+                  {t("settings.team.doneButton")}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          <h3 className="mt-6 text-sm font-semibold text-ink">
+            {t("settings.team.pendingTitle")}
+          </h3>
+          {invitations.length === 0 ? (
+            <p className="mt-2 text-sm text-muted">
+              {t("settings.team.pendingEmpty")}
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-3">
+              {invitations.map((invitation) => (
+                <li
+                  key={invitation.id}
+                  className="flex flex-wrap items-center gap-3 rounded-xl bg-surface p-4"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold text-ink">
+                      {invitation.email}
+                    </div>
+                    <div className="text-xs text-muted">
+                      {t(roleLabelKey(invitation.role))}
+                      {invitation.status === "pending"
+                        ? ` · ${t("settings.team.expiresLabel", {
+                            date: formatDateTime(invitation.expiresAt, locale),
+                          })}`
+                        : ""}
+                    </div>
+                  </div>
+                  <span className="rounded-full bg-elevated px-2.5 py-1 text-xs font-medium text-ink">
+                    {t(
+                      `settings.team.status${invitation.status[0].toUpperCase()}${invitation.status.slice(1)}` as TranslationKey,
+                    )}
+                  </span>
+                  {invitation.status === "pending" ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleRevoke(invitation)}
+                      className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-danger"
+                    >
+                      {t("settings.team.revokeButton")}
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : null}
+
+      {removeTarget ? (
+        <RemoveMemberModal
+          t={t}
+          tenantId={tenantId}
+          target={removeTarget}
+          onClose={() => setRemoveTarget(null)}
+          onRemoved={() => {
+            setRemoveTarget(null);
+            void load();
+          }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function RemoveMemberModal({
+  t,
+  tenantId,
+  target,
+  onClose,
+  onRemoved,
+}: {
+  t: Translate;
+  tenantId: string;
+  target: TeamMemberResponse;
+  onClose: () => void;
+  onRemoved: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleRemove = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await api.team.removeMember(tenantId, target.userId);
+      onRemoved();
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+        <h2 className="text-lg font-bold text-ink">
+          {t("settings.team.removeTitle")}
+        </h2>
+        <p className="mt-2 text-sm text-muted">
+          {t("settings.team.removeBody", { name: target.name ?? target.email })}
+        </p>
+        <FieldError message={error} />
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={handleRemove}
+            disabled={submitting}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {submitting
+              ? t("settings.team.removing")
+              : t("settings.team.removeButton")}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
+          >
+            {t("settings.team.cancelButton")}
           </button>
         </div>
       </div>

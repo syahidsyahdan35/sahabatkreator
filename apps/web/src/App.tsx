@@ -35,6 +35,7 @@ import {
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { InvitePage } from "./pages/InvitePage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -439,6 +440,14 @@ export default function App() {
         <LoginPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
       ) : path === "/register" ? (
         <RegisterPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
+      ) : path.startsWith("/invite/") ? (
+        <InvitePage
+          t={t}
+          locale={locale}
+          controls={controls}
+          token={decodeURIComponent(path.slice("/invite/".length)).split("/")[0]}
+          onNavigate={navigateTo}
+        />
       ) : (
         <Shell
           t={t}

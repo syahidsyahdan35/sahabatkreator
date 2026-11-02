@@ -27,6 +27,15 @@ import type {
   ContactResponse,
   ConversationListResponse,
   ConversationResponse,
+  ConversationNoteListResponse,
+  ConversationNoteResponse,
+  InvitationListResponse,
+  InvitationPreviewResponse,
+  InvitationResponse,
+  AcceptInvitationResponse,
+  TeamMemberListResponse,
+  TeamMemberResponse,
+  InvitableRole,
   CreateAgentRequest,
   CreateAutomationRequest,
   CreateContactRequest,
@@ -447,19 +456,71 @@ export const api = {
     },
   },
   conversations: {
-    /** GET /api/tenants/:tenantId/conversations?status= */
+    /** GET /api/tenants/:tenantId/conversations?status=&assignment=mine|unassigned */
     async list(
       tenantId: string,
-      opts?: { status?: string },
+      opts?: { status?: string; assignment?: "mine" | "unassigned" },
     ): Promise<ConversationResponse[]> {
       const q = new URLSearchParams();
       if (opts?.status) q.set("status", opts.status);
+      if (opts?.assignment) q.set("assignment", opts.assignment);
       const qs = q.toString();
       const body = await request<ConversationListResponse>(
         `/api/tenants/${tenantId}/conversations${qs ? `?${qs}` : ""}`,
         { method: "GET" },
       );
       return body.conversations;
+    },
+    /**
+     * POST .../conversations/:id/assign {assigneeUserId|null} (Fase 9C)
+     * → percakapan terbarui. Penerima bukan member → 422
+     * ASSIGNEE_NOT_MEMBER.
+     */
+    assign(
+      tenantId: string,
+      conversationId: string,
+      assigneeUserId: string | null,
+    ): Promise<ConversationResponse> {
+      return request<ConversationResponse>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/assign`,
+        {
+          method: "POST",
+          body: JSON.stringify({ assigneeUserId }),
+        },
+      );
+    },
+    /** GET .../conversations/:id/notes → catatan internal (Fase 9C). */
+    async listNotes(
+      tenantId: string,
+      conversationId: string,
+    ): Promise<ConversationNoteResponse[]> {
+      const body = await request<ConversationNoteListResponse>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/notes`,
+        { method: "GET" },
+      );
+      return body.notes;
+    },
+    /** POST .../conversations/:id/notes {body} → catatan baru. */
+    createNote(
+      tenantId: string,
+      conversationId: string,
+      body: string,
+    ): Promise<ConversationNoteResponse> {
+      return request<ConversationNoteResponse>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/notes`,
+        { method: "POST", body: JSON.stringify({ body }) },
+      );
+    },
+    /** DELETE .../conversations/:id/notes/:noteId (penulis / owner / admin). */
+    async deleteNote(
+      tenantId: string,
+      conversationId: string,
+      noteId: string,
+    ): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/conversations/${conversationId}/notes/${noteId}`,
+        { method: "DELETE" },
+      );
     },
     /** GET .../conversations/:id/messages?limit= → pesan kronologis menaik. */
     async listMessages(
@@ -1267,6 +1328,80 @@ export const api = {
         method: "POST",
         body: JSON.stringify({}),
       });
+    },
+  },
+  team: {
+    /** GET /api/tenants/:tenantId/team/members → member + peran (Fase 9C). */
+    async listMembers(tenantId: string): Promise<TeamMemberResponse[]> {
+      const body = await request<TeamMemberListResponse>(
+        `/api/tenants/${tenantId}/team/members`,
+        { method: "GET" },
+      );
+      return body.members;
+    },
+    /** GET /api/tenants/:tenantId/team/invitations → daftar undangan (owner/admin). */
+    async listInvitations(tenantId: string): Promise<InvitationResponse[]> {
+      const body = await request<InvitationListResponse>(
+        `/api/tenants/${tenantId}/team/invitations`,
+        { method: "GET" },
+      );
+      return body.invitations;
+    },
+    /**
+     * POST /api/tenants/:tenantId/team/invitations {email, role} → 201
+     * undangan + inviteUrl SEKALI LIHAT (server hanya menyimpan hash
+     * tokennya; tautan tidak bisa ditampilkan ulang).
+     */
+    invite(
+      tenantId: string,
+      email: string,
+      role: InvitableRole,
+    ): Promise<InvitationResponse> {
+      return request<InvitationResponse>(
+        `/api/tenants/${tenantId}/team/invitations`,
+        { method: "POST", body: JSON.stringify({ email, role }) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/team/invitations/:id → cabut undangan pending. */
+    async revokeInvitation(tenantId: string, invitationId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/team/invitations/${invitationId}`,
+        { method: "DELETE" },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/team/members/:userId {role} → member terbarui. */
+    updateMemberRole(
+      tenantId: string,
+      userId: string,
+      role: InvitableRole,
+    ): Promise<TeamMemberResponse> {
+      return request<TeamMemberResponse>(
+        `/api/tenants/${tenantId}/team/members/${userId}`,
+        { method: "PATCH", body: JSON.stringify({ role }) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/team/members/:userId → keluarkan member. */
+    async removeMember(tenantId: string, userId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/team/members/${userId}`,
+        { method: "DELETE" },
+      );
+    },
+  },
+  invitations: {
+    /** GET /api/invitations/:token → pratinjau undangan untuk sesi login. */
+    preview(token: string): Promise<InvitationPreviewResponse> {
+      return request<InvitationPreviewResponse>(
+        `/api/invitations/${encodeURIComponent(token)}`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/invitations/:token/accept → bergabung ke workspace undangan. */
+    accept(token: string): Promise<AcceptInvitationResponse> {
+      return request<AcceptInvitationResponse>(
+        `/api/invitations/${encodeURIComponent(token)}/accept`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
     },
   },
 };
