@@ -2055,3 +2055,109 @@ pernah melihatnya di luar panel.
 # dibiarkan (tidak dibaca kode lama). audit_logs.tenant_id yang kini
 # nullable tidak memengaruhi kode lama.
 ```
+
+---
+
+## Update Hotfix Webchat Disconnect Gate — disconnect menghentikan arus masuk secara TOTAL (2026-11-02)
+
+### Masalah
+User melaporkan: channel webchat berstatus `disconnected` masih menerima
+pesan inbox. Akar masalahnya persis seperti dugaan: disconnect (hotfix
+Telegram) hanya menutup SESI BARU (route sesi menolak akun non-connected
+dengan 404), sedangkan pengunjung bertoken lama — token HMAC berlaku
+30 hari — tetap bisa mengirim & membaca pesan, karena jalur pesan di
+core tidak pernah memeriksa status akun channel (hanya status
+percakapan open/closed). Socket realtime pengunjung juga hanya
+memverifikasi token.
+
+### Perubahan (commit `85b8ae8`)
+- **Kontrak:** kode error baru `CHANNEL_DISCONNECTED` di
+  `ErrorCodeSchema`.
+- **Core (`packages/core/src/webchat.ts`):**
+  - `recordWebchatInboundMessage` kini mengembalikan hasil diskriminan
+    (`recorded` / `conversation_not_found` / `channel_disconnected`)
+    dan memeriksa status akun pemilik percakapan DI DALAM transaksi
+    yang sama, sebelum tulisan apa pun — upaya yang ditolak tidak
+    menciptakan baris pesan, kenaikan unread, maupun event outbox.
+  - `flushQueuedWebchatMessages` digerbangi juga: selama akun tidak
+    'connected', tidak ada penandaan `sent` — balasan agen tetap
+    `queued` dan ter-flush normal setelah channel dihubungkan lagi.
+  - Helper baru `getWebchatChannelAccountStatus(db, {tenantId},
+    accountId)` untuk pemanggil berbasis token (route daftar pesan +
+    gateway realtime).
+- **API (`apps/api/src/modules/webchat/routes.ts`):** kirim & daftar
+  pesan pengunjung menjawab **409 `CHANNEL_DISCONNECTED`** selama
+  channel tidak 'connected'. Pilihan 409 mengikuti pola konflik
+  keadaan yang sudah ada (TELEGRAM_BOT_ALREADY_CONNECTED,
+  PRODUCT_HAS_LINKS): token SAH dan percakapan ADA — yang berkonflik
+  adalah keadaan channel. Route sesi TIDAK berubah (tetap 404).
+- **Realtime (`apps/realtime/src/index.ts`):** upgrade socket
+  pengunjung yang channel-nya tidak 'connected' ditolak **403**
+  (bukan 401 — tokennya tidak batal; 401 akan menandakan token
+  rusak/kedaluwarsa). Socket yang sudah terlanjur terhubung saat
+  disconnect terjadi mati wajar di reconnect berikutnya, dan selama
+  itu pun flush gateway tergerbang di core (lihat di atas). Mode
+  terdegradasi tanpa DATABASE_URL mempertahankan perilaku lama
+  (status memang tidak bisa diverifikasi; flush pun no-op di mode itu).
+- **Widget (`packages/embed/src/widget.ts`):** penolakan
+  `CHANNEL_DISCONNECTED` pada sinkronisasi memunculkan keadaan error
+  yang sudah ada ("Tidak dapat terhubung… / Coba lagi") — bukan lagi
+  diam seolah terhubung; pada kirim, gelembung menjadi gelembung gagal
+  ketuk-untuk-coba-lagi seperti mekanisme yang ada, plus keadaan error
+  panel. Token SENGAJA tidak dihapus (beda dengan 401): gerbangnya
+  adalah status akun, bukan daftar hitam token — setelah channel
+  dihubungkan lagi, sinkronisasi/kirim yang berhasil membersihkan
+  keadaan error dan token lama yang belum kedaluwarsa langsung berlaku
+  lagi.
+
+### Semantik yang ditegaskan
+- Disconnect webchat kini berarti: sesi baru 404, kirim pesan 409,
+  daftar pesan 409, socket ditolak 403, flush keluar tertahan (antrean
+  tidak hilang). Reconnect (status kembali 'connected' — untuk webchat
+  saat ini berarti akun yang sama diaktifkan lagi; jalur revive
+  Telegram membuktikan pola yang sama) memulihkan semuanya TANPA
+  menerbitkan token baru.
+
+### Deploy
+Build embed → api+worker+realtime+web di VM (bundle web
+`index-BBkskfJG.js`, widget.js memuat `CHANNEL_DISCONNECTED`) → commit
+`85b8ae8` → push → rsync repo (`.env.staging` dikecualikan & utuh) →
+keempat proses milik `ubuntu` (api/web/worker/realtime) dihentikan →
+systemd `Restart=always` mengangkat PID baru; health API & realtime ok,
+bundle publik cocok. Tanpa migrasi DB; tanpa perubahan `.env.staging`.
+
+### Verifikasi (rantai Bun dari server terhadap URL publik, TANPA Playwright; akun uji `hotfix-wcd-*@sk.test`)
+**25/25 PASS** — sign-up → tenant → 2 channel webchat → sesi
+pengunjung → kirim baseline 201 → dashboard membaca 1 pesan → socket
+realtime diterima saat connected → channel #2 baseline → DELETE
+disconnect #1 (204) → **kirim dengan TOKEN YANG SAMA → 409
+CHANNEL_DISCONNECTED** → **ambil pesan dengan token yang sama → 409**
+→ sesi baru tetap 404 → **upgrade socket dengan token itu ditolak**
+→ dashboard: jumlah pesan TIDAK bertambah & unread tetap 0 → balasan
+agen saat diskonek diterima 201 `queued` dan tetap `queued` setelah
+3 detik (tidak ter-flush) → channel #2 tetap bisa mengirim (isolasi)
+→ status akun #1 dikembalikan ke 'connected' via core
+(`setChannelAccountStatus`, jalur revive) → **kirim dengan token lama
+yang sama → 201 lagi**, daftar pesan 200 lagi, socket diterima lagi →
+balasan queued tadi ter-flush menjadi `sent` saat pengunjung reconnect
+→ health ok.
+Bukti DB pelengkap: `outbox_events` untuk percakapan uji tepat
+2× `message.received` (baseline + pasca-revive) — upaya yang ditolak
+tidak menerbitkan event apa pun. Skrip rantai dihapus dari server
+sesudahnya; tenant uji tertinggal by design seperti fase sebelumnya.
+
+### Batas jujur
+- Pembuktian visual widget (panel menampilkan keadaan error di browser
+  sungguhan saat channel diputuskan di tengah sesi) tidak dijalankan —
+  tanpa Playwright sesuai aturan user; yang terbukti adalah seluruh
+  respons HTTP/WS yang memicu keadaan itu + string pemetaan baru ada
+  di widget.js publik. Bukti klik akhir menunggu uji user.
+- Socket pengunjung yang SUDAH terhubung pada detik disconnect terjadi
+  tidak diputuskan paksa dari server; ia tertutup oleh gerbang REST
+  (sinkronisasi 409 → keadaan error) dan ditolak saat reconnect —
+  jendela paparannya nol untuk data baru karena kirim/daftar/flush
+  semuanya tergerbang di core.
+- Gerbang memakai status akun pada masing-masing transaksi/panggilan;
+  balapan milidetik antara disconnect dan kirim yang sedang berjalan
+  diselesaikan per transaksi (yang commit duluan menang) — perilaku
+  standar untuk gerbang status dan dapat diterima.
