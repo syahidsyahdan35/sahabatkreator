@@ -802,3 +802,30 @@ export const PublicMeResponseSchema = z.object({
   scopes: z.array(ApiKeyScopeSchema),
 });
 export type PublicMeResponse = z.infer<typeof PublicMeResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Parameter query API publik /v1 (Fase 5B) — bentuk request sisi klien.
+// SDK (@sahabat-kreator/sdk) memakai tipe ini agar tidak mendefinisikan
+// ulang parameter endpoint v1 (RANCANGAN §2 aturan 2: contracts adalah
+// sumber kebenaran; SDK & tool MCP diturunkan darinya). Semua field
+// opsional — default & koersi diterapkan server (lihat modul public-v1).
+// ---------------------------------------------------------------------------
+
+export const V1ListContactsQuerySchema = z.object({
+  search: z.string().max(255).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  offset: z.number().int().min(0).optional(),
+});
+export type ListContactsQuery = z.infer<typeof V1ListContactsQuerySchema>;
+
+export const V1ListConversationsQuerySchema = z.object({
+  status: ConversationStatusSchema.optional(),
+});
+export type ListConversationsQuery = z.infer<
+  typeof V1ListConversationsQuerySchema
+>;
+
+export const V1ListMessagesQuerySchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+});
+export type ListMessagesQuery = z.infer<typeof V1ListMessagesQuerySchema>;

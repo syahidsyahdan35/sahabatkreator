@@ -1,11 +1,1 @@
-{
-  "name": "@sahabat-kreator/mcp-server",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "exports": {
-    ".": "./src/index.ts"
-  }
-}
+{"dependencies":{"@modelcontextprotocol/sdk":"^1.32.0","@sahabat-kreator/contracts":"workspace:*","@sahabat-kreator/sdk":"workspace:*","zod":"^4.1.0"},"devDependencies":{"@types/node":"^22.10.2","tsup":"^8.3.5","tsx":"^4.19.2","typescript":"^5.6.3"},"exports":{".":"./src/index.ts"},"main":"./src/index.ts","name":"@sahabat-kreator/mcp-server","private":true,"scripts":{"build":"tsup","dev":"tsx watch src/index.ts","start":"node dist/index.js","typecheck":"tsc --noEmit","verify:mcp":"tsx scripts/verify-mcp.ts"},"type":"module","types":"./src/index.ts","version":"0.1.0"}
