@@ -14,6 +14,17 @@ export function formatDateTime(iso: string, locale: Locale): string {
   }).format(d);
 }
 
+/** Tanggal saja (tanpa jam) lewat Intl — mis. label "Terhubung 28 Okt 2026" di kartu channel. */
+export function formatDate(iso: string, locale: Locale): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat(intlLocale(locale), {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(d);
+}
+
 /** Label waktu ringkas untuk daftar percakapan: jam hari ini, tanggal bila lebih lama. */
 export function formatListTime(iso: string, locale: Locale): string {
   const d = new Date(iso);

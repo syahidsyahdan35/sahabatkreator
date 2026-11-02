@@ -259,6 +259,36 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
   );
 }
 
+/** Ikon mode tema aktif (gaya stroke sama seperti NavIcon): matahari = light, bulan = dark, monitor = system. */
+function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
+  return (
+    <svg
+      className="h-5 w-5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden={true}
+    >
+      {mode === "light" ? (
+        <>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+        </>
+      ) : mode === "dark" ? (
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+      ) : (
+        <>
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export default function App() {
   const [locale, setLocale] = useState<Locale>(() => {
     try {
@@ -267,7 +297,7 @@ export default function App() {
       return "en";
     }
   });
-  const { mode: themeMode, setMode: setThemeMode } = useTheme();
+  const { mode: themeMode, cycle: cycleThemeMode } = useTheme();
   const { path, navigateTo, replaceTo } = usePathRoute();
 
   const t = useMemo(() => createTranslator(locale), [locale]);
@@ -284,12 +314,17 @@ export default function App() {
   const themeLabel = (m: ThemeMode) =>
     t(m === "light" ? "common.themeLight" : m === "dark" ? "common.themeDark" : "common.themeSystem");
 
+  // Kontrol bahasa + tema SATU baris (Fase 6H): tema cukup satu tombol
+  // ikon kompak yang memutar light → dark → system → light (cycle() dari
+  // useTheme — logika tema tidak berubah, hanya presentasinya). Ikon
+  // mencerminkan mode aktif; nama mode aktif ada di title + aria-label.
+  // Ukuran tombol disamakan dengan tombol bahasa (28px) agar sejajar.
   const controls = (
-    <div className="space-y-3">
-      <div>
-        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted">
           {t("common.language")}
-        </div>
+        </span>
         <div className="flex gap-1">
           {(["en", "id"] as Locale[]).map((l) => (
             <button
@@ -307,26 +342,19 @@ export default function App() {
           ))}
         </div>
       </div>
-      <div>
-        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted">
           {t("common.theme")}
-        </div>
-        <div className="flex gap-1">
-          {(["light", "dark", "system"] as ThemeMode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setThemeMode(m)}
-              className={`rounded-md px-3 py-1 text-sm ${
-                themeMode === m
-                  ? "bg-accent font-semibold text-white"
-                  : "bg-elevated text-ink"
-              }`}
-            >
-              {themeLabel(m)}
-            </button>
-          ))}
-        </div>
+        </span>
+        <button
+          type="button"
+          onClick={cycleThemeMode}
+          title={themeLabel(themeMode)}
+          aria-label={themeLabel(themeMode)}
+          className="rounded-md bg-elevated p-1 text-ink"
+        >
+          <ThemeModeIcon mode={themeMode} />
+        </button>
       </div>
     </div>
   );
