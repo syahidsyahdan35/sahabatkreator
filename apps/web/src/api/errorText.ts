@@ -54,6 +54,18 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.META_TOKEN_INVALID");
     case "META_ACCOUNT_ALREADY_CONNECTED":
       return t("errors.META_ACCOUNT_ALREADY_CONNECTED");
+    case "META_OAUTH_NOT_CONFIGURED":
+      return t("errors.META_OAUTH_NOT_CONFIGURED");
+    case "META_OAUTH_STATE_INVALID":
+      return t("errors.META_OAUTH_STATE_INVALID");
+    case "META_OAUTH_SESSION_NOT_FOUND":
+      return t("errors.META_OAUTH_SESSION_NOT_FOUND");
+    case "META_OAUTH_ASSET_NOT_FOUND":
+      return t("errors.META_OAUTH_ASSET_NOT_FOUND");
+    case "META_OAUTH_EXCHANGE_FAILED":
+      return t("errors.META_OAUTH_EXCHANGE_FAILED");
+    case "META_OAUTH_CANCELLED":
+      return t("errors.META_OAUTH_CANCELLED");
     case "CHANNEL_DELETE_CONFIRMATION_MISMATCH":
       return t("errors.CHANNEL_DELETE_CONFIRMATION_MISMATCH");
     case "CHANNEL_ALREADY_TRASHED":

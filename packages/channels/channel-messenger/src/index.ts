@@ -81,6 +81,29 @@ export interface MetaObjectProfile {
   username: string | null;
 }
 
+/** Hasil exchange OAuth (Fase 7D): token + sisa umur bila Graph melaporkannya. */
+export interface MetaOAuthTokenResult {
+  accessToken: string;
+  expiresInSeconds: number | null;
+}
+
+/** Satu Page dari /me/accounts beserta Page Access Token turunannya (Fase 7D). */
+export interface MetaManagedPage {
+  id: string;
+  name: string | null;
+  username: string | null;
+  accessToken: string;
+  /** Akun IG Professional terhubung ke Page ini — info pemilih saja. */
+  linkedIg: { id: string; username: string | null } | null;
+}
+
+/** Satu nomor telepon di bawah WABA (Fase 7D, penemuan Embedded Signup). */
+export interface MetaWabaPhoneNumber {
+  id: string;
+  displayPhoneNumber: string | null;
+  verifiedName: string | null;
+}
+
 /** Klien Graph API tipis di atas fetch. Satu instance per token. */
 export class MetaGraphClient {
   private readonly baseUrl: string;
@@ -137,6 +160,15 @@ export class MetaGraphClient {
     } catch {
       throw new MetaGraphError(response.status, null, "invalid_response");
     }
+  }
+
+  /** GET dengan parameter query ter-encode (untuk endpoint OAuth & penemuan aset Fase 7D). */
+  private async getJsonParams<T>(
+    path: string,
+    params: Record<string, string>,
+  ): Promise<T> {
+    const query = new URLSearchParams(params).toString();
+    return this.getJson<T>(query ? `${path}?${query}` : path);
   }
 
   private async postJson<T>(path: string, payload: unknown): Promise<T> {
@@ -211,6 +243,244 @@ export class MetaGraphClient {
         response.headers.get("content-type")?.split(";")[0]?.trim() ||
         "image/jpeg",
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // OAuth & penemuan aset (Fase 7D) — "Lanjutkan dengan Facebook".
+  // Bentuk panggilan mengikuti dokumentasi resmi Meta yang terverifikasi:
+  // - "Manually Build a Login Flow" + "Get Long-Lived Tokens" (Messenger):
+  //   code → user token → fb_exchange_token → long-lived → /me/accounts.
+  // - Instagram API with Unified Login (get-started + authentication):
+  //   exchange TANPA redirect_uri (persis contoh dokumennya) menghasilkan
+  //   Business Integration System User Access Token (SUAT); aset dari
+  //   /me/assigned_instagram_accounts; konteks portfolio dari
+  //   /me?fields=client_business_id.
+  // - WhatsApp Embedded Signup (advanced implementation): exchange yang
+  //   sama menghasilkan token bisnis; WABA ter-assign ditemukan dari
+  //   token, nomor-nomornya dari tepi phone_numbers WABA.
+  // client_secret memang parameter query pada endpoint oauth/access_token
+  // (pola resmi Meta); ia tidak pernah masuk log/error paket ini.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Tukar authorization `code` → access token:
+   * `GET /oauth/access_token?client_id&client_secret&code[&redirect_uri]`.
+   * `redirectUri` hanya untuk alur klasik (Messenger); alur berbasis
+   * konfigurasi (Unified Login IG & Embedded Signup WA) menukarnya TANPA
+   * redirect_uri, persis contoh dokumentasi Unified Login.
+   */
+  async exchangeOAuthCode(input: {
+    clientId: string;
+    clientSecret: string;
+    code: string;
+    redirectUri?: string;
+  }): Promise<MetaOAuthTokenResult> {
+    const params: Record<string, string> = {
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+      code: input.code,
+    };
+    if (input.redirectUri) params.redirect_uri = input.redirectUri;
+    const body = await this.getJsonParams<{
+      access_token?: string;
+      expires_in?: number;
+    }>("oauth/access_token", params);
+    if (typeof body.access_token !== "string" || !body.access_token) {
+      throw new MetaGraphError(200, null, "missing_access_token");
+    }
+    return {
+      accessToken: body.access_token,
+      expiresInSeconds:
+        typeof body.expires_in === "number" ? body.expires_in : null,
+    };
+  }
+
+  /**
+   * Tukar user token berumur pendek → long-lived (±60 hari):
+   * `GET /oauth/access_token?grant_type=fb_exchange_token&...`.
+   * Page Access Token yang diturunkan dari token long-lived ini ikut
+   * berumur panjang — dasar connect Messenger Fase 7D.
+   */
+  async exchangeLongLivedToken(input: {
+    clientId: string;
+    clientSecret: string;
+    shortLivedToken: string;
+  }): Promise<MetaOAuthTokenResult> {
+    const body = await this.getJsonParams<{
+      access_token?: string;
+      expires_in?: number;
+    }>("oauth/access_token", {
+      grant_type: "fb_exchange_token",
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+      fb_exchange_token: input.shortLivedToken,
+    });
+    if (typeof body.access_token !== "string" || !body.access_token) {
+      throw new MetaGraphError(200, null, "missing_access_token");
+    }
+    return {
+      accessToken: body.access_token,
+      expiresInSeconds:
+        typeof body.expires_in === "number" ? body.expires_in : null,
+    };
+  }
+
+  /**
+   * Page yang dikelola pemilik token user (`GET /me/accounts`) — setiap
+   * entri membawa Page Access Token turunannya sendiri + akun IG
+   * Professional yang terhubung (info pemilih saja). Klien ini harus
+   * dibangun dengan user token (long-lived) sebagai accessToken.
+   */
+  async getManagedPages(): Promise<MetaManagedPage[]> {
+    const body = await this.getJsonParams<{
+      data?: Array<{
+        id?: string;
+        name?: string;
+        username?: string;
+        access_token?: string;
+        instagram_business_account?: { id?: string; username?: string };
+      }>;
+    }>("me/accounts", {
+      fields: "id,name,username,access_token,instagram_business_account{id,username}",
+      limit: "100",
+    });
+    const pages: MetaManagedPage[] = [];
+    for (const row of body.data ?? []) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      if (typeof row.access_token !== "string" || !row.access_token) continue;
+      pages.push({
+        id: row.id,
+        name: typeof row.name === "string" ? row.name : null,
+        username: typeof row.username === "string" ? row.username : null,
+        accessToken: row.access_token,
+        linkedIg:
+          typeof row.instagram_business_account?.id === "string"
+            ? {
+                id: row.instagram_business_account.id,
+                username:
+                  typeof row.instagram_business_account.username === "string"
+                    ? row.instagram_business_account.username
+                    : null,
+              }
+            : null,
+      });
+    }
+    return pages;
+  }
+
+  /**
+   * Akun IG yang dibagikan klien ke aplikasi (`GET
+   * /me/assigned_instagram_accounts?fields=id,username`) — klien dibangun
+   * dengan SUAT Unified Login. Satu SUAT bisa mencakup banyak akun.
+   */
+  async getAssignedInstagramAccounts(): Promise<
+    Array<{ id: string; username: string | null }>
+  > {
+    const body = await this.getJsonParams<{
+      data?: Array<{ id?: string; username?: string }>;
+    }>("me/assigned_instagram_accounts", { fields: "id,username", limit: "100" });
+    const accounts: Array<{ id: string; username: string | null }> = [];
+    for (const row of body.data ?? []) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      accounts.push({
+        id: row.id,
+        username: typeof row.username === "string" ? row.username : null,
+      });
+    }
+    return accounts;
+  }
+
+  /**
+   * ID portfolio bisnis klien pemilik token BISU (`GET
+   * /me?fields=client_business_id`) — disimpan sebagai konteks induk
+   * akun IG (parent_external_id) untuk manajemen token kelak.
+   */
+  async getClientBusinessId(): Promise<string | null> {
+    const body = await this.getJsonParams<{ client_business_id?: string }>(
+      "me",
+      { fields: "client_business_id" },
+    );
+    return typeof body.client_business_id === "string"
+      ? body.client_business_id
+      : null;
+  }
+
+  /**
+   * WABA yang ter-assign ke pemilik token bisnis Embedded Signup
+   * (`GET /me/assigned_whatsapp_business_accounts?fields=id,name`) —
+   * pola tepi `assigned_*` yang sama seperti assigned_instagram_accounts
+   * pada Unified Login (dokumen advanced implementation "Get WABA IDs
+   * and Phone Numbers").
+   */
+  async getAssignedWhatsAppBusinessAccounts(): Promise<
+    Array<{ id: string; name: string | null }>
+  > {
+    const body = await this.getJsonParams<{
+      data?: Array<{ id?: string; name?: string }>;
+    }>("me/assigned_whatsapp_business_accounts", {
+      fields: "id,name",
+      limit: "100",
+    });
+    const wabas: Array<{ id: string; name: string | null }> = [];
+    for (const row of body.data ?? []) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      wabas.push({
+        id: row.id,
+        name: typeof row.name === "string" ? row.name : null,
+      });
+    }
+    return wabas;
+  }
+
+  /**
+   * Nomor telepon di bawah satu WABA (`GET /{waba-id}/phone_numbers`)
+   * — field yang sama seperti profil nomor pada connect manual 7B.
+   */
+  async getWabaPhoneNumbers(
+    wabaId: string,
+  ): Promise<MetaWabaPhoneNumber[]> {
+    const body = await this.getJsonParams<{
+      data?: Array<{
+        id?: string;
+        display_phone_number?: string;
+        verified_name?: string;
+      }>;
+    }>(`${encodeURIComponent(wabaId)}/phone_numbers`, {
+      fields: "id,display_phone_number,verified_name",
+      limit: "100",
+    });
+    const numbers: MetaWabaPhoneNumber[] = [];
+    for (const row of body.data ?? []) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      numbers.push({
+        id: row.id,
+        displayPhoneNumber:
+          typeof row.display_phone_number === "string"
+            ? row.display_phone_number
+            : null,
+        verifiedName:
+          typeof row.verified_name === "string" ? row.verified_name : null,
+      });
+    }
+    return numbers;
+  }
+
+  /**
+   * Subscribe aplikasi ke webhook sebuah objek (`POST
+   * /{object-id}/subscribed_apps`) — dipakai Page (Messenger), akun IG
+   * (Unified Login: "subscribe each of their Instagram accounts"), dan
+   * WABA (Embedded Signup webhook-subscription). Kegagalan melempar
+   * MetaGraphError; pemanggil (complete OAuth) mengubahnya menjadi
+   * peringatan, bukan menggagalkan koneksi.
+   */
+  async subscribeAppToObject(
+    objectId: string,
+    subscribedFields?: string[],
+  ): Promise<void> {
+    const path = subscribedFields?.length
+      ? `${encodeURIComponent(objectId)}/subscribed_apps?subscribed_fields=${encodeURIComponent(subscribedFields.join(","))}`
+      : `${encodeURIComponent(objectId)}/subscribed_apps`;
+    await this.postJson(path, {});
   }
 
   /**

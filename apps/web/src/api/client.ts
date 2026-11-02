@@ -32,6 +32,11 @@ import type {
   KbDocumentResponse,
   MessageListResponse,
   MessageResponse,
+  MetaOAuthCompleteResponse,
+  MetaOAuthInfoResponse,
+  MetaOAuthProvider,
+  MetaOAuthSessionResponse,
+  MetaOAuthStartResponse,
   MetaWebhookInfoResponse,
   PaymentLinkListResponse,
   PaymentLinkResponse,
@@ -263,6 +268,59 @@ export const api = {
       return request<MetaWebhookInfoResponse>(
         `/api/tenants/${tenantId}/channels/meta-webhook-info`,
         { method: "GET" },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/channels/meta-oauth-info — ketersediaan
+     * OAuth Meta per provider (Fase 7D). Owner/admin saja; tidak pernah
+     * membawa App Secret (App ID/config ID publik boleh tampil).
+     */
+    metaOAuthInfo(tenantId: string): Promise<MetaOAuthInfoResponse> {
+      return request<MetaOAuthInfoResponse>(
+        `/api/tenants/${tenantId}/channels/meta-oauth-info`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/meta-oauth/start — buat state sekali
+     * pakai + URL dialog Meta; pemanggil mengarahkan browser ke sana
+     * (redirect penuh, pola navigasi aplikasi).
+     */
+    metaOAuthStart(
+      tenantId: string,
+      provider: MetaOAuthProvider,
+    ): Promise<MetaOAuthStartResponse> {
+      return request<MetaOAuthStartResponse>(
+        `/api/tenants/${tenantId}/meta-oauth/start`,
+        { method: "POST", body: JSON.stringify({ provider }) },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/meta-oauth/sessions/:sessionId — aset
+     * hasil login Meta untuk dialog pemilih (tanpa token apa pun).
+     */
+    metaOAuthSession(
+      tenantId: string,
+      sessionId: string,
+    ): Promise<MetaOAuthSessionResponse> {
+      return request<MetaOAuthSessionResponse>(
+        `/api/tenants/${tenantId}/meta-oauth/sessions/${sessionId}`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * POST .../meta-oauth/sessions/:sessionId/complete {assetId} —
+     * hubungkan aset terpilih; respons membawa channel + peringatan
+     * berkode (mis. subscribe gagal) untuk ditampilkan UI.
+     */
+    metaOAuthComplete(
+      tenantId: string,
+      sessionId: string,
+      assetId: string,
+    ): Promise<MetaOAuthCompleteResponse> {
+      return request<MetaOAuthCompleteResponse>(
+        `/api/tenants/${tenantId}/meta-oauth/sessions/${sessionId}/complete`,
+        { method: "POST", body: JSON.stringify({ assetId }) },
       );
     },
     /** DELETE /api/tenants/:tenantId/channels/:channelId — putuskan koneksi (hotfix Telegram); riwayat percakapan tidak dihapus. */

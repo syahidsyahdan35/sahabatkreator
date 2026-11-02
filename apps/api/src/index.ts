@@ -30,6 +30,7 @@ import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { createWebchatRoutes } from "./modules/webchat/routes";
 import { createTelegramRoutes } from "./modules/telegram/routes";
 import { createMetaRoutes } from "./modules/meta/routes";
+import { createMetaOAuthRoutes } from "./modules/meta-oauth/routes";
 import { startMetaDeliveryPoller } from "./modules/meta/poller";
 import { createAvatarsRoutes } from "./modules/avatars/routes";
 import { createAdminRoutes } from "./modules/admin/routes";
@@ -107,6 +108,11 @@ const platformOptions: PlatformSettingsOptions = {
     // Fase 7A.1: App Secret Meta ikut dikelola panel; env placeholder
     // staging tetap fallback sampai pemilik mengisi panel.
     meta_app_secret: env.META_APP_SECRET,
+    // Fase 7D: identifier publik Meta untuk OAuth (App ID + config ID)
+    // — env hanya fallback; sumber utama Panel Admin.
+    meta_app_id: env.META_APP_ID,
+    meta_ig_config_id: env.META_IG_CONFIG_ID,
+    meta_wa_config_id: env.META_WA_CONFIG_ID,
   },
 };
 
@@ -212,6 +218,24 @@ routes.route(
       endpoint: R2_ENDPOINT,
       bucket: resolveR2Bucket(env.R2_BUCKET),
     },
+    // Fase 7D: redirect URI OAuth tunggal ditampilkan read-only di panel.
+    metaOAuthRedirectUri: `${(env.BETTER_AUTH_URL ?? "").replace(/\/+$/, "")}/api/meta/oauth/callback`,
+  }),
+);
+// Modul Meta OAuth Connect (Fase 7D) — "Lanjutkan dengan Facebook":
+// start ber-sesi + callback tunggal publik /meta/oauth/callback + sesi
+// aset + info ketersediaan. State HMAC sekali pakai & sesi terenkripsi
+// disimpan di Redis platform (fallback in-memory tanpa REDIS_URL).
+routes.route(
+  "/",
+  createMetaOAuthRoutes(authBundle, {
+    platform: platformOptions,
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    metaApiBase: env.META_API_BASE,
+    graphApiVersion: META_GRAPH_API_VERSION,
+    publicBaseUrl: env.BETTER_AUTH_URL,
+    redisUrl: env.REDIS_URL,
+    stateSecret: env.BETTER_AUTH_SECRET,
   }),
 );
 

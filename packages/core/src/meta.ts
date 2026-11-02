@@ -61,6 +61,14 @@ export interface CreateMetaChannelInput {
   encryptedAccessToken: string;
   /** Versi Graph API ter-pin untuk akun ini (dari packages/config). */
   graphApiVersion: string;
+  /**
+   * Konteks induk generik (kolom `parent_external_id`, Fase 7D): untuk
+   * Instagram lewat Unified Login ini adalah `client_business_id`
+   * (portfolio bisnis klien pemilik SUAT — diperlukan untuk manajemen/
+   * refresh token BISU kelak). Jalur manual 7A tidak mengisinya (null).
+   * Makna per provider sejajar WhatsApp (WABA ID).
+   */
+  parentExternalId?: string | null;
 }
 
 export async function createMetaChannelAccount(
@@ -79,6 +87,7 @@ export async function createMetaChannelAccount(
         status: "connected",
         accessTokenEncrypted: input.encryptedAccessToken,
         publicHandle: input.publicHandle,
+        parentExternalId: input.parentExternalId ?? null,
         graphApiVersion: input.graphApiVersion,
       })
       .returning();
@@ -103,6 +112,8 @@ export async function createMetaChannelAccount(
 export interface UpdateMetaCredentialsInput {
   /** Envelope enkripsi token baru; undefined = jangan ubah. */
   encryptedAccessToken?: string;
+  /** Konteks induk (Fase 7D: client_business_id untuk IG Unified Login). */
+  parentExternalId?: string | null;
   publicHandle?: string | null;
   /** Nama Graph terbaru; undefined = jangan ubah. */
   graphName?: string | null;
@@ -128,6 +139,9 @@ export async function updateMetaChannelAccountCredentials(
     const patch: Partial<ChannelAccount> = { updatedAt: new Date() };
     if (input.encryptedAccessToken !== undefined) {
       patch.accessTokenEncrypted = input.encryptedAccessToken;
+    }
+    if (input.parentExternalId !== undefined) {
+      patch.parentExternalId = input.parentExternalId;
     }
     if (input.publicHandle !== undefined) {
       patch.publicHandle = input.publicHandle;

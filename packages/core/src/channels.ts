@@ -31,6 +31,38 @@ export function generateWebchatSiteKey(): string {
   return `wc_${randomBytes(18).toString("base64url")}`;
 }
 
+/**
+ * Audit `channel.connected` (Fase 7D) — jejak METODE penghubungan sebuah
+ * akun channel. Fungsi create per provider sudah menulis
+ * `channel.created`; jalur OAuth menulis audit tambahan ini agar riwayat
+ * membedakan koneksi hasil login Meta dari koneksi form manual, untuk
+ * pembuatan baru maupun revive. Meta TIDAK memuat token/secret apa pun —
+ * hanya id akun, provider, dan metode.
+ */
+export async function recordChannelConnectedAudit(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId" | "userId"> & { userId: string },
+  input: {
+    channelAccountId: string;
+    provider: ChannelProviderName;
+    method: "oauth" | "manual";
+  },
+): Promise<void> {
+  await withTenantDb(db, ctx.tenantId, async (tx) => {
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: "user",
+      actorId: ctx.userId,
+      action: "channel.connected",
+      meta: {
+        channelAccountId: input.channelAccountId,
+        provider: input.provider,
+        method: input.method,
+      },
+    });
+  });
+}
+
 export async function createWebchatChannelAccount(
   db: Database,
   ctx: Pick<TenantContext, "tenantId" | "userId"> & { userId: string },

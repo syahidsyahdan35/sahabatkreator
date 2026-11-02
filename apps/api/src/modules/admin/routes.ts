@@ -10,6 +10,7 @@ import {
 import {
   PlatformSettingsUnavailableError,
   clearPlatformSetting,
+  getPlatformPublicConfig,
   getProviderSecret,
   isPlatformAdminEmail,
   isPlatformSettingKey,
@@ -32,6 +33,12 @@ export interface AdminRoutesOptions {
   platform: PlatformSettingsOptions;
   /** Info R2 bukan rahasia (dari @sahabat-kreator/config) untuk status & probe. */
   r2: { accountId: string; endpoint: string; bucket: string };
+  /**
+   * Redirect URI OAuth Meta (Fase 7D) — callback tunggal yang ditampilkan
+   * read-only di grup Meta panel agar pemilik mendaftarkannya persis di
+   * Meta App. Dihitung dari BETTER_AUTH_URL oleh pemanggil.
+   */
+  metaOAuthRedirectUri?: string;
 }
 
 function serializeStatus(s: CorePlatformSettingStatus): PlatformSettingStatus {
@@ -51,6 +58,11 @@ const KEY_MAX_LENGTH: Record<PlatformSettingKey, number> = {
   r2_access_key_id: 512,
   r2_secret_access_key: 512,
   meta_app_secret: 512,
+  // Fase 7D: identifier publik Meta (App ID + config ID Login for
+  // Business) — pendek, bukan kredensial; nilainya DITAMPILKAN di panel.
+  meta_app_id: 128,
+  meta_ig_config_id: 128,
+  meta_wa_config_id: 128,
 };
 
 /**
@@ -128,9 +140,21 @@ export function createAdminRoutes(
       bundle.db,
       options.platform,
     );
+    // Fase 7D: nilai efektif identifier publik Meta (panel → env)
+    // disertakan agar bisa diverifikasi pemilik — BUKAN rahasia.
+    const publicConfig = await getPlatformPublicConfig(
+      bundle.db,
+      options.platform,
+    );
     const body = PlatformSettingsResponseSchema.parse({
       settings: statuses.map(serializeStatus),
       r2: options.r2,
+      meta: {
+        appId: publicConfig.meta_app_id,
+        igConfigId: publicConfig.meta_ig_config_id,
+        waConfigId: publicConfig.meta_wa_config_id,
+        oauthRedirectUri: options.metaOAuthRedirectUri ?? "",
+      },
     });
     return c.json(body);
   });

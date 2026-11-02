@@ -21,6 +21,13 @@ export const ErrorCodeSchema = z.enum([
   "META_ACCOUNT_ALREADY_CONNECTED",
   "META_NOT_CONFIGURED",
   "META_SIGNATURE_INVALID",
+  // Fase 7D: koneksi Meta via OAuth ("Lanjutkan dengan Facebook").
+  "META_OAUTH_NOT_CONFIGURED",
+  "META_OAUTH_STATE_INVALID",
+  "META_OAUTH_SESSION_NOT_FOUND",
+  "META_OAUTH_ASSET_NOT_FOUND",
+  "META_OAUTH_EXCHANGE_FAILED",
+  "META_OAUTH_CANCELLED",
   "CHANNEL_DELETE_CONFIRMATION_MISMATCH",
   "CHANNEL_ALREADY_TRASHED",
   "CHANNEL_NOT_TRASHED",
@@ -469,6 +476,128 @@ export const MetaWebhookInfoResponseSchema = z.object({
 });
 export type MetaWebhookInfoResponse = z.infer<
   typeof MetaWebhookInfoResponseSchema
+>;
+
+// ---------------------------------------------------------------------------
+// Meta OAuth Connect (Fase 7D) — "Lanjutkan dengan Facebook" menggantikan
+// tempel token sebagai jalur utama menghubungkan Messenger/Instagram/
+// WhatsApp. Tiga rasa alur di balik satu callback platform:
+// - messenger: Facebook Login klasik (scope di URL dialog) → user token →
+//   long-lived → /me/accounts (Page + Page Access Token turunannya).
+// - instagram: Unified Login (config_id) → Business Integration System
+//   User Access Token (SUAT) → /me/assigned_instagram_accounts.
+// - whatsapp: Embedded Signup / Login for Business (config_id) → token
+//   bisnis → penemuan WABA ter-assign + nomor-nomornya.
+// Token hasil exchange TIDAK PERNAH meninggalkan server: callback
+// menyimpan "sesi OAuth" server-side berumur pendek di bawah id opak;
+// browser hanya membawa id itu. App ID & config ID adalah identifier
+// PUBLIK (bukan rahasia) — boleh tampil di respons & UI.
+// ---------------------------------------------------------------------------
+
+export const MetaOAuthProviderSchema = z.enum([
+  "messenger",
+  "instagram",
+  "whatsapp",
+]);
+export type MetaOAuthProvider = z.infer<typeof MetaOAuthProviderSchema>;
+
+export const MetaOAuthStartRequestSchema = z.object({
+  provider: MetaOAuthProviderSchema,
+});
+export type MetaOAuthStartRequest = z.infer<typeof MetaOAuthStartRequestSchema>;
+
+export const MetaOAuthStartResponseSchema = z.object({
+  /** URL dialog Meta yang siap diarahkan browser (state sudah tertanam). */
+  dialogUrl: z.string(),
+  /** Kapan state dialog ini kedaluwarsa (state sekali pakai, ≤10 menit). */
+  expiresAt: z.string().datetime(),
+});
+export type MetaOAuthStartResponse = z.infer<
+  typeof MetaOAuthStartResponseSchema
+>;
+
+/**
+ * Ketersediaan OAuth per provider untuk workspace (owner/admin) — dasar
+ * UI memutuskan menampilkan tombol "Lanjutkan dengan Facebook" aktif,
+ * nonaktif, atau menyembunyikannya. `available` = appId terisi DAN app
+ * secret terisi DAN (untuk instagram/whatsapp) config ID provider itu
+ * terisi.
+ */
+export const MetaOAuthInfoResponseSchema = z.object({
+  /** Redirect URI tunggal yang harus didaftarkan di Meta App. */
+  oauthRedirectUri: z.string(),
+  /** App ID Meta platform (identifier publik); null bila belum diatur. */
+  appId: z.string().nullable(),
+  appIdConfigured: z.boolean(),
+  appSecretConfigured: z.boolean(),
+  providers: z.object({
+    messenger: z.object({ available: z.boolean() }),
+    instagram: z.object({
+      available: z.boolean(),
+      configId: z.string().nullable(),
+    }),
+    whatsapp: z.object({
+      available: z.boolean(),
+      configId: z.string().nullable(),
+    }),
+  }),
+});
+export type MetaOAuthInfoResponse = z.infer<typeof MetaOAuthInfoResponseSchema>;
+
+/**
+ * Satu aset yang bisa dipilih pemilik sesudah login Meta. `assetId`
+ * adalah external_id channel masa depan (Page ID / ID akun IG / Phone
+ * Number ID). Untuk WhatsApp, `parentId`/`parentName` = WABA pemilik
+ * nomor; untuk Instagram, `parentId` = client_business_id portfolio
+ * klien; untuk Messenger selalu null dan `linkedIgUsername` hanya info.
+ */
+export const MetaOAuthAssetSchema = z.object({
+  assetId: z.string(),
+  kind: z.enum(["page", "instagram_account", "whatsapp_number"]),
+  name: z.string().nullable(),
+  handle: z.string().nullable(),
+  parentId: z.string().nullable(),
+  parentName: z.string().nullable(),
+  linkedIgUsername: z.string().nullable(),
+});
+export type MetaOAuthAsset = z.infer<typeof MetaOAuthAssetSchema>;
+
+/**
+ * Isi sesi OAuth yang boleh dilihat browser: daftar aset TANPA token apa
+ * pun. Token hidup terenkripsi di server dan hanya dipakai endpoint
+ * complete.
+ */
+export const MetaOAuthSessionResponseSchema = z.object({
+  sessionId: z.string(),
+  provider: MetaOAuthProviderSchema,
+  assets: z.array(MetaOAuthAssetSchema),
+  expiresAt: z.string().datetime(),
+});
+export type MetaOAuthSessionResponse = z.infer<
+  typeof MetaOAuthSessionResponseSchema
+>;
+
+export const MetaOAuthCompleteRequestSchema = z.object({
+  assetId: z.string().trim().min(1).max(255),
+});
+export type MetaOAuthCompleteRequest = z.infer<
+  typeof MetaOAuthCompleteRequestSchema
+>;
+
+/**
+ * Peringatan non-fatal sesudah complete: koneksi berhasil (token & akun
+ * valid) tetapi langkah pendamping gagal — saat ini hanya kegagalan
+ * auto-subscribe webhook, yang bisa diulang dari "Hubungkan lagi".
+ */
+export const MetaOAuthWarningSchema = z.enum(["META_SUBSCRIBE_FAILED"]);
+export type MetaOAuthWarning = z.infer<typeof MetaOAuthWarningSchema>;
+
+export const MetaOAuthCompleteResponseSchema = z.object({
+  channel: ChannelAccountResponseSchema,
+  warnings: z.array(MetaOAuthWarningSchema),
+});
+export type MetaOAuthCompleteResponse = z.infer<
+  typeof MetaOAuthCompleteResponseSchema
 >;
 
 /**
@@ -1103,6 +1232,13 @@ export const PlatformSettingKeySchema = z.enum([
   // webhook Instagram/Messenger. Sengaja TANPA uji koneksi: Meta tidak
   // menyediakan validasi app secret yang berdiri sendiri.
   "meta_app_secret",
+  // Fase 7D: identifier PUBLIK Meta untuk OAuth — BUKAN rahasia (App ID
+  // tampil di setiap URL dialog; config ID diakui Meta bukan rahasia).
+  // Berbeda dari kunci lain, nilainya DITAMPILKAN di UI admin lewat
+  // PlatformMetaInfo agar bisa diverifikasi pemilik platform.
+  "meta_app_id",
+  "meta_ig_config_id",
+  "meta_wa_config_id",
 ]);
 export type PlatformSettingKey = z.infer<typeof PlatformSettingKeySchema>;
 
@@ -1130,9 +1266,25 @@ export const PlatformR2InfoSchema = z.object({
 });
 export type PlatformR2Info = z.infer<typeof PlatformR2InfoSchema>;
 
+/**
+ * Info Meta BUKAN rahasia (Fase 7D): nilai efektif App ID + config ID
+ * (panel → env) DITAMPILKAN agar pemilik bisa memverifikasinya — ketiganya
+ * identifier publik, bukan kredensial. `oauthRedirectUri` adalah callback
+ * tunggal yang harus didaftarkan persis di Meta App (Facebook Login /
+ * konfigurasi Login for Business).
+ */
+export const PlatformMetaInfoSchema = z.object({
+  appId: z.string().nullable(),
+  igConfigId: z.string().nullable(),
+  waConfigId: z.string().nullable(),
+  oauthRedirectUri: z.string(),
+});
+export type PlatformMetaInfo = z.infer<typeof PlatformMetaInfoSchema>;
+
 export const PlatformSettingsResponseSchema = z.object({
   settings: z.array(PlatformSettingStatusSchema),
   r2: PlatformR2InfoSchema,
+  meta: PlatformMetaInfoSchema,
 });
 export type PlatformSettingsResponse = z.infer<
   typeof PlatformSettingsResponseSchema

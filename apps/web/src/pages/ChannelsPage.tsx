@@ -1,11 +1,16 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
 import type {
   ChannelAccountResponse,
+  MetaOAuthAsset,
+  MetaOAuthInfoResponse,
+  MetaOAuthProvider,
+  MetaOAuthSessionResponse,
   MetaWebhookInfoResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
@@ -263,6 +268,83 @@ function BackIcon() {
 }
 
 /** Pill status kartu: titik + label, warna mengikuti token semantik tema. */
+/** Glyph "f" Facebook (jalur terisi sederhana) untuk tombol OAuth Fase 7D. */
+function FacebookIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      className="h-5 w-5 shrink-0"
+    >
+      <path d="M13.22 21.888v-7.638h2.565l.435-2.99H13.22V9.35c0-.865.24-1.455 1.48-1.455h1.58V5.22c-.274-.036-1.212-.116-2.304-.116-2.28 0-3.84 1.39-3.84 3.945v2.202H7.56v2.99h2.576v7.638a12.05 12.05 0 0 0 3.084 0Z" />
+    </svg>
+  );
+}
+
+/**
+ * Blok OAuth Meta di langkah form modal (Fase 7D): tombol primer
+ * "Lanjutkan dengan Facebook" bila provider itu tersedia (App ID +
+ * App Secret + config ID terisi di Panel Admin), selain itu tombol
+ * nonaktif + petunjuk. Untuk Instagram ditambah blok prasyarat Unified
+ * Login (akun Professional + Portofolio Bisnis Meta) agar kreator tidak
+ * mentok di dialog Meta tanpa penjelasan.
+ */
+function MetaOAuthStepBlock({
+  t,
+  provider,
+  available,
+  starting,
+  startError,
+  onStart,
+}: {
+  t: Translate;
+  provider: MetaOAuthProvider;
+  available: boolean;
+  starting: boolean;
+  startError: string | null;
+  onStart: (provider: MetaOAuthProvider) => void;
+}) {
+  return (
+    <div className="mt-4">
+      {provider === "instagram" ? (
+        <div className="rounded-lg border border-line bg-elevated/40 p-3">
+          <div className="text-sm font-semibold">
+            {t("channels.oauthIgPrereqTitle")}
+          </div>
+          <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-muted">
+            <li>{t("channels.oauthIgPrereqProfessional")}</li>
+            <li>{t("channels.oauthIgPrereqPortfolio")}</li>
+            <li>{t("channels.oauthIgPrereqLogin")}</li>
+          </ul>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        disabled={!available || starting}
+        onClick={() => onStart(provider)}
+        className="mt-3 flex w-full items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+        style={{ backgroundColor: "#1877F2" }}
+      >
+        <FacebookIcon />
+        {starting
+          ? t("channels.oauthStarting")
+          : t("channels.oauthContinueFacebook")}
+      </button>
+      {!available ? (
+        <p className="mt-2 text-xs text-muted">
+          {t("channels.oauthNotConfigured")}
+        </p>
+      ) : null}
+      {startError ? (
+        <div className="mt-2">
+          <FieldError message={startError} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusPill({
   t,
   status,
@@ -570,6 +652,32 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   const [waError, setWaError] = useState<string | null>(null);
   const [metaWebhook, setMetaWebhook] =
     useState<MetaWebhookInfoResponse | null>(null);
+  // OAuth Meta (Fase 7D): ketersediaan per provider, status start,
+  // lipatan form manual, dan alur pulang dari dialog Meta (sesi pemilih
+  // aset / banner error / peringatan subscribe).
+  const [oauthInfo, setOauthInfo] = useState<MetaOAuthInfoResponse | null>(
+    null,
+  );
+  const [oauthStarting, setOauthStarting] = useState(false);
+  const [oauthStartError, setOauthStartError] = useState<string | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [oauthSessionId, setOauthSessionId] = useState<string | null>(null);
+  const [oauthSession, setOauthSession] =
+    useState<MetaOAuthSessionResponse | null>(null);
+  const [oauthSessionError, setOauthSessionError] = useState<string | null>(
+    null,
+  );
+  const [oauthCompletingId, setOauthCompletingId] = useState<string | null>(
+    null,
+  );
+  const [oauthCompleteError, setOauthCompleteError] = useState<string | null>(
+    null,
+  );
+  const [oauthBannerError, setOauthBannerError] = useState<string | null>(
+    null,
+  );
+  const [oauthWarning, setOauthWarning] = useState<string | null>(null);
+  const oauthParamsHandled = useRef(false);
   const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(
     null,
   );
@@ -653,10 +761,81 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
       .catch(() => {
         if (!cancelled) setMetaWebhook(null);
       });
+    // Ketersediaan OAuth Meta (Fase 7D) — gerbang yang sama (owner/admin);
+    // kegagalan berarti tombol OAuth tampil nonaktif, bukan error halaman.
+    api.channels
+      .metaOAuthInfo(tenantId)
+      .then((info) => {
+        if (!cancelled) setOauthInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setOauthInfo(null);
+      });
     return () => {
       cancelled = true;
     };
   }, [tenantId]);
+
+  // Ganti langkah modal → lipatan manual tertutup lagi + error start bersih.
+  useEffect(() => {
+    setManualOpen(false);
+    setOauthStartError(null);
+  }, [connectStep]);
+
+  // Kepulangan dari dialog Meta (Fase 7D): callback API me-redirect ke
+  // /channels?meta_oauth=<sesi> atau ?meta_oauth_error=<kode>. Baca
+  // SEKALI, bersihkan query dari URL, lalu tampilkan pemilih/banner.
+  useEffect(() => {
+    if (oauthParamsHandled.current) return;
+    oauthParamsHandled.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get("meta_oauth");
+    const errorCode = params.get("meta_oauth_error");
+    if (!sessionId && !errorCode) return;
+    params.delete("meta_oauth");
+    params.delete("meta_oauth_error");
+    const rest = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (rest ? `?${rest}` : ""),
+    );
+    if (errorCode) {
+      setOauthBannerError(
+        translateApiError(t, new ApiClientError(0, errorCode, "")),
+      );
+    }
+    if (sessionId) {
+      setOauthSessionError(null);
+      setOauthSession(null);
+      setOauthSessionId(sessionId);
+    }
+    // Sengaja hanya sekali saat mount; `t` dari render pertama cukup.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Muat aset sesi OAuth begitu id sesi + tenant siap (dialog pemilih).
+  useEffect(() => {
+    if (!tenantId || !oauthSessionId) return;
+    let cancelled = false;
+    api.channels
+      .metaOAuthSession(tenantId, oauthSessionId)
+      .then((session) => {
+        if (!cancelled) setOauthSession(session);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setOauthSessionError(
+            err instanceof ApiClientError
+              ? translateApiError(t, err)
+              : t("errors.generic"),
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, oauthSessionId, t]);
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
@@ -812,6 +991,63 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     }
   };
 
+  /**
+   * Mulai OAuth Meta (Fase 7D): minta URL dialog ke API lalu arahkan
+   * browser ke sana (redirect penuh). Callback API yang membawa pulang.
+   */
+  const handleOAuthStart = async (provider: MetaOAuthProvider) => {
+    if (!tenantId || oauthStarting) return;
+    setOauthStarting(true);
+    setOauthStartError(null);
+    try {
+      const started = await api.channels.metaOAuthStart(tenantId, provider);
+      window.location.href = started.dialogUrl;
+    } catch (err) {
+      setOauthStartError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+      setOauthStarting(false);
+    }
+  };
+
+  /** Selesaikan OAuth: hubungkan aset terpilih dari sesi (Fase 7D). */
+  const handleOAuthComplete = async (asset: MetaOAuthAsset) => {
+    if (!tenantId || !oauthSessionId || oauthCompletingId) return;
+    setOauthCompletingId(asset.assetId);
+    setOauthCompleteError(null);
+    try {
+      const result = await api.channels.metaOAuthComplete(
+        tenantId,
+        oauthSessionId,
+        asset.assetId,
+      );
+      setOauthSessionId(null);
+      setOauthSession(null);
+      if (result.warnings.includes("META_SUBSCRIBE_FAILED")) {
+        setOauthWarning(t("channels.oauthSubscribeWarning"));
+      }
+      await load();
+      finishConnect(result.channel.id);
+    } catch (err) {
+      setOauthCompleteError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+    } finally {
+      setOauthCompletingId(null);
+    }
+  };
+
+  const closeOAuthPicker = () => {
+    setOauthSessionId(null);
+    setOauthSession(null);
+    setOauthSessionError(null);
+    setOauthCompleteError(null);
+  };
+
   const handleDisconnect = async () => {
     if (!tenantId || !disconnectTarget) return;
     setDisconnecting(true);
@@ -901,6 +1137,25 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     }
   };
 
+  // Aset sesi OAuth dikelompokkan per induk (WhatsApp: per WABA);
+  // provider lain satu grup tanpa judul (parentId null).
+  const oauthGroups: Array<{
+    key: string;
+    parentName: string | null;
+    assets: MetaOAuthAsset[];
+  }> = [];
+  if (oauthSession) {
+    for (const asset of oauthSession.assets) {
+      const key = asset.parentId ?? "__single__";
+      let group = oauthGroups.find((g) => g.key === key);
+      if (!group) {
+        group = { key, parentName: asset.parentName, assets: [] };
+        oauthGroups.push(group);
+      }
+      group.assets.push(asset);
+    }
+  }
+
   if (!tenantId) {
     return (
       <section>
@@ -937,6 +1192,32 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
           </button>
         </div>
       </div>
+
+      {oauthBannerError ? (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-lg bg-elevated px-3 py-2">
+          <FieldError message={oauthBannerError} />
+          <button
+            type="button"
+            onClick={() => setOauthBannerError(null)}
+            className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-muted hover:text-ink"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+      ) : null}
+
+      {oauthWarning ? (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-lg border border-line bg-elevated px-3 py-2">
+          <p className="text-sm text-ink">{oauthWarning}</p>
+          <button
+            type="button"
+            onClick={() => setOauthWarning(null)}
+            className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-muted hover:text-ink"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="mt-4">
@@ -1386,6 +1667,27 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                 ) : null}
 
                 {connectStep === "messenger" ? (
+                  <>
+                    <MetaOAuthStepBlock
+                      t={t}
+                      provider="messenger"
+                      available={
+                        oauthInfo?.providers.messenger.available ?? false
+                      }
+                      starting={oauthStarting}
+                      startError={oauthStartError}
+                      onStart={(p) => void handleOAuthStart(p)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setManualOpen((open) => !open)}
+                      className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-accent"
+                      aria-expanded={manualOpen}
+                    >
+                      {t("channels.oauthManualTitle")}
+                      <ChevronRightIcon />
+                    </button>
+                    {manualOpen ? (
                   <form onSubmit={handleConnectMessenger}>
                     <label
                       className="mt-3 block text-sm font-medium"
@@ -1449,9 +1751,32 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                         : t("channels.messengerConnectButton")}
                     </button>
                   </form>
+                    ) : null}
+                  </>
                 ) : null}
 
                 {connectStep === "instagram" ? (
+                  <>
+                    <MetaOAuthStepBlock
+                      t={t}
+                      provider="instagram"
+                      available={
+                        oauthInfo?.providers.instagram.available ?? false
+                      }
+                      starting={oauthStarting}
+                      startError={oauthStartError}
+                      onStart={(p) => void handleOAuthStart(p)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setManualOpen((open) => !open)}
+                      className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-accent"
+                      aria-expanded={manualOpen}
+                    >
+                      {t("channels.oauthManualTitle")}
+                      <ChevronRightIcon />
+                    </button>
+                    {manualOpen ? (
                   <form onSubmit={handleConnectInstagram}>
                     <label
                       className="mt-3 block text-sm font-medium"
@@ -1534,9 +1859,32 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                         : t("channels.instagramConnectButton")}
                     </button>
                   </form>
+                    ) : null}
+                  </>
                 ) : null}
 
                 {connectStep === "whatsapp" ? (
+                  <>
+                    <MetaOAuthStepBlock
+                      t={t}
+                      provider="whatsapp"
+                      available={
+                        oauthInfo?.providers.whatsapp.available ?? false
+                      }
+                      starting={oauthStarting}
+                      startError={oauthStartError}
+                      onStart={(p) => void handleOAuthStart(p)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setManualOpen((open) => !open)}
+                      className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-accent"
+                      aria-expanded={manualOpen}
+                    >
+                      {t("channels.oauthManualTitle")}
+                      <ChevronRightIcon />
+                    </button>
+                    {manualOpen ? (
                   <form onSubmit={handleConnectWhatsApp}>
                     <label
                       className="mt-3 block text-sm font-medium"
@@ -1619,6 +1967,8 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                         : t("channels.whatsappConnectButton")}
                     </button>
                   </form>
+                    ) : null}
+                  </>
                 ) : null}
 
                 <div className="mt-4 flex justify-end">
@@ -1632,6 +1982,118 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      ) : null}
+
+      {oauthSessionId ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("channels.oauthPickerTitle")}
+        >
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+            <h2 className="text-lg font-bold">
+              {t("channels.oauthPickerTitle")}
+            </h2>
+            <p className="mt-1 text-sm text-muted">
+              {t("channels.oauthPickerBody")}
+            </p>
+            {!oauthSession && !oauthSessionError ? (
+              <p className="mt-4 text-sm text-muted">
+                {t("channels.oauthPickerLoading")}
+              </p>
+            ) : null}
+            {oauthSessionError ? (
+              <div className="mt-3">
+                <FieldError message={oauthSessionError} />
+              </div>
+            ) : null}
+            {oauthSession && oauthSession.assets.length === 0 ? (
+              <p className="mt-4 text-sm text-muted">
+                {t("channels.oauthPickerEmpty")}
+              </p>
+            ) : null}
+            {oauthSession
+              ? oauthGroups.map((group) => (
+                  <div key={group.key} className="mt-4">
+                    {oauthSession.provider === "whatsapp" ? (
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted">
+                        {group.parentName ?? group.key}
+                      </div>
+                    ) : null}
+                    <div className="mt-2 space-y-2">
+                      {group.assets.map((asset) => {
+                        const title =
+                          asset.name ??
+                          (asset.handle
+                            ? `@${asset.handle}`
+                            : asset.assetId);
+                        const subtitle =
+                          oauthSession.provider === "whatsapp"
+                            ? asset.handle
+                            : asset.name && asset.handle
+                              ? `@${asset.handle}`
+                              : null;
+                        return (
+                          <div
+                            key={asset.assetId}
+                            className="flex items-center gap-3 rounded-xl border border-line p-3"
+                          >
+                            <ChannelAvatar
+                              provider={oauthSession.provider}
+                              name={title}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate font-semibold">
+                                {title}
+                              </div>
+                              {subtitle ? (
+                                <div className="truncate font-mono text-sm text-muted">
+                                  {subtitle}
+                                </div>
+                              ) : null}
+                              {asset.linkedIgUsername ? (
+                                <div className="truncate text-xs text-muted">
+                                  {t("channels.oauthLinkedIgLabel", {
+                                    username: asset.linkedIgUsername,
+                                  })}
+                                </div>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={oauthCompletingId !== null}
+                              onClick={() => void handleOAuthComplete(asset)}
+                              className="shrink-0 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                            >
+                              {oauthCompletingId === asset.assetId
+                                ? t("channels.oauthPickerConnecting")
+                                : t("channels.oauthPickerConnect")}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))
+              : null}
+            {oauthCompleteError ? (
+              <div className="mt-3">
+                <FieldError message={oauthCompleteError} />
+              </div>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={closeOAuthPicker}
+                disabled={oauthCompletingId !== null}
+                className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium disabled:opacity-60"
+              >
+                {t("channels.oauthPickerCancel")}
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

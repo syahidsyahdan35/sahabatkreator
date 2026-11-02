@@ -49,7 +49,54 @@ export const PLATFORM_SETTING_KEYS = [
   // webhook Meta) ikut dikelola panel; env META_APP_SECRET hanya fallback
   // (di staging saat ini placeholder acak sampai pemilik mengisi panel).
   "meta_app_secret",
+  // Fase 7D: identifier PUBLIK Meta untuk OAuth — BUKAN rahasia. App ID
+  // tampil di setiap URL dialog OAuth; config ID (konfigurasi Unified
+  // Login IG & Embedded Signup WA) diakui dokumentasi Meta bukan
+  // rahasia. Ketiganya tetap disimpan lewat mekanisme panel yang sama
+  // (enkripsi tidak merugikan), tetapi NILAINYA boleh ditampilkan di UI
+  // admin lewat `getPlatformPublicConfig` — perlakuan yang sengaja
+  // berbeda dari kunci rahasia di atas, yang nilainya tidak pernah
+  // keluar dari modul ini.
+  "meta_app_id",
+  "meta_ig_config_id",
+  "meta_wa_config_id",
 ] as const;
+
+/** Kunci platform yang nilainya identifier PUBLIK (Fase 7D, lihat atas). */
+export const PLATFORM_PUBLIC_CONFIG_KEYS = [
+  "meta_app_id",
+  "meta_ig_config_id",
+  "meta_wa_config_id",
+] as const;
+
+export type PlatformPublicConfigKey =
+  (typeof PLATFORM_PUBLIC_CONFIG_KEYS)[number];
+
+export type PlatformPublicConfig = Record<PlatformPublicConfigKey, string | null>;
+
+/**
+ * Nilai efektif identifier publik Meta (panel → env → null per kunci).
+ * Berbeda dari kunci rahasia: fungsi ini MEMANG mengembalikan nilai,
+ * karena App ID & config ID bukan kredensial — UI admin menampilkannya
+ * agar pemilik platform bisa memverifikasi isian panelnya, dan endpoint
+ * info OAuth membagikannya ke UI connect (URL dialog dibangun server,
+ * tetapi identifier-nya sendiri publik).
+ */
+export async function getPlatformPublicConfig(
+  db: Database,
+  opts: PlatformSettingsOptions,
+): Promise<PlatformPublicConfig> {
+  const [appId, igConfigId, waConfigId] = await Promise.all([
+    getProviderSecret(db, "meta_app_id", opts),
+    getProviderSecret(db, "meta_ig_config_id", opts),
+    getProviderSecret(db, "meta_wa_config_id", opts),
+  ]);
+  return {
+    meta_app_id: appId,
+    meta_ig_config_id: igConfigId,
+    meta_wa_config_id: waConfigId,
+  };
+}
 
 export type PlatformSettingKey = (typeof PLATFORM_SETTING_KEYS)[number];
 

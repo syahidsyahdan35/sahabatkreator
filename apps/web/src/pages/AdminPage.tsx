@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  PlatformMetaInfo,
   PlatformSettingKey,
   PlatformSettingStatus,
   PlatformSettingTestResult,
@@ -33,6 +34,9 @@ const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
   r2_access_key_id: "admin.r2AccessKeyIdLabel",
   r2_secret_access_key: "admin.r2SecretAccessKeyLabel",
   meta_app_secret: "admin.metaAppSecretLabel",
+  meta_app_id: "admin.metaAppIdLabel",
+  meta_ig_config_id: "admin.metaIgConfigIdLabel",
+  meta_wa_config_id: "admin.metaWaConfigIdLabel",
 };
 
 /**
@@ -49,6 +53,8 @@ const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
 export function AdminPage({ t, locale }: AdminPageProps) {
   const [statuses, setStatuses] = useState<PlatformSettingStatus[]>([]);
   const [r2Info, setR2Info] = useState<PlatformR2Info | null>(null);
+  const [metaInfo, setMetaInfo] = useState<PlatformMetaInfo | null>(null);
+  const [redirectCopied, setRedirectCopied] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
@@ -62,6 +68,7 @@ export function AdminPage({ t, locale }: AdminPageProps) {
       if (requestSeq.current !== seq) return;
       setStatuses(body.settings);
       setR2Info(body.r2);
+      setMetaInfo(body.meta);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
@@ -177,6 +184,105 @@ export function AdminPage({ t, locale }: AdminPageProps) {
             settingKey="meta_app_secret"
             status={byKey("meta_app_secret")}
             onStatusChanged={onStatusChanged}
+          />
+        </div>
+
+        {/*
+          Fase 7D — identifier publik OAuth Meta. Berbeda dari kunci
+          rahasia di atas: App ID & config ID BUKAN kredensial, jadi
+          nilai efektifnya (panel → env) DITAMPILKAN agar bisa
+          diverifikasi, dan field-nya teks biasa (bukan password).
+          Baris tetap memakai mekanisme simpan/hapus panel yang sama.
+        */}
+        <p className="mt-6 max-w-2xl text-sm text-muted">
+          {t("admin.metaPublicIdsBody")}
+        </p>
+        {metaInfo ? (
+          <dl className="mt-3 grid max-w-2xl grid-cols-1 gap-2 text-sm">
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.metaOauthRedirectLabel")}
+              </dt>
+              <dd className="mt-0.5 flex flex-wrap items-center gap-2">
+                <span className="break-all font-mono text-xs text-ink">
+                  {metaInfo.oauthRedirectUri}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard
+                      ?.writeText(metaInfo.oauthRedirectUri)
+                      .then(() => {
+                        setRedirectCopied(true);
+                        setTimeout(() => setRedirectCopied(false), 2000);
+                      })
+                      .catch(() => undefined);
+                  }}
+                  className="rounded-md bg-elevated px-2 py-1 text-xs font-medium text-ink"
+                >
+                  {redirectCopied
+                    ? t("admin.copiedLabel")
+                    : t("admin.copyButton")}
+                </button>
+              </dd>
+            </div>
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">{t("admin.metaAppIdLabel")}</dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {metaInfo.appId ?? "—"}
+              </dd>
+            </div>
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.metaIgConfigIdLabel")}
+              </dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {metaInfo.igConfigId ?? "—"}
+              </dd>
+            </div>
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.metaWaConfigIdLabel")}
+              </dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {metaInfo.waConfigId ?? "—"}
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+        <div className="mt-4 space-y-3">
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="meta_app_id"
+            status={byKey("meta_app_id")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
+          />
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="meta_ig_config_id"
+            status={byKey("meta_ig_config_id")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
+          />
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="meta_wa_config_id"
+            status={byKey("meta_wa_config_id")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
           />
         </div>
       </section>

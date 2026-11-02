@@ -119,6 +119,7 @@ export {
   channelConfirmationName,
   channelPurgeAt,
   createWebchatChannelAccount,
+  recordChannelConnectedAudit,
   listChannelAccounts,
   listTrashedChannelAccounts,
   generateWebchatSiteKey,
@@ -300,8 +301,10 @@ export {
 } from "./integration-log";
 export {
   PLATFORM_SETTING_KEYS,
+  PLATFORM_PUBLIC_CONFIG_KEYS,
   PLATFORM_SETTINGS_CACHE_TTL_MS,
   PlatformSettingsUnavailableError,
+  getPlatformPublicConfig,
   isPlatformSettingKey,
   isPlatformAdminEmail,
   parsePlatformAdminEmails,
@@ -316,4 +319,6 @@ export {
   type PlatformSettingSource,
   type PlatformSettingStatus,
   type PlatformSettingsOptions,
+  type PlatformPublicConfig,
+  type PlatformPublicConfigKey,
 } from "./platform-settings";

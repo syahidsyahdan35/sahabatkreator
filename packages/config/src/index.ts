@@ -66,6 +66,16 @@ const EnvSchema = z.object({
    * bisa memasang webhook. Hanya di env server.
    */
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
+  /**
+   * Identifier PUBLIK Meta untuk OAuth (Fase 7D) — FALLBACK env saja;
+   * sumber utama adalah Panel Admin (kunci `meta_app_id` /
+   * `meta_ig_config_id` / `meta_wa_config_id` di platform_settings).
+   * Ketiganya bukan rahasia: App ID muncul di URL dialog OAuth dan
+   * config ID diakui Meta bukan rahasia.
+   */
+  META_APP_ID: z.string().min(1).optional(),
+  META_IG_CONFIG_ID: z.string().min(1).optional(),
+  META_WA_CONFIG_ID: z.string().min(1).optional(),
   REDIS_URL: z.string().url().optional(),
   /**
    * Pemilihan provider LLM agent (Fase 3A): 'mock' (default, deterministik,
