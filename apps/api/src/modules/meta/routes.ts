@@ -1,25 +1,33 @@
 import { Hono } from "hono";
 import {
+  applyWhatsAppMessageStatus,
   decryptChannelSecret,
   fetchAndStoreMetaContactProfile,
   getProviderSecret,
   recordMetaInboundMessage,
+  recordWhatsAppInboundMessage,
   resolveMetaAccountByExternalId,
+  resolveWhatsAppAccountByPhoneNumberId,
   type MetaAccountRef,
   type MetaProvider,
   type PlatformSettingsOptions,
+  type WhatsAppAccountRef,
 } from "@sahabat-kreator/core";
 import {
   parseMetaWebhookEvents,
   verifyMetaWebhookSignature,
 } from "@sahabat-kreator/channel-messenger";
+import {
+  isWhatsAppWebhookPayload,
+  parseWhatsAppWebhookEvents,
+} from "@sahabat-kreator/channel-whatsapp";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 
 /**
- * Modul meta publik (Fase 7A) — webhook TUNGGAL Meta untuk Messenger +
- * Instagram. TANPA sesi dashboard.
+ * Modul meta publik (Fase 7A; WhatsApp Fase 7B) — webhook TUNGGAL Meta
+ * untuk Messenger + Instagram + WhatsApp. TANPA sesi dashboard.
  *
  *   GET  /meta/webhook   handshake verifikasi (hub.mode/hub.verify_token/
  *                        hub.challenge dari dashboard Meta App)
@@ -135,6 +143,14 @@ export function createMetaRoutes(
       return c.json({ ok: true });
     }
 
+    // Objek ketiga (Fase 7B): WhatsApp Business Account — bentuk
+    // payload-nya berbeda total dari messaging Page/IG, jadi jalurnya
+    // terpisah penuh di bawah (parser + core whatsapp.ts).
+    if (isWhatsAppWebhookPayload(payload)) {
+      await handleWhatsAppWebhook(bundle, publisher, payload);
+      return c.json({ ok: true });
+    }
+
     const events = parseMetaWebhookEvents(payload);
     // Resolusi akun per (provider, entry.id) di-cache dalam request ini:
     // satu payload bisa memuat banyak pesan untuk Page/IG yang sama.
@@ -188,6 +204,85 @@ export function createMetaRoutes(
   });
 
   return app;
+}
+
+/**
+ * Jalur WhatsApp (Fase 7B) pada webhook yang sama: payload
+ * `whatsapp_business_account` sudah lolos verifikasi tanda tangan yang
+ * sama di pemanggil. Resolusi akun dari `metadata.phone_number_id`
+ * (BUKAN entry.id = WABA — satu WABA menaungi banyak nomor/tenant).
+ * Akun tak dikenal / tidak 'connected' → event diabaikan (tetap 200).
+ *
+ * - Pesan masuk: teks dicatat apa adanya; non-teks dicatat dengan
+ *   tipenya (caption sebagai isi) — media tidak diunduh di v1. Nama
+ *   kontak datang dari payload (contacts[].profile.name).
+ * - Statuses: diterapkan ke pesan keluar kita lewat core (hanya maju;
+ *   failed terminal berkode) + nudge realtime bila benar-benar berubah
+ *   (failed → message.failed; delivered/read → conversation.updated
+ *   agar label status di utas inbox menyegar).
+ */
+async function handleWhatsAppWebhook(
+  bundle: AuthBundle,
+  publisher: RealtimePublisher | null,
+  payload: unknown,
+): Promise<void> {
+  const parsed = parseWhatsAppWebhookEvents(payload);
+  if (parsed.messages.length === 0 && parsed.statuses.length === 0) return;
+
+  const accountCache = new Map<string, WhatsAppAccountRef | null>();
+  const resolveAccount = async (
+    phoneNumberId: string,
+  ): Promise<WhatsAppAccountRef | null> => {
+    const cached = accountCache.get(phoneNumberId);
+    if (cached !== undefined) return cached;
+    const account = await resolveWhatsAppAccountByPhoneNumberId(
+      bundle.db,
+      phoneNumberId,
+    );
+    accountCache.set(phoneNumberId, account);
+    return account;
+  };
+
+  for (const message of parsed.messages) {
+    // Pesan teks tanpa isi adalah anomali payload — lewati seperti
+    // jalur Meta; non-teks tetap dicatat bertipe (linimasa jujur).
+    if (message.type === "text" && (!message.text || !message.text.trim())) {
+      continue;
+    }
+    const account = await resolveAccount(message.phoneNumberId);
+    if (!account || account.status !== "connected") continue;
+    const recorded = await recordWhatsAppInboundMessage(bundle.db, account, {
+      senderWaId: message.senderWaId,
+      contactName: message.contactName,
+      providerMessageId: message.providerMessageId,
+      type: message.type,
+      text: message.text,
+    });
+    if (!recorded) continue;
+    if (publisher) {
+      await publisher.publishNudge({
+        kind: "message.received",
+        tenantId: account.tenantId,
+        conversationId: recorded.message.conversationId,
+      });
+    }
+  }
+
+  for (const status of parsed.statuses) {
+    const account = await resolveAccount(status.phoneNumberId);
+    if (!account || account.status !== "connected") continue;
+    const applied = await applyWhatsAppMessageStatus(bundle.db, account, {
+      providerMessageId: status.providerMessageId,
+      status: status.status,
+      graphErrorCode: status.errorCode,
+    });
+    if (!applied?.applied || !publisher) continue;
+    await publisher.publishNudge({
+      kind: applied.status === "failed" ? "message.failed" : "conversation.updated",
+      tenantId: account.tenantId,
+      conversationId: applied.conversationId,
+    });
+  }
 }
 
 /**

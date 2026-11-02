@@ -305,6 +305,25 @@ export const CreateChannelRequestSchema = z.object({
    * provider 'instagram'; menjadi external_id akun itu.
    */
   igUserId: z.string().trim().min(1).max(64).optional(),
+  /**
+   * WABA ID (Fase 7B) — wajib hanya untuk provider 'whatsapp': id
+   * WhatsApp Business Account yang menaungi nomor; disimpan sebagai
+   * konteks induk (`parent_external_id`), bukan kunci resolusi.
+   */
+  wabaId: z.string().trim().min(1).max(64).optional(),
+  /**
+   * Phone Number ID WhatsApp (Fase 7B) — wajib hanya untuk provider
+   * 'whatsapp'; menjadi external_id akun (kunci resolusi webhook &
+   * penjaga satu-nomor-satu-koneksi).
+   */
+  phoneNumberId: z.string().trim().min(1).max(64).optional(),
+  /**
+   * Access Token WhatsApp (Fase 7B) — wajib hanya untuk provider
+   * 'whatsapp'. Pola resminya adalah token System User permanen dari
+   * Meta Business Settings. Sama seperti token lain: divalidasi ke
+   * Graph API, disimpan terenkripsi, TIDAK PERNAH dikembalikan API.
+   */
+  accessToken: z.string().trim().min(10).max(1024).optional(),
 });
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequestSchema>;
 
@@ -322,6 +341,9 @@ export const ChannelAccountResponseSchema = z.object({
    * Channels sebagai baris @handle dan menyusun tautan publik
    * (m.me / ig.me). Null bila akun tidak punya username (Page tanpa
    * username adalah hal yang sah) atau provider non-Meta.
+   * Fase 7B: untuk 'whatsapp' kolom ini adalah `display_phone_number`
+   * terformat dari Graph (mis. "+62 812-3456-7890"); chip kartu
+   * menyusun tautan wa.me dari digitnya saja.
    */
   publicHandle: z.string().nullable(),
   /**

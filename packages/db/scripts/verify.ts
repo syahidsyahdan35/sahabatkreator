@@ -128,7 +128,8 @@ const policies = await db.query<{ count: string }>(
 // + lengan pindai `system_purge_scan` pada channel_accounts
 //   (Fase 6I, migrasi 0023)
 // + `tenant_isolation` pada profile_photos (Fase 6D, migrasi 0025)
-// + 4 policy `meta_delivery_scan` (Fase 7A, migrasi 0026) = 41.
+// + 4 policy `meta_delivery_scan` (Fase 7A, migrasi 0026; migrasi 0027
+//   membuatnya ulang termasuk provider whatsapp — jumlah tetap) = 41.
 assert.equal(Number(policies.rows[0].count), 41);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
@@ -1075,6 +1076,109 @@ assert.deepEqual(
 assert.equal(metaSeen.telegramFlagMeta.rows.length, 0);
 console.log(
   "[19] Fase 7A: kolom public_handle ada; pindai app.system_delivery='meta' hanya membuka akun/percakapan messenger+instagram lintas tenant (telegram tertutup), antrean poller Meta teresolusi penerimanya; flag 'telegram' tidak membuka baris Meta: OK",
+);
+
+// ---------- 20. Fase 7B: WhatsApp menumpang rel Meta ----------
+// (a) kolom `parent_external_id` (WABA ID) ada di channel_accounts;
+// (b) lengan `meta_delivery_scan` sesudah migrasi 0027 ikut membuka
+// akun/percakapan whatsapp di bawah flag 'meta' yang sama, dan antrean
+// poller menyelesaikan pesan queued WhatsApp ke wa_id penerimanya;
+// flag 'telegram' tetap tidak membuka baris WhatsApp.
+const WA_ACC = "23232323-2323-4232-8232-232323232323";
+const WA_CONV = "45454545-4545-4454-8454-454545454545";
+const WA_WABA = "waba_verify_1";
+const WA_PHONE_ID = "phone_verify_1";
+await db.query(
+  `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, parent_external_id, display_name, status, public_handle)
+   VALUES ($1, $2, 'whatsapp', $3, $4, 'WA Uji', 'connected', '+62 812-3456-7890')`,
+  [WA_ACC, TENANT_A, WA_PHONE_ID, WA_WABA],
+);
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider, provider_chat_id)
+   VALUES ($1, $2, $3, $4, 'whatsapp', '6281234567890')`,
+  [WA_CONV, TENANT_A, WA_ACC, CONTACT_A],
+);
+await db.query(
+  `INSERT INTO channel_identities (tenant_id, contact_id, channel_account_id, provider, external_user_id)
+   VALUES ($1, $2, $3, 'whatsapp', '6281234567890')`,
+  [TENANT_A, CONTACT_A, WA_ACC],
+);
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, type, content_text, status, provider_message_id)
+   VALUES ($1, $2, 'outbound', 'user', 'text', 'Balasan whatsapp uji', 'sent', 'meta:phone_verify_1:wamid.verify.1')`,
+  [TENANT_A, WA_CONV],
+);
+const waCol = await db.query<{ column_name: string }>(
+  `SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'channel_accounts' AND column_name = 'parent_external_id'`,
+);
+assert.deepEqual(waCol.rows.map((r) => r.column_name), ["parent_external_id"]);
+const waParent = await db.query<{ parent_external_id: string }>(
+  `SELECT parent_external_id FROM channel_accounts WHERE id = $1`,
+  [WA_ACC],
+);
+assert.equal(waParent.rows[0].parent_external_id, WA_WABA);
+const waSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noFlag = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM channel_accounts WHERE provider = 'whatsapp'`,
+  );
+  await tx.query(`SELECT set_config('app.system_delivery', 'meta', true)`);
+  const scanAccounts = await tx.query<{ id: string }>(
+    `SELECT id FROM channel_accounts WHERE provider = 'whatsapp' ORDER BY id`,
+  );
+  const scanQueue = await tx.query<{ content_text: string; recipient: string }>(
+    `SELECT m.content_text,
+            coalesce(cv.provider_chat_id, ci.external_user_id) AS recipient
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_accounts ca ON ca.id = cv.channel_account_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.direction = 'outbound' AND m.status = 'queued'
+        AND cv.provider = 'whatsapp'
+      ORDER BY m.content_text`,
+  );
+  await tx.query(`SELECT set_config('app.system_delivery', 'telegram', true)`);
+  const telegramFlagWa = await tx.query<{ id: string }>(
+    `SELECT id FROM channel_accounts WHERE provider = 'whatsapp'`,
+  );
+  return { noFlag, scanAccounts, scanQueue, telegramFlagWa };
+});
+assert.equal(waSeen.noFlag.rows[0].n, "0");
+assert.deepEqual(waSeen.scanAccounts.rows.map((r) => r.id), [WA_ACC]);
+assert.deepEqual(waSeen.scanQueue.rows, []);
+assert.equal(waSeen.telegramFlagWa.rows.length, 0);
+// Antrean queued WhatsApp: tambahkan satu pesan queued lalu pastikan
+// query cerminan poller (flag 'meta') menyelesaikannya ke wa_id.
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+   VALUES ($1, $2, 'outbound', 'user', 'text', 'Antre whatsapp uji', 'queued')`,
+  [TENANT_A, WA_CONV],
+);
+const waQueue = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.system_delivery', 'meta', true)`);
+  return tx.query<{ content_text: string; recipient: string }>(
+    `SELECT m.content_text,
+            coalesce(cv.provider_chat_id, ci.external_user_id) AS recipient
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_accounts ca ON ca.id = cv.channel_account_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.direction = 'outbound' AND m.status = 'queued'
+        AND cv.provider = 'whatsapp'`,
+  );
+});
+assert.deepEqual(
+  waQueue.rows.map((r) => `${r.content_text}:${r.recipient}`),
+  ["Antre whatsapp uji:6281234567890"],
+);
+console.log(
+  "[20] Fase 7B: kolom parent_external_id (WABA) ada & terisi; pindai app.system_delivery='meta' membuka akun whatsapp lintas tenant dan antrean queued WhatsApp teresolusi ke wa_id penerima; flag 'telegram' tidak membuka baris WhatsApp: OK",
 );
 
 await db.close();

@@ -14,6 +14,7 @@ import {
   createMetaChannelAccount,
   createTelegramChannelAccount,
   createWebchatChannelAccount,
+  createWhatsAppChannelAccount,
   decryptChannelSecret,
   disconnectChannelAccount,
   encryptChannelSecret,
@@ -32,6 +33,7 @@ import {
   storeProfilePhoto,
   updateMetaChannelAccountCredentials,
   updateTelegramChannelAccountCredentials,
+  updateWhatsAppChannelAccountCredentials,
   type MetaProvider,
 } from "@sahabat-kreator/core";
 import {
@@ -42,6 +44,10 @@ import {
   MetaGraphClient,
   MetaGraphError,
 } from "@sahabat-kreator/channel-messenger";
+import {
+  WhatsAppCloudClient,
+  WhatsAppGraphError,
+} from "@sahabat-kreator/channel-whatsapp";
 import { META_GRAPH_API_VERSION } from "@sahabat-kreator/config";
 import type { ChannelAccount } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
@@ -228,11 +234,12 @@ export interface ChannelsModuleOptions {
  * masih terhubung) + `trashed_at`; masa tenggang 30 hari di Sampah bisa
  * dipulihkan/diekspor, sesudahnya worker meng-purge permanen. Purge
  * manual sengaja TIDAK dibuat — masa tenggang adalah pengamannya.
- * Provider yang belum bisa dihubungkan (whatsapp) → 422
- * CHANNEL_NOT_AVAILABLE_YET secara jujur. Messenger & Instagram (Fase
- * 7A) dihubungkan token-based seperti Telegram: Page Access Token
- * divalidasi ke Graph, disimpan terenkripsi; webhook-nya TUNGGAL milik
- * platform (modul meta), bukan per akun.
+ * Semua provider kini bisa dihubungkan. Messenger & Instagram (Fase
+ * 7A) dan WhatsApp (Fase 7B) dihubungkan token-based seperti Telegram:
+ * token divalidasi ke Graph, disimpan terenkripsi; webhook Meta-nya
+ * TUNGGAL milik platform (modul meta), bukan per akun. Fallback 422
+ * CHANNEL_NOT_AVAILABLE_YET di handler hanya pengaman untuk provider
+ * masa depan yang belum dikenal.
  * Untuk webchat, respons POST memuat siteKey di `externalId` — kunci
  * publik yang dipasang tenant di situsnya. Untuk telegram, token bot
  * TIDAK PERNAH muncul di respons: yang tampil hanya status + username bot.
@@ -333,6 +340,16 @@ export function createChannelsRoutes(
         pageAccessToken: parsed.data.pageAccessToken,
         pageId: parsed.data.pageId,
         igUserId: parsed.data.igUserId,
+      });
+    }
+    if (parsed.data.provider === "whatsapp") {
+      return connectWhatsApp(c, bundle, opts, {
+        tenantId: tenant.id,
+        userId: appUser.id,
+        displayName: parsed.data.displayName,
+        accessToken: parsed.data.accessToken,
+        wabaId: parsed.data.wabaId,
+        phoneNumberId: parsed.data.phoneNumberId,
       });
     }
     if (parsed.data.provider !== "webchat") {
@@ -1083,6 +1100,219 @@ function scheduleMetaAccountPhoto(
     } catch {
       console.error(
         `[meta] pengambilan foto profil akun ${channelAccountId} gagal`,
+      );
+    }
+  })();
+}
+
+/**
+ * Menghubungkan nomor WhatsApp (Fase 7B — token-based v1, pola Meta 7A):
+ * 1. Validasi ke Graph: `GET /{phone_number_id}?fields=verified_name,display_phone_number`
+ *    dengan Access Token yang ditempel (pola resmi: token System User
+ *    permanen dari Meta Business Settings). Graph menolak → 422
+ *    META_TOKEN_INVALID; Graph tak terjangkau → 503.
+ * 2. Penjaga satu nomor = satu koneksi (kode generik Meta): nomor yang
+ *    sama masih AKTIF di workspace lain → 409
+ *    META_ACCOUNT_ALREADY_CONNECTED (tanpa baris baru). Workspace ini:
+ *    'connected' → idempoten 200; 'disconnected'/'error' → revive baris
+ *    yang sama. WABA ID yang sama di tenant/nomor lain BUKAN konflik —
+ *    satu WABA sah menaungi banyak nomor.
+ * 3. Buat akun: external_id = phone_number_id; WABA ID →
+ *    parent_external_id; displayName dari form atau verified_name;
+ *    public_handle = display_phone_number; token TERENKRIPSI.
+ * 4. Foto profil bisnis diambil best-effort (whatsapp_business_profile)
+ *    — kegagalan/kosong tidak menggagalkan connect; kartu jatuh ke
+ *    inisial. Foto profil KONTAK WhatsApp tidak ada di API (privasi),
+ *    jadi tidak ada pengambilan foto kontak untuk provider ini.
+ */
+async function connectWhatsApp(
+  c: Parameters<typeof apiError>[0],
+  bundle: AuthBundle,
+  opts: ChannelsModuleOptions,
+  input: {
+    tenantId: string;
+    userId: string;
+    displayName?: string;
+    accessToken?: string;
+    wabaId?: string;
+    phoneNumberId?: string;
+  },
+) {
+  if (!input.accessToken) {
+    return apiError(c, 400, "VALIDATION_ERROR", "accessToken is required for whatsapp");
+  }
+  if (!input.phoneNumberId) {
+    return apiError(c, 400, "VALIDATION_ERROR", "phoneNumberId is required for whatsapp");
+  }
+  if (!input.wabaId) {
+    return apiError(c, 400, "VALIDATION_ERROR", "wabaId is required for whatsapp");
+  }
+  if (!opts.channelTokenSecret) {
+    return apiError(c, 503, "INTERNAL_ERROR", "WhatsApp is not configured");
+  }
+  const client = new WhatsAppCloudClient({
+    baseUrl: opts.metaApiBase,
+    apiVersion: META_GRAPH_API_VERSION,
+    accessToken: input.accessToken,
+  });
+
+  // Validasi token + ambil identitas publik nomor dari Graph.
+  let profile;
+  try {
+    profile = await client.getPhoneNumberProfile(input.phoneNumberId);
+  } catch (err) {
+    if (err instanceof WhatsAppGraphError) {
+      if (err.status === 0) {
+        return apiError(c, 503, "INTERNAL_ERROR", "Meta Graph API is unreachable");
+      }
+      return apiError(c, 422, "META_TOKEN_INVALID", "Meta rejected the WhatsApp access token or phone number id");
+    }
+    return apiError(c, 503, "INTERNAL_ERROR", "Meta Graph API is unreachable");
+  }
+
+  let encryptedAccessToken: string;
+  try {
+    encryptedAccessToken = encryptChannelSecret(
+      opts.channelTokenSecret,
+      input.accessToken,
+    );
+  } catch {
+    return apiError(c, 503, "INTERNAL_ERROR", "Channel credential encryption is not configured");
+  }
+
+  // Penjaga "satu nomor = satu koneksi" per phone_number_id.
+  const existing = await lookupChannelAccountsByProviderExternalId(
+    bundle.db,
+    "whatsapp",
+    input.phoneNumberId,
+  );
+  const activeElsewhere = existing.find(
+    (r) => r.tenantId !== input.tenantId && r.status !== "disconnected",
+  );
+  if (activeElsewhere) {
+    return apiError(
+      c,
+      409,
+      "META_ACCOUNT_ALREADY_CONNECTED",
+      "This WhatsApp number is already connected to another workspace",
+    );
+  }
+  const own = existing.find((r) => r.tenantId === input.tenantId);
+  if (own) {
+    if (own.status === "connected") {
+      const row = await getChannelAccount(
+        bundle.db,
+        { tenantId: input.tenantId },
+        own.id,
+      );
+      if (row) return c.json(await serializeChannelWithAvatar(bundle, row), 200);
+    }
+    // Akun milik workspace ini 'disconnected'/'error': hidupkan lagi
+    // baris yang sama dengan kredensial baru (pola revive Meta).
+    const updated = await updateWhatsAppChannelAccountCredentials(
+      bundle.db,
+      { tenantId: input.tenantId },
+      own.id,
+      {
+        encryptedAccessToken,
+        wabaId: input.wabaId,
+        displayPhoneNumber: profile.displayPhoneNumber,
+        verifiedName: profile.verifiedName,
+        displayName: input.displayName,
+        status: "connected",
+      },
+    );
+    if (!updated) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, updated.id, input.phoneNumberId);
+    return c.json(serializeChannel(updated), 200);
+  }
+
+  let row: ChannelAccount;
+  try {
+    row = await createWhatsAppChannelAccount(
+      bundle.db,
+      { tenantId: input.tenantId, userId: input.userId },
+      {
+        phoneNumberId: input.phoneNumberId,
+        wabaId: input.wabaId,
+        verifiedName: profile.verifiedName,
+        displayPhoneNumber: profile.displayPhoneNumber,
+        displayName: input.displayName,
+        encryptedAccessToken,
+        graphApiVersion: META_GRAPH_API_VERSION,
+      },
+    );
+  } catch {
+    // Balapan dengan connect lain (pola Meta): petakan ulang dari
+    // keadaan terbaru — milik workspace lain → 409 yang sama; milik
+    // workspace ini → kembalikan akun pemenang balapan (idempoten).
+    const now = await lookupChannelAccountsByProviderExternalId(
+      bundle.db,
+      "whatsapp",
+      input.phoneNumberId,
+    );
+    const other = now.find(
+      (r) => r.tenantId !== input.tenantId && r.status !== "disconnected",
+    );
+    if (other) {
+      return apiError(
+        c,
+        409,
+        "META_ACCOUNT_ALREADY_CONNECTED",
+        "This WhatsApp number is already connected to another workspace",
+      );
+    }
+    const ownNow = now.find(
+      (r) => r.tenantId === input.tenantId && r.status !== "disconnected",
+    );
+    if (ownNow) {
+      const winner = await getChannelAccount(
+        bundle.db,
+        { tenantId: input.tenantId },
+        ownNow.id,
+      );
+      if (winner) return c.json(await serializeChannelWithAvatar(bundle, winner), 200);
+    }
+    return apiError(
+      c,
+      422,
+      "CHANNEL_NOT_CONNECTED",
+      "This WhatsApp number is already connected to this workspace",
+    );
+  }
+
+  scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, row.id, input.phoneNumberId);
+  return c.json(serializeChannel(row), 201);
+}
+
+/**
+ * Ambil & simpan foto profil bisnis WhatsApp sesudah connect (Fase 7B,
+ * pola 6D/7A): best-effort fire-and-forget — klien mengembalikan null
+ * untuk profil kosong/field tak tersedia, jadi ketiadaan foto tidak
+ * pernah menggagalkan connect; kartu menampilkan inisial.
+ */
+function scheduleWhatsAppAccountPhoto(
+  bundle: AuthBundle,
+  client: WhatsAppCloudClient,
+  tenantId: string,
+  channelAccountId: string,
+  phoneNumberId: string,
+): void {
+  void (async () => {
+    try {
+      const picture = await client.getBusinessProfilePicture(phoneNumberId);
+      if (!picture) return;
+      await storeProfilePhoto(bundle.db, { tenantId }, {
+        ownerType: "channel_account",
+        ownerId: channelAccountId,
+        contentType: picture.contentType,
+        data: picture.data,
+      });
+    } catch {
+      console.error(
+        `[whatsapp] pengambilan foto profil bisnis akun ${channelAccountId} gagal`,
       );
     }
   })();

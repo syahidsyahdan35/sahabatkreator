@@ -12,11 +12,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
-import {
-  ChannelAvatar,
-  ProviderGlyph,
-  providerMeta,
-} from "../components/ChannelAvatar";
+import { ChannelAvatar } from "../components/ChannelAvatar";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 import { formatDate } from "../utils/format";
 
@@ -29,9 +25,6 @@ interface ChannelsPageProps {
   t: Translate;
   locale: Locale;
 }
-
-/** Provider yang belum bisa dihubungkan — ditampilkan jujur sebagai "segera". */
-const UPCOMING_PROVIDERS = ["whatsapp"] as const;
 
 function providerLabel(t: Translate, provider: string): string {
   return t(`inbox.providers.${provider}` as TranslationKey);
@@ -67,6 +60,11 @@ function handleLine(channel: ChannelAccountResponse): string | null {
     return channel.publicHandle
       ? `@${channel.publicHandle}`
       : truncateMiddle(channel.externalId);
+  }
+  if (channel.provider === "whatsapp") {
+    // Fase 7B: handle WhatsApp = nomor tampil terformat dari Graph
+    // (display_phone_number di publicHandle); bukan @handle.
+    return channel.publicHandle ?? truncateMiddle(channel.externalId);
   }
   if (channel.provider === "webchat") {
     // Webchat tidak punya @handle — siteKey terpotong adalah identitasnya.
@@ -109,6 +107,19 @@ function publicLink(channel: ChannelAccountResponse): PublicLink | null {
       url: `https://ig.me/m/${channel.publicHandle}`,
       display: `ig.me/m/${channel.publicHandle}`,
     };
+  }
+  // Fase 7B: chip WhatsApp = wa.me/<digit nomor> (hanya digit dari
+  // nomor tampil; phone_number_id BUKAN nomor telepon, jadi tanpa
+  // publicHandle tidak ada chip yang jujur untuk ditampilkan).
+  if (
+    channel.provider === "whatsapp" &&
+    channel.status === "connected" &&
+    channel.publicHandle
+  ) {
+    const digits = channel.publicHandle.replace(/\D/g, "");
+    if (digits) {
+      return { url: `https://wa.me/${digits}`, display: `wa.me/${digits}` };
+    }
   }
   if (channel.provider === "webchat" && channel.status === "connected") {
     const url = demoUrl(channel.externalId);
@@ -227,7 +238,9 @@ function StatusPill({
  * Halaman Channels (Fase 1F; kartu Fase 6H mengikuti referensi UI user):
  * daftar channel workspace aktif sebagai KARTU (avatar + badge provider,
  * nama/@handle, pill status + tanggal terhubung, chip tautan publik) +
- * form hubungkan Webchat & Telegram. Ikon power pada kartu memakai alur
+ * form hubungkan Webchat, Telegram, Messenger, Instagram & WhatsApp
+ * (Fase 7B: semua provider sudah bisa dihubungkan — tidak ada lagi
+ * kartu "segera"). Ikon power pada kartu memakai alur
  * Disconnect yang sudah ada; ikon sampah (Fase 6I) membuka dialog hapus
  * BERPENJAGA (ketik nama untuk konfirmasi + tombol ekspor riwayat di
  * dialog yang sama) → channel masuk seksi Sampah di bawah (masa tenggang
@@ -263,6 +276,14 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   const [igToken, setIgToken] = useState("");
   const [igCreating, setIgCreating] = useState(false);
   const [igError, setIgError] = useState<string | null>(null);
+  // Form WhatsApp (Fase 7B): WABA ID + Phone Number ID + token System
+  // User — token-based seperti Meta; token hanya hidup di state form.
+  const [waName, setWaName] = useState("");
+  const [waWabaId, setWaWabaId] = useState("");
+  const [waPhoneId, setWaPhoneId] = useState("");
+  const [waToken, setWaToken] = useState("");
+  const [waCreating, setWaCreating] = useState(false);
+  const [waError, setWaError] = useState<string | null>(null);
   const [metaWebhook, setMetaWebhook] =
     useState<MetaWebhookInfoResponse | null>(null);
   const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(
@@ -429,6 +450,36 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     }
   };
 
+  const handleConnectWhatsApp = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!tenantId) return;
+    setWaCreating(true);
+    setWaError(null);
+    try {
+      await api.channels.create(tenantId, {
+        provider: "whatsapp",
+        displayName: waName.trim() || undefined,
+        wabaId: waWabaId.trim(),
+        phoneNumberId: waPhoneId.trim(),
+        accessToken: waToken.trim(),
+      });
+      // Token tidak disimpan di state lebih lama dari yang perlu.
+      setWaToken("");
+      setWaName("");
+      setWaWabaId("");
+      setWaPhoneId("");
+      await load();
+    } catch (err) {
+      setWaError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+    } finally {
+      setWaCreating(false);
+    }
+  };
+
   const copyWebhookValue = async (field: string, value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -553,6 +604,13 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     window.setTimeout(() => el.focus({ preventScroll: true }), 350);
   };
 
+  const focusWhatsAppForm = () => {
+    const el = document.getElementById("whatsapp-phone-id");
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => el.focus({ preventScroll: true }), 350);
+  };
+
   if (!tenantId) {
     return (
       <section>
@@ -664,6 +722,14 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       <button
                         type="button"
                         onClick={focusInstagramForm}
+                        className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
+                      >
+                        {t("channels.reconnectButton")}
+                      </button>
+                    ) : channel.provider === "whatsapp" ? (
+                      <button
+                        type="button"
+                        onClick={focusWhatsAppForm}
                         className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
                       >
                         {t("channels.reconnectButton")}
@@ -954,6 +1020,72 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
         </button>
       </form>
 
+      <form
+        onSubmit={handleConnectWhatsApp}
+        className="mt-8 rounded-lg border border-line bg-surface p-4"
+      >
+        <h2 className="font-semibold">{t("channels.whatsappTitle")}</h2>
+        <label className="mt-3 block text-sm font-medium" htmlFor="whatsapp-name">
+          {t("channels.metaNameLabel")}
+        </label>
+        <input
+          id="whatsapp-name"
+          value={waName}
+          onChange={(e) => setWaName(e.target.value)}
+          placeholder={t("channels.metaNamePlaceholder")}
+          maxLength={255}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="whatsapp-waba-id">
+          {t("channels.wabaIdLabel")}
+        </label>
+        <input
+          id="whatsapp-waba-id"
+          value={waWabaId}
+          onChange={(e) => setWaWabaId(e.target.value)}
+          placeholder={t("channels.wabaIdPlaceholder")}
+          maxLength={64}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="whatsapp-phone-id">
+          {t("channels.phoneNumberIdLabel")}
+        </label>
+        <input
+          id="whatsapp-phone-id"
+          value={waPhoneId}
+          onChange={(e) => setWaPhoneId(e.target.value)}
+          placeholder={t("channels.phoneNumberIdPlaceholder")}
+          maxLength={64}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="whatsapp-token">
+          {t("channels.waTokenLabel")}
+        </label>
+        <input
+          id="whatsapp-token"
+          type="password"
+          autoComplete="off"
+          value={waToken}
+          onChange={(e) => setWaToken(e.target.value)}
+          placeholder={t("channels.waTokenPlaceholder")}
+          maxLength={1024}
+          className={`${inputClassName} mt-1`}
+        />
+        <p className="mt-1 text-xs text-muted">{t("channels.waTokenHint")}</p>
+        {waError ? (
+          <div className="mt-2">
+            <FieldError message={waError} />
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={waCreating || !waWabaId.trim() || !waPhoneId.trim() || !waToken.trim()}
+          className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {waCreating ? t("channels.metaConnecting") : t("channels.whatsappConnectButton")}
+        </button>
+      </form>
+
       {metaWebhook ? (
         <div className="mt-8 rounded-lg border border-line bg-surface p-4">
           <h2 className="font-semibold">{t("channels.metaWebhookTitle")}</h2>
@@ -1027,50 +1159,6 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
           ) : null}
         </div>
       ) : null}
-
-      <div className="mt-8">
-        <h2 className="font-semibold">{t("common.comingSoon")}</h2>
-        <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {UPCOMING_PROVIDERS.map((provider) => {
-            const meta = providerMeta(provider);
-            return (
-              <div
-                key={provider}
-                className="flex flex-col rounded-xl border border-line bg-surface p-4 opacity-60"
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl"
-                    style={{
-                      backgroundColor: `${meta.color}1f`,
-                      color: meta.color,
-                    }}
-                    aria-hidden={true}
-                  >
-                    <ProviderGlyph provider={provider} className="h-6 w-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-semibold">
-                      {providerLabel(t, provider)}
-                    </div>
-                    <div className="text-xs text-muted">
-                      {providerLabel(t, provider)}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-3">
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-elevated px-2 py-0.5 text-xs font-medium text-muted">
-                    {t("common.comingSoon")}
-                  </span>
-                </div>
-                <p className="mt-2 text-xs text-muted">
-                  {t("errors.CHANNEL_NOT_AVAILABLE_YET")}
-                </p>
-              </div>
-            );
-          })}
-        </div>
-      </div>
 
       <div className="mt-8">
         <h2 className="font-semibold">{t("channels.trashTitle")}</h2>

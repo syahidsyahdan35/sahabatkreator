@@ -548,13 +548,16 @@ export async function fetchAndStoreMetaContactProfile(
 // Antrean pengiriman keluar (poller API)
 // ---------------------------------------------------------------------------
 
+/** Provider yang dilayani poller pengiriman Meta (Fase 7B menambah WhatsApp). */
+export type MetaDeliveryProvider = MetaProvider | "whatsapp";
+
 export interface MetaQueuedDelivery {
   tenantId: string;
   messageId: string;
   conversationId: string;
   contentText: string | null;
   channelAccountId: string;
-  provider: MetaProvider;
+  provider: MetaDeliveryProvider;
   /** external_id akun: Page ID (messenger) / ID akun IG (instagram) — segmen path endpoint kirim. */
   accountExternalId: string;
   /** Envelope enkripsi Page Access Token akun pemilik. */
@@ -565,11 +568,12 @@ export interface MetaQueuedDelivery {
 
 /**
  * Pindai antrean pengiriman Meta LINTAS tenant untuk poller API: pesan
- * outbound `queued` pada percakapan messenger/instagram lengkap dengan
- * token terenkripsi akun + alamat penerimanya. Berjalan dalam transaksi
- * yang men-set `app.system_delivery='meta'` — policy `meta_delivery_scan`
- * (0026) membuka tepat baris-baris ini (baca saja); penandaan sent/failed
- * tetap dalam konteks tenant masing-masing. Pola `listQueuedTelegramDeliveries`.
+ * outbound `queued` pada percakapan messenger/instagram/whatsapp
+ * lengkap dengan token terenkripsi akun + alamat penerimanya. Berjalan
+ * dalam transaksi yang men-set `app.system_delivery='meta'` — policy
+ * `meta_delivery_scan` (0026, diperluas 0027 ke whatsapp) membuka tepat
+ * baris-baris ini (baca saja); penandaan sent/failed tetap dalam
+ * konteks tenant masing-masing. Pola `listQueuedTelegramDeliveries`.
  */
 export async function listQueuedMetaDeliveries(
   db: Database,
@@ -606,11 +610,11 @@ export async function listQueuedMetaDeliveries(
         and(
           eq(messages.direction, "outbound"),
           eq(messages.status, "queued"),
-          inArray(conversations.provider, ["messenger", "instagram"]),
+          inArray(conversations.provider, ["messenger", "instagram", "whatsapp"]),
         ),
       )
       .orderBy(asc(messages.createdAt))
       .limit(limit);
-    return rows.map((r) => ({ ...r, provider: r.provider as MetaProvider }));
+    return rows.map((r) => ({ ...r, provider: r.provider as MetaDeliveryProvider }));
   });
 }

@@ -178,7 +178,25 @@ export {
   type RecordMetaInboundResult,
   type FetchMetaContactProfileInput,
   type MetaQueuedDelivery,
+  type MetaDeliveryProvider,
 } from "./meta";
+export {
+  WHATSAPP_CONTACT_FALLBACK_NAME,
+  whatsAppProviderMessageId,
+  createWhatsAppChannelAccount,
+  updateWhatsAppChannelAccountCredentials,
+  resolveWhatsAppAccountByPhoneNumberId,
+  recordWhatsAppInboundMessage,
+  applyWhatsAppMessageStatus,
+  type CreateWhatsAppChannelInput,
+  type UpdateWhatsAppCredentialsInput,
+  type WhatsAppAccountRef,
+  type RecordWhatsAppInboundInput,
+  type RecordWhatsAppInboundResult,
+  type WhatsAppDeliveryStatus,
+  type ApplyWhatsAppMessageStatusInput,
+  type ApplyWhatsAppMessageStatusResult,
+} from "./whatsapp";
 export {
   PROFILE_PHOTO_MAX_EDGE,
   deleteChannelAccountProfilePhoto,

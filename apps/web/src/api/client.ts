@@ -239,6 +239,9 @@ export const api = {
         pageId?: string;
         igUserId?: string;
         pageAccessToken?: string;
+        wabaId?: string;
+        phoneNumberId?: string;
+        accessToken?: string;
       },
     ): Promise<ChannelAccountResponse> {
       return request<ChannelAccountResponse>(

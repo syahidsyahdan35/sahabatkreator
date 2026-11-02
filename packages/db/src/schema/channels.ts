@@ -61,8 +61,20 @@ export const channelAccounts = pgTable(
      * (messenger) / username akun IG Professional (instagram), dari
      * Graph saat connect. Bukan rahasia; dipakai kartu Channels sebagai
      * @handle + tautan publik m.me/ig.me. Null bila Page tak ber-username.
+     * Fase 7B: untuk WhatsApp kolom ini menampung `display_phone_number`
+     * (nomor tampil terformat dari Graph, mis. "+62 812-3456-7890").
      */
     publicHandle: varchar("public_handle", { length: 255 }),
+    /**
+     * Id akun INDUK di provider (Fase 7B, generik): untuk WhatsApp =
+     * WABA ID (WhatsApp Business Account) yang menaungi nomor ini —
+     * external_id akun WhatsApp adalah `phone_number_id`, sedangkan
+     * webhook WhatsApp beralamat `entry.id` = WABA ID dengan nomor
+     * dipilih dari `value.metadata.phone_number_id`, jadi WABA disimpan
+     * sebagai konteks (audit/dukungan), BUKAN kunci resolusi. Provider
+     * lain: null (tidak punya konsep induk terpisah).
+     */
+    parentExternalId: varchar("parent_external_id", { length: 255 }),
     /** Versi Graph API yang ter-pin untuk akun Meta ini (mis. 'v26.0', RANCANGAN §12.1). */
     graphApiVersion: varchar("graph_api_version", { length: 16 }),
     /**

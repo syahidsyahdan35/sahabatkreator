@@ -8,25 +8,35 @@ import {
   MetaGraphClient,
   MetaGraphError,
 } from "@sahabat-kreator/channel-messenger";
+import {
+  WhatsAppCloudClient,
+  WhatsAppGraphError,
+} from "@sahabat-kreator/channel-whatsapp";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 
 /**
- * Poller pengiriman Meta (Fase 7A) — pasangan poller Telegram (6A).
+ * Poller pengiriman Meta (Fase 7A; WhatsApp Fase 7B) — pasangan poller
+ * Telegram (6A).
  *
  * Semua balasan (dashboard, automation, sequence, agent AI) untuk
- * percakapan messenger/instagram berakhir sebagai pesan outbound
- * `queued` di DB. Poller ini berjalan tiap ±2 detik di proses API:
+ * percakapan messenger/instagram/whatsapp berakhir sebagai pesan
+ * outbound `queued` di DB. Poller ini berjalan tiap ±2 detik di proses
+ * API:
  *
  * 1. Pindai antrean lintas tenant lewat core (`listQueuedMetaDeliveries`
  *    — lengan RLS `meta_delivery_scan`, baca saja).
- * 2. Untuk tiap pesan: dekripsi Page Access Token akunnya dan kirim via
- *    Graph Send API `POST /{account-id}/messages` (messaging_type
- *    RESPONSE — jendela 24 jam Meta).
- * 3. Tandai `sent` (+ provider_message_id majemuk `meta:<accountId>:<mid>`
- *    agar konsisten dengan jalur webhook) atau `failed` SATU kali
- *    percobaan: kegagalan Graph (termasuk penolakan di luar jendela
- *    24 jam) disimpan sebagai kode `meta_graph_<kode>` di kolom
+ * 2. Untuk tiap pesan: dekripsi token akunnya dan kirim via Graph —
+ *    Messenger/IG: Send API `POST /{account-id}/messages`
+ *    (messaging_type RESPONSE); WhatsApp: Cloud API
+ *    `POST /{phone_number_id}/messages` (messaging_product whatsapp).
+ *    Keduanya di dalam jendela layanan 24 jam Meta.
+ * 3. Tandai `sent` (+ provider_message_id majemuk
+ *    `meta:<accountId>:<mid|wamid>` agar konsisten dengan jalur webhook
+ *    — untuk WhatsApp, wamid tersimpan inilah yang dicocokkan webhook
+ *    statuses delivered/read/failed) atau `failed` SATU kali percobaan:
+ *    kegagalan Graph (termasuk penolakan di luar jendela 24 jam, mis.
+ *    kode 131047) disimpan sebagai kode `meta_graph_<kode>` di kolom
  *    error_code pesan — jujur terlihat di dashboard, TANPA retry tanpa
  *    henti (pesan yang sama bisa gagal permanen, mis. jendela tertutup).
  *
@@ -119,20 +129,41 @@ export function startMetaDeliveryPoller(
           await nudgeStatus("message.failed");
           continue;
         }
-        const client = new MetaGraphClient({
-          baseUrl: opts.metaApiBase,
-          apiVersion: opts.graphApiVersion,
-          accessToken: token,
-        });
         try {
-          const result = await client.sendMessage({
-            accountExternalId: delivery.accountExternalId,
-            recipientExternalId: delivery.recipientExternalId,
-            text: delivery.contentText,
-          });
+          // Cabang per provider: WhatsApp memakai Cloud API (klien
+          // channel-whatsapp, respons wamid); Messenger/IG memakai
+          // Send API (klien channel-messenger, respons mid).
+          let rawProviderId: string;
+          if (delivery.provider === "whatsapp") {
+            const waClient = new WhatsAppCloudClient({
+              baseUrl: opts.metaApiBase,
+              apiVersion: opts.graphApiVersion,
+              accessToken: token,
+            });
+            rawProviderId = (
+              await waClient.sendTextMessage({
+                phoneNumberId: delivery.accountExternalId,
+                to: delivery.recipientExternalId,
+                text: delivery.contentText,
+              })
+            ).providerMessageId;
+          } else {
+            const client = new MetaGraphClient({
+              baseUrl: opts.metaApiBase,
+              apiVersion: opts.graphApiVersion,
+              accessToken: token,
+            });
+            rawProviderId = (
+              await client.sendMessage({
+                accountExternalId: delivery.accountExternalId,
+                recipientExternalId: delivery.recipientExternalId,
+                text: delivery.contentText,
+              })
+            ).providerMessageId;
+          }
           // Simpan id pesan provider (format majemuk yang sama seperti
           // jalur webhook) pada baris outbound.
-          const compositeId = `meta:${delivery.accountExternalId}:${result.providerMessageId}`;
+          const compositeId = `meta:${delivery.accountExternalId}:${rawProviderId}`;
           try {
             await markOutboundMessageSent(
               bundle.db,
@@ -157,14 +188,17 @@ export function startMetaDeliveryPoller(
           }
           await nudgeStatus("message.sent");
         } catch (err) {
-          const code =
-            err instanceof MetaGraphError
-              ? err.status === 0
-                ? "meta_network_error"
-                : err.graphCode !== null
-                  ? `meta_graph_${err.graphCode}`
-                  : `meta_http_${err.status}`
-              : "meta_send_error";
+          const graphErr =
+            err instanceof MetaGraphError || err instanceof WhatsAppGraphError
+              ? err
+              : null;
+          const code = graphErr
+            ? graphErr.status === 0
+              ? "meta_network_error"
+              : graphErr.graphCode !== null
+                ? `meta_graph_${graphErr.graphCode}`
+                : `meta_http_${graphErr.status}`
+            : "meta_send_error";
           console.error(
             `[meta] pengiriman pesan ${delivery.messageId} gagal: ${code}`,
           );
