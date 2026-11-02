@@ -1,12 +1,14 @@
 import { Worker } from "bullmq";
 import { loadEnv } from "@sahabat-kreator/config";
 import { createDb } from "@sahabat-kreator/db";
-import { createLlmProvider } from "@sahabat-kreator/ai";
+import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
 import {
   evaluateInboundMessageForAutomations,
   executeSequenceStep,
   relayUnpublishedOutboxEvents,
+  resolveOpenRouterConfig,
   respondToInboundMessage,
+  type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import {
   AGENT_RESPOND_JOB,
@@ -87,14 +89,44 @@ const queue = createAutomationQueue(queueConnection);
 // terpisah dari koneksi BullMQ (lihat @sahabat-kreator/queue/realtime).
 const realtimePublisher = createRealtimePublisher(env.REDIS_URL);
 
-// Provider LLM agent (Fase 3A): LLM_PROVIDER=mock (default, deterministik)
-// atau openrouter (wajib OPENROUTER_API_KEY — fail-fast di createLlmProvider).
-const llmProvider = createLlmProvider({
-  provider: env.LLM_PROVIDER,
-  openrouterApiKey: env.OPENROUTER_API_KEY,
-  openrouterModel: env.OPENROUTER_MODEL,
-});
-console.log(`[worker] provider LLM agent: ${llmProvider.name}`);
+// Provider LLM agent (Fase 3A; resolusi per job sejak Fase 6C):
+// provider TIDAK lagi dibekukan saat boot. Setiap job agent.respond
+// me-resolve kunci OpenRouter efektif lewat resolver core Panel Admin —
+// panel terenkripsi lebih dulu, env fallback (cache ±60 dtk di core) —
+// jadi kunci yang disimpan/diubah pemilik platform di panel berlaku
+// tanpa restart worker:
+//   - ada kunci efektif → OpenRouterProvider (model: panel → env →
+//     default provider);
+//   - tidak ada kunci di mana pun → MockProvider (perilaku staging 3A);
+//   - LLM_PROVIDER=openrouter eksplisit TANPA kunci di mana pun →
+//     createLlmProvider melempar (salah konfigurasi tetap GAGAL KERAS,
+//     tidak diam-diam jatuh ke mock — sama seperti fail-fast boot 3A;
+//     resolusi awal di bawah menjaga kegagalan itu terlihat saat start).
+const platformSettingsOptions: PlatformSettingsOptions = {
+  masterSecret: env.PLATFORM_SETTINGS_SECRET,
+  env: {
+    openrouter_api_key: env.OPENROUTER_API_KEY,
+    openrouter_model: env.OPENROUTER_MODEL,
+  },
+};
+
+async function resolveAgentLlmProvider(): Promise<LlmProvider> {
+  const orConfig = await resolveOpenRouterConfig(db, platformSettingsOptions);
+  return createLlmProvider({
+    provider: orConfig ? "openrouter" : env.LLM_PROVIDER,
+    openrouterApiKey: orConfig?.apiKey,
+    openrouterModel: orConfig?.model,
+  });
+}
+
+void resolveAgentLlmProvider()
+  .then((provider) => {
+    console.log(`[worker] provider LLM agent (resolusi awal): ${provider.name}`);
+  })
+  .catch((err) => {
+    console.error("[worker] resolusi provider LLM gagal saat start:", err);
+    process.exit(1);
+  });
 
 const bullWorker = new Worker<MainJobData>(
   MAIN_QUEUE_NAME,
@@ -169,6 +201,8 @@ const bullWorker = new Worker<MainJobData>(
     }
     if (job.name === AGENT_RESPOND_JOB) {
       const data = job.data as AgentRespondJobData;
+      // Fase 6C: provider di-resolve per job (panel → env; lihat di atas).
+      const llmProvider = await resolveAgentLlmProvider();
       const result = await respondToInboundMessage(db, llmProvider, {
         tenantId: data.tenantId,
         conversationId: data.conversationId,

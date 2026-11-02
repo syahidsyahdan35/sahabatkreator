@@ -192,3 +192,22 @@ export {
   type CreatedApiKey,
   type GeneratedApiKey,
 } from "./api-keys";
+export {
+  PLATFORM_SETTING_KEYS,
+  PLATFORM_SETTINGS_CACHE_TTL_MS,
+  PlatformSettingsUnavailableError,
+  isPlatformSettingKey,
+  isPlatformAdminEmail,
+  parsePlatformAdminEmails,
+  listPlatformSettingStatuses,
+  getProviderSecret,
+  resolveOpenRouterConfig,
+  setPlatformSetting,
+  clearPlatformSetting,
+  recordPlatformSettingTest,
+  clearPlatformSettingsCache,
+  type PlatformSettingKey,
+  type PlatformSettingSource,
+  type PlatformSettingStatus,
+  type PlatformSettingsOptions,
+} from "./platform-settings";

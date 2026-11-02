@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { customSession } from "better-auth/plugins";
 import { eq } from "drizzle-orm";
+import { isPlatformAdminEmail } from "@sahabat-kreator/core";
 import {
   authAccount,
   authSession,
@@ -33,11 +35,31 @@ export interface AuthBundle {
   db: Database;
 }
 
-function createAuthInstance(db: Database, opts: { secret: string; baseURL: string }) {
+function createAuthInstance(
+  db: Database,
+  opts: { secret: string; baseURL: string; platformAdminEmails?: string },
+) {
   return betterAuth({
     appName: "Sahabat Kreator",
     secret: opts.secret,
     baseURL: opts.baseURL,
+    plugins: [
+      // Fase 6C: respons get-session diperkaya flag `isPlatformAdmin`
+      // pada user (dicocokkan dari allowlist env PLATFORM_ADMIN_EMAILS)
+      // agar web bisa menyembunyikan menu Admin dari non-admin. Gerbang
+      // sesungguhnya tetap di endpoint /api/admin/* (404 untuk non-admin);
+      // flag ini murni petunjuk tampilan.
+      customSession(async ({ session, user }) => ({
+        session,
+        user: {
+          ...user,
+          isPlatformAdmin: isPlatformAdminEmail(
+            user.email,
+            opts.platformAdminEmails,
+          ),
+        },
+      })),
+    ],
     database: drizzleAdapter(db, {
       provider: "pg",
       schema: {
@@ -100,6 +122,8 @@ export function createAuthBundle(opts: {
   databaseUrl: string;
   secret: string;
   baseURL: string;
+  /** Allowlist email platform-admin mentah (env PLATFORM_ADMIN_EMAILS) — Fase 6C. */
+  platformAdminEmails?: string;
 }): AuthBundle {
   const { db } = createDb(opts.databaseUrl);
   return { auth: createAuthInstance(db, opts), db };

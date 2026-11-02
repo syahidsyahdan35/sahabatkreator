@@ -12,3 +12,4 @@ export * from "./inbox";
 export * from "./automations";
 export * from "./agents";
 export * from "./products";
+export * from "./platform";

@@ -51,7 +51,54 @@ const EnvSchema = z.object({
   /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   OPENROUTER_MODEL: z.string().min(1).optional(),
+  /**
+   * Panel Admin Platform (Fase 6C): daftar email pemilik platform yang
+   * boleh membuka /api/admin/* & halaman /admin — koma-terpisah,
+   * pencocokan tidak peka huruf. Kosong = tidak ada admin (panel terkunci).
+   * Ini SATU-SATUNYA gerbang admin v1; peran per-tenant tidak terlibat.
+   */
+  PLATFORM_ADMIN_EMAILS: z.string().min(1).optional(),
+  /**
+   * Kunci induk enkripsi Panel Admin (Fase 6C): base64 dari 32 byte acak,
+   * AES-256-GCM untuk nilai `platform_settings` di DB. Hanya di env server
+   * (bootstrap secret) — nilai panel yang ia lindungi TIDAK pernah di env.
+   */
+  PLATFORM_SETTINGS_SECRET: z.string().min(16).optional(),
+  /**
+   * Kredensial Cloudflare R2 sebagai FALLBACK env (Fase 6C): sumber utama
+   * adalah Panel Admin (tabel platform_settings terenkripsi); env hanya
+   * dipakai bila panel kosong untuk kunci itu. Nilai fallback lama dari
+   * masa pra-panel; jangan menambah pemasangan baru lewat env.
+   */
+  R2_ACCESS_KEY_ID: z.string().min(1).optional(),
+  R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  /** Override nama bucket R2; default diturunkan dari NODE_ENV (lihat R2_BUCKET_NAMES). */
+  R2_BUCKET: z.string().min(1).optional(),
 });
+
+/**
+ * Cloudflare R2 (keputusan user 2026-11-01) — konfigurasi BUKAN rahasia:
+ * account id & nama bucket boleh tampil di UI Panel Admin sebagai info
+ * tetap. Endpoint S3-compatible diturunkan dari account id. Yang rahasia
+ * hanya Access Key ID + Secret Access Key (panel/env, lihat di atas).
+ */
+export const R2_ACCOUNT_ID = "bb2c1b6af93981fdd0a97da3b26aa82c";
+export const R2_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+export const R2_BUCKET_NAMES = {
+  staging: "sahabat-kreator-staging",
+  production: "sahabat-kreator-prod",
+} as const;
+
+/**
+ * Bucket aktif: override env `R2_BUCKET` menang; tanpa override defaultnya
+ * bucket STAGING. Sengaja TIDAK diturunkan dari NODE_ENV — di server
+ * staging pun NODE_ENV=production (mode runtime), jadi turunan dari sana
+ * akan salah sasaran. Deployment production WAJIB men-set R2_BUCKET ke
+ * bucket prod secara eksplisit (arah gagal yang aman: ke bucket dev).
+ */
+export function resolveR2Bucket(override?: string): string {
+  return override || R2_BUCKET_NAMES.staging;
+}
 
 export type Env = z.infer<typeof EnvSchema>;
 

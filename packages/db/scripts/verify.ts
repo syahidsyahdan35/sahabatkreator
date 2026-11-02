@@ -53,7 +53,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 4 tabel Fase 3A (agents, kb_documents, kb_chunks, agent_suggestions)
 // + 2 tabel Fase 4A (products, payment_links)
 // + 2 tabel Fase 2C (automation_steps, sequence_enrollments)
-assert.equal(Number(tablesRes.rows[0].count), 31);
+// + 1 tabel Fase 6C (platform_settings)
+assert.equal(Number(tablesRes.rows[0].count), 32);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -120,8 +121,10 @@ const policies = await db.query<{ count: string }>(
 // + lengan webhook `telegram_webhook_lookup` pada channel_accounts dan
 //   4 policy `system_delivery_scan` (Fase 6A)
 // + lengan lookup `provider_external_lookup` pada channel_accounts
-//   (hotfix Telegram, migrasi 0020) = 33.
-assert.equal(Number(policies.rows[0].count), 33);
+//   (hotfix Telegram, migrasi 0020)
+// + policy `platform_settings_admin` pada platform_settings dan
+//   `platform_audit` pada audit_logs (Fase 6C, migrasi 0022) = 35.
+assert.equal(Number(policies.rows[0].count), 35);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -134,7 +137,8 @@ await db.exec(`
     automations, automation_runs,
     agents, kb_documents, kb_chunks, agent_suggestions,
     products, payment_links,
-    automation_steps, sequence_enrollments
+    automation_steps, sequence_enrollments,
+    platform_settings
   TO app_user;
 `);
 
@@ -813,6 +817,62 @@ const chanSeen = await db.transaction(async (tx) => {
 assert.deepEqual(chanSeen.rows.map((r) => r.chat_id), ["-100555000111"]);
 console.log(
   "[15] Fase 6A.2: kolom kind ada + default 'private' + CHECK menolak nilai liar; backfill title→'group' tepat; percakapan channel (jangkar = channel sendiri) teresolusi alamat postingnya ke id channel lewat query poller: OK",
+);
+
+// ---------- 16. Fase 6C: platform_settings RLS fail-closed + audit platform ----------
+// Tabel platform_settings BUKAN tenant-scoped: tanpa flag transaksi
+// `app.platform_settings='admin'`, role aplikasi tidak melihat satu baris
+// pun dan tidak bisa menulis — walau barisnya ada (ditanam superuser).
+// Dengan flag, akses penuh. Audit platform (tenant_id NULL) tunduk pada
+// gerbang yang sama dan TIDAK pernah terlihat dari konteks tenant.
+await db.query(
+  `INSERT INTO platform_settings (key, value_encrypted, updated_by)
+   VALUES ('openrouter_api_key', 'v1:seed.seed.seed', $1)`,
+  [USER_A],
+);
+const psNoFlag = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const seenRows = await tx.query<{ key: string }>(
+    `SELECT key FROM platform_settings`,
+  );
+  let insertBlocked = false;
+  await tx.query(`SAVEPOINT sp_ps`);
+  try {
+    await tx.query(
+      `INSERT INTO platform_settings (key, value_encrypted) VALUES ('r2_access_key_id', 'v1:x.y.z')`,
+    );
+  } catch (err) {
+    insertBlocked = /row-level security/i.test(String(err));
+  }
+  await tx.query(`ROLLBACK TO SAVEPOINT sp_ps`);
+  return { count: seenRows.rows.length, insertBlocked };
+});
+assert.equal(psNoFlag.count, 0);
+assert.equal(psNoFlag.insertBlocked, true);
+const psFlag = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.platform_settings', 'admin', true)`);
+  const seenRows = await tx.query<{ key: string }>(
+    `SELECT key FROM platform_settings`,
+  );
+  await tx.query(
+    `INSERT INTO audit_logs (tenant_id, actor_type, actor_id, action, meta)
+     VALUES (NULL, 'user', $1, 'platform_settings.set', '{"key":"openrouter_api_key"}')`,
+    [USER_A],
+  );
+  return seenRows.rows.map((r) => r.key);
+});
+assert.deepEqual(psFlag, ["openrouter_api_key"]);
+const psTenantView = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  return tx.query<{ action: string }>(
+    `SELECT action FROM audit_logs WHERE action LIKE 'platform_settings.%'`,
+  );
+});
+assert.equal(psTenantView.rows.length, 0);
+console.log(
+  "[16] Fase 6C: platform_settings fail-closed tanpa flag (0 baris + insert ditolak), terbuka dengan flag app.platform_settings='admin'; audit platform tenant_id NULL tertulis ber-flag dan tak terlihat dari konteks tenant: OK",
 );
 
 await db.close();

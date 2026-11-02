@@ -13,10 +13,12 @@ interface MoreSheetProps {
   workspace: React.ReactNode;
   /** Blok profil user login + logout (bagian atas sheet). */
   profile: React.ReactNode;
+  /** Daftar item yang sudah disaring menurut hak sesi (Fase 6C); default = registry penuh. */
+  items?: NavItem[];
 }
 
 /** Sheet "More": profil + workspace, sisa item registry (order.more), kontrol tema & bahasa (§10.1). */
-export function MoreSheet({ t, open, activeId, onClose, onNavigate, controls, workspace, profile }: MoreSheetProps) {
+export function MoreSheet({ t, open, activeId, onClose, onNavigate, controls, workspace, profile, items = moreItems }: MoreSheetProps) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
@@ -26,7 +28,7 @@ export function MoreSheet({ t, open, activeId, onClose, onNavigate, controls, wo
         <div className="mb-4">{profile}</div>
         <div className="mb-4 border-t border-line pt-4">{workspace}</div>
         <ul className="space-y-1">
-          {moreItems.map((item) => (
+          {items.map((item) => (
             <li key={item.id}>
               <button
                 type="button"

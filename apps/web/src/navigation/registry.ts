@@ -11,7 +11,7 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
  */
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
-  | "bag" | "link" | "chart" | "card" | "settings" | "more";
+  | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more";
 
 export interface NavItem {
   id: string;
@@ -38,7 +38,27 @@ export const NAV_REGISTRY: NavItem[] = [
   { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
   { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
   { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
+  // Panel Admin Platform (Fase 6C): `permission: "platformAdmin"` — item
+  // hanya dirender untuk user ber-flag isPlatformAdmin (lihat
+  // filterNavItems); gerbang sesungguhnya ada di API (non-admin → 404).
+  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
 ];
+
+/**
+ * Saring daftar item menurut hak sesi (Fase 6C): item ber-permission
+ * "platformAdmin" hanya tampil bila `isPlatformAdmin`. Dipakai Shell
+ * untuk daftar yang diserahkan ke Sidebar & MoreSheet — registry sendiri
+ * tetap memuat semua item (matchNavPath harus tetap bisa memetakan
+ * /admin; halaman yang dirender untuk non-admin adalah placeholder).
+ */
+export function filterNavItems(
+  items: NavItem[],
+  opts: { isPlatformAdmin: boolean },
+): NavItem[] {
+  return items.filter(
+    (i) => i.permission !== "platformAdmin" || opts.isPlatformAdmin,
+  );
+}
 
 /** Item untuk sidebar desktop: semua item terurut order.desktop. */
 export const desktopItems: NavItem[] = [...NAV_REGISTRY].sort(

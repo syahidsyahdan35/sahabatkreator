@@ -29,6 +29,10 @@ import type {
   MessageResponse,
   PaymentLinkListResponse,
   PaymentLinkResponse,
+  PlatformSettingKey,
+  PlatformSettingsResponse,
+  PlatformSettingStatus,
+  PlatformSettingTestResult,
   ProductListResponse,
   ProductResponse,
   PublicPaymentResponse,
@@ -59,6 +63,12 @@ export interface SessionUser {
   id: string;
   name: string;
   email: string;
+  /**
+   * Flag Panel Admin Platform (Fase 6C) dari respons get-session —
+   * menentukan visibilitas menu Admin. Bukan gerbang keamanan (API yang
+   * menegakkan: non-admin → 404 di /api/admin/*).
+   */
+  isPlatformAdmin?: boolean;
 }
 
 export class ApiClientError extends Error {
@@ -515,6 +525,37 @@ export const api = {
       await request<unknown>(`/api/tenants/${tenantId}/api-keys/${apiKeyId}`, {
         method: "DELETE",
       });
+    },
+  },
+  admin: {
+    /** GET /api/admin/settings → status semua kunci platform (TANPA nilai) + info R2. */
+    getSettings(): Promise<PlatformSettingsResponse> {
+      return request<PlatformSettingsResponse>("/api/admin/settings", {
+        method: "GET",
+      });
+    },
+    /** PUT /api/admin/settings/:key {value} → status kunci itu setelah disimpan. */
+    setSetting(
+      key: PlatformSettingKey,
+      value: string,
+    ): Promise<PlatformSettingStatus> {
+      return request<PlatformSettingStatus>(`/api/admin/settings/${key}`, {
+        method: "PUT",
+        body: JSON.stringify({ value }),
+      });
+    },
+    /** DELETE /api/admin/settings/:key → hapus nilai panel (kembali ke env). */
+    clearSetting(key: PlatformSettingKey): Promise<PlatformSettingStatus> {
+      return request<PlatformSettingStatus>(`/api/admin/settings/${key}`, {
+        method: "DELETE",
+      });
+    },
+    /** POST /api/admin/settings/:key/test → uji koneksi dgn kunci efektif (hasil ok/kode, tanpa nilai). */
+    testSetting(key: PlatformSettingKey): Promise<PlatformSettingTestResult> {
+      return request<PlatformSettingTestResult>(
+        `/api/admin/settings/${key}/test`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
     },
   },
   pay: {

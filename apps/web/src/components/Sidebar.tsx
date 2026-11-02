@@ -12,10 +12,12 @@ interface SidebarProps {
   workspace: React.ReactNode;
   /** Blok profil user login + logout (di atas kontrol bahasa/tema). */
   profile: React.ReactNode;
+  /** Daftar item yang sudah disaring menurut hak sesi (Fase 6C); default = registry penuh. */
+  items?: NavItem[];
 }
 
 /** Sidebar DESKTOP — me-render registry navigasi yang sama dengan mobile (§10.1). */
-export function Sidebar({ t, activeId, onNavigate, badges, controls, workspace, profile }: SidebarProps) {
+export function Sidebar({ t, activeId, onNavigate, badges, controls, workspace, profile, items = desktopItems }: SidebarProps) {
   return (
     <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-line bg-surface md:flex">
       <div className="border-b border-line px-5 py-4">
@@ -25,7 +27,7 @@ export function Sidebar({ t, activeId, onNavigate, badges, controls, workspace, 
       <div className="border-b border-line px-4 py-3">{workspace}</div>
       <nav className="flex-1 overflow-y-auto p-3">
         <ul className="space-y-1">
-          {desktopItems.map((item) => {
+          {items.map((item) => {
             const active = item.id === activeId;
             const badge = item.badge ? badges[item.badge] : undefined;
             return (

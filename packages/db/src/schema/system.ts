@@ -78,9 +78,16 @@ export const auditLogs = pgTable(
   "audit_logs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
+    /**
+     * NULL = aksi tingkat PLATFORM (Fase 6C, mis. `platform_settings.*`),
+     * bukan milik tenant mana pun. Kolom dibuat nullable di migrasi 0022;
+     * baris platform hanya bisa ditulis/dibaca dalam transaksi ber-flag
+     * `app.platform_settings='admin'` (policy `platform_audit`) dan tidak
+     * pernah terlihat dari konteks tenant mana pun.
+     */
+    tenantId: uuid("tenant_id").references(() => tenants.id, {
+      onDelete: "cascade",
+    }),
     actorType: auditActorTypeEnum("actor_type").notNull(),
     /** ID user / agent / komponen sistem yang melakukan aksi. */
     actorId: varchar("actor_id", { length: 255 }),

@@ -3,7 +3,13 @@ import {
   createTranslator,
   type Locale,
 } from "@sahabat-kreator/i18n";
-import { matchNavPath, type NavItem } from "./navigation/registry";
+import {
+  desktopItems,
+  filterNavItems,
+  matchNavPath,
+  moreItems,
+  type NavItem,
+} from "./navigation/registry";
 import { saveReturnTo } from "./navigation/returnTo";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { WorkspaceProvider } from "./workspace/WorkspaceProvider";
@@ -32,6 +38,7 @@ import { RegisterPage } from "./pages/RegisterPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { AdminPage } from "./pages/AdminPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
@@ -152,6 +159,11 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
 
   const badges = { pendingApprovals: pendingCount, unreadInbox: totalUnread };
   const moreActive = activeItem.mobile.slot === "more";
+  // Item ber-permission khusus (Panel Admin, Fase 6C) hanya dirender
+  // untuk user yang berhak; registry lengkap tetap dipakai matchNavPath.
+  const isPlatformAdmin = user.isPlatformAdmin ?? false;
+  const visibleDesktopItems = filterNavItems(desktopItems, { isPlatformAdmin });
+  const visibleMoreItems = filterNavItems(moreItems, { isPlatformAdmin });
 
   const navigate = (item: NavItem) => {
     setMoreOpen(false);
@@ -188,6 +200,7 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
         controls={controls}
         workspace={workspace}
         profile={profile}
+        items={visibleDesktopItems}
       />
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
         <div className="mb-6 md:hidden">
@@ -217,6 +230,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <ProductsPage t={t} locale={locale} />
         ) : activeId === "settings" ? (
           <SettingsPage t={t} locale={locale} />
+        ) : activeId === "admin" && isPlatformAdmin ? (
+          <AdminPage t={t} locale={locale} />
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}
@@ -238,6 +253,7 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
         controls={controls}
         workspace={workspace}
         profile={profile}
+        items={visibleMoreItems}
       />
     </div>
   );

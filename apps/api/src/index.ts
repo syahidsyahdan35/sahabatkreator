@@ -9,7 +9,10 @@ import {
 import {
   APP_VERSION,
   META_GRAPH_API_VERSION,
+  R2_ACCOUNT_ID,
+  R2_ENDPOINT,
   loadEnv,
+  resolveR2Bucket,
 } from "@sahabat-kreator/config";
 import { createAuthBundle, type AuthBundle } from "./auth";
 import type { AppVariables } from "./http";
@@ -26,6 +29,7 @@ import { createApiKeysRoutes } from "./modules/api-keys/routes";
 import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { createWebchatRoutes } from "./modules/webchat/routes";
 import { createTelegramRoutes } from "./modules/telegram/routes";
+import { createAdminRoutes } from "./modules/admin/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -43,6 +47,7 @@ if (env.DATABASE_URL && env.BETTER_AUTH_SECRET) {
     databaseUrl: env.DATABASE_URL,
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL ?? `http://localhost:${env.API_PORT}`,
+    platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
   });
 }
 
@@ -115,6 +120,29 @@ routes.route("/", createApiKeysRoutes(authBundle));
 routes.route("/", createPublicV1Routes(authBundle, realtimePublisher));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
+// Modul Panel Admin Platform (Fase 6C) — kredensial provider milik
+// platform /admin/* (sesi + allowlist email; non-admin 404). Env hanya
+// fallback per kunci; sumber utama panel terenkripsi di DB (core).
+routes.route(
+  "/",
+  createAdminRoutes(authBundle, {
+    platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
+    platform: {
+      masterSecret: env.PLATFORM_SETTINGS_SECRET,
+      env: {
+        openrouter_api_key: env.OPENROUTER_API_KEY,
+        openrouter_model: env.OPENROUTER_MODEL,
+        r2_access_key_id: env.R2_ACCESS_KEY_ID,
+        r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
+      },
+    },
+    r2: {
+      accountId: R2_ACCOUNT_ID,
+      endpoint: R2_ENDPOINT,
+      bucket: resolveR2Bucket(env.R2_BUCKET),
+    },
+  }),
+);
 
 export const app = new Hono<{ Variables: AppVariables }>();
 app.route("/", routes);

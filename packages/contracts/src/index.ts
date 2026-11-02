@@ -895,3 +895,77 @@ export type RealtimeNudge = z.infer<typeof RealtimeNudgeSchema>;
 
 /** Bentuk yang diberikan penerbit: `type` & `at` diisi helper penerbit. */
 export type RealtimeNudgeInput = Omit<RealtimeNudge, "type" | "at">;
+
+// ---------------------------------------------------------------------------
+// Panel Admin Platform (Fase 6C) — kredensial provider milik PLATFORM,
+// dikelola pemilik platform (allowlist env PLATFORM_ADMIN_EMAILS), BUKAN
+// pengaturan tenant. Nilai rahasia TIDAK PERNAH muncul dalam kontrak mana
+// pun: yang dipertukarkan hanya status (isSet + sumber efektif), aksi
+// set/clear, dan hasil uji koneksi non-rahasia. Resolusi server: panel
+// dulu, env fallback (urutan yang diminta pemilik platform).
+// ---------------------------------------------------------------------------
+
+export const PlatformSettingKeySchema = z.enum([
+  "openrouter_api_key",
+  "openrouter_model",
+  "r2_access_key_id",
+  "r2_secret_access_key",
+]);
+export type PlatformSettingKey = z.infer<typeof PlatformSettingKeySchema>;
+
+export const PlatformSettingStatusSchema = z.object({
+  key: PlatformSettingKeySchema,
+  /** True bila ada nilai efektif (panel atau env). */
+  isSet: z.boolean(),
+  /** Sumber nilai efektif; null bila belum diatur di mana pun. */
+  source: z.enum(["panel", "env"]).nullable(),
+  /** Waktu ubah terakhir di panel (ISO); null bila bukan dari panel. */
+  updatedAt: z.string().datetime().nullable(),
+  /** Email user yang terakhir mengubah nilai panel; null bila bukan dari panel. */
+  updatedBy: z.string().nullable(),
+});
+export type PlatformSettingStatus = z.infer<
+  typeof PlatformSettingStatusSchema
+>;
+
+/** Info R2 BUKAN rahasia (konfigurasi tetap) yang ditampilkan panel. */
+export const PlatformR2InfoSchema = z.object({
+  accountId: z.string(),
+  endpoint: z.string(),
+  /** Bucket yang akan dipakai konsumen R2 & target uji koneksi. */
+  bucket: z.string(),
+});
+export type PlatformR2Info = z.infer<typeof PlatformR2InfoSchema>;
+
+export const PlatformSettingsResponseSchema = z.object({
+  settings: z.array(PlatformSettingStatusSchema),
+  r2: PlatformR2InfoSchema,
+});
+export type PlatformSettingsResponse = z.infer<
+  typeof PlatformSettingsResponseSchema
+>;
+
+export const SetPlatformSettingRequestSchema = z.object({
+  /** Nilai baru; string kosong ditolak (gunakan DELETE untuk mengosongkan). */
+  value: z.string().trim().min(1).max(1024),
+});
+export type SetPlatformSettingRequest = z.infer<
+  typeof SetPlatformSettingRequestSchema
+>;
+
+/**
+ * Hasil uji koneksi — selalu 200 untuk kegagalan upstream (ok=false +
+ * kode stabil), karena "uji" adalah operasi baca yang hasilnya memang
+ * bisa "tidak tersambung". `info` hanya berisi data NON-rahasia dari
+ * provider (mis. label & sisa limit kunci OpenRouter).
+ */
+export const PlatformSettingTestResultSchema = z.object({
+  key: PlatformSettingKeySchema,
+  ok: z.boolean(),
+  /** Kode hasil stabil, mis. OK | NOT_CONFIGURED | OPENROUTER_AUTH_FAILED | OPENROUTER_UNREACHABLE | R2_AUTH_FAILED | R2_BUCKET_NOT_FOUND | R2_UNREACHABLE. */
+  code: z.string(),
+  info: z.record(z.string(), z.unknown()).optional(),
+});
+export type PlatformSettingTestResult = z.infer<
+  typeof PlatformSettingTestResultSchema
+>;
