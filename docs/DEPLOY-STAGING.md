@@ -1269,3 +1269,129 @@ reload manual; (3) UI widget bergeser saat diklik.
 - CORS `*` hanya untuk endpoint publik webchat; WS tidak memakai CORS
   (browser tidak menerapkannya pada WebSocket) dan tetap diautentikasi
   token di query.
+
+---
+
+## Update Fase 6A.1 — Dukungan grup Telegram (2026-11-02)
+
+Melunasi hutang cakupan 6A: v1 hanya benar untuk chat privat karena
+identitas kontak (pengirim) sekaligus dianggap alamat balasan. Di grup
+keduanya berbeda — `chat.id` grup itu negatif dan bukan id anggota mana
+pun.
+
+### Model data (migrasi 0019, generate + backfill tulis tangan)
+- `conversations.provider_chat_id` varchar — id chat provider = ALAMAT
+  BALASAN percakapan (Telegram: `chat.id`; positif privat, negatif
+  grup). Backfill di migrasi yang sama mengisi baris telegram lama dari
+  `channel_identities` (semua percakapan 6A memang privat). Staging
+  terkonfirmasi: 2 percakapan telegram ter-backfill, webchat tak
+  tersentuh; jumlah policy tetap 32.
+- `conversations.title` varchar — judul grup (`chat.title`); HANYA
+  percakapan grup yang terisi, dan kehadirannya adalah penanda
+  `isGroup` bagi API/UI.
+- `messages.sender_name` varchar — snapshot nama anggota pengirim per
+  pesan masuk grup (percakapan grup menampung banyak penulis, sedangkan
+  baris percakapan hanya menunjuk satu kontak jangkar). Privat NULL.
+- Kontak jangkar percakapan grup = pengirim pertama; identitas kontak
+  tetap dibuat per anggota yang menulis (atribusi & CRM), dan resolusi
+  percakapan privat kini DIBATASI alamat chat agar pesan privat anggota
+  tidak nyasar ke utas grup miliknya (bug yang tertangkap verifikasi
+  fase ini — lihat bawah).
+
+### Alur
+- Adapter: `parseTelegramUpdate` menormalkan `conversationKind`
+  ("private"|"group") + `conversationTitle` ke StandardMessage
+  (channel-core, field opsional generik); `conversationExternalId`
+  memang sudah `chat.id` sejak 6A. `setWebhook` kini meminta
+  `allowed_updates: ["message", "my_chat_member"]`.
+- Webhook route: pesan grup → SATU percakapan per (akun, id grup);
+  judul grup diperbarui bila berubah. Update `my_chat_member` → audit
+  `telegram.my_chat_member` (actor system `telegram-webhook`, meta
+  chatId/judul/status) TANPA membuat percakapan; `edited_message` &
+  `channel_post` tetap 200-diabaikan (channel = Fase 6A.2).
+- Pengiriman: poller memakai `coalesce(conversations.provider_chat_id,
+  channel_identities.external_user_id)` — balasan manual, automation,
+  sequence, dan agent ke grup terkirim ke id grup lewat jalur `queued`
+  yang sama persis; tidak ada jalur khusus grup.
+- Kontrak/API: `ConversationResponse` + `title` & `isGroup`;
+  `MessageResponse` + `senderName`. UI Inbox: daftar & header memakai
+  judul grup + chip "Grup"/"Group" (i18n `inbox.groupLabel`), nama
+  pengirim tampil di atas gelembung masuk grup.
+- **Dua bug tambahan yang ditemukan & diperbaiki fase ini:**
+  1. *Dedup lintas tenant → webhook 500 (sejak 6A).* SELECT dedup
+     berjalan dalam konteks RLS tenant, tetapi index unik
+     `provider_message_id` bersifat GLOBAL: bot yang sama pernah
+     terhubung di tenant lain membuat SELECT tak melihat kembarannya
+     namun insert ditolak index (23505) → 500 → Telegram me-retry
+     update yang sama selamanya. Perbaikan: insert memakai
+     `ON CONFLICT DO NOTHING`; kembaran milik tenant lain diakui (200)
+     tanpa unread/outbox ganda. Semantik dedup tidak berubah.
+  2. *Pesan privat nyasar ke utas grup* (di atas) — resolusi privat kini
+     mensyaratkan `provider_chat_id` sama dengan alamat chat (atau NULL
+     untuk baris warisan).
+
+### Verifikasi (mock Bot API lokal di server, pola 6A — TANPA token asli)
+- Mock diperbarui: id bot diturunkan dari awalan numerik token (tiap
+  run uji = bot berbeda, meniru kenyataan & menghindari tabrakan dedup
+  global antar-run). Jendela `TELEGRAM_API_BASE` dibuka lalu DICABUT;
+  keadaan akhir `.env.staging` terverifikasi kembali 9 variabel (600),
+  mock dimatikan, skrip /tmp server dihapus.
+- Rantai publik dari server (skrip Bun, tenant uji baru): **38/38 PASS**
+  — token invalid 422; connect mock + `@username` tampil, token tak
+  muncul di respons; setWebhook tercatat dengan `allowed_updates`
+  memuat `my_chat_member`; secret salah 401; dua anggota menulis di
+  supergroup yang sama → tepat 1 percakapan grup berjudul grup,
+  2 pesan dengan `senderName` masing-masing; keyword di grup →
+  mock menerima sendMessage dengan **chat_id = id grup negatif**
+  (dan TIDAK PERNAH ke id anggota); balasan manual → sendMessage ke
+  id grup + status `sent`; regresi privat: percakapan privat anggota
+  yang sama TERPISAH (title null, senderName null), balasan privat
+  tetap ke chat privat; `my_chat_member`/`edited_message`/
+  `channel_post` → 200 tanpa percakapan/pesan baru (audit
+  `telegram.my_chat_member` terkonfirmasi 1 baris di DB); duplikat
+  update grup → tetap 1 pesan; tenant lain 404; tanpa sesi 401.
+- Lokal: typecheck semua proyek (17) hijau; `packages/db` verify
+  (PGlite) lulus termasuk seksi baru **[13]** (kolom 0019 ada; alamat
+  grup teresolusi ke id negatif lewat coalesce; privat warisan jatuh
+  ke identitas; sender_name tersimpan per pesan grup). Negatif log:
+  token mock 0 kemunculan di journal API & worker.
+- **Playwright SENGAJA dilewati fase ini** atas instruksi user
+  (2026-11-02: percepat development, cukup verifikasi rantai API/mock
+  + typecheck + PGlite; suite yang ada di repo dibiarkan apa adanya).
+
+### Catatan insiden jendela uji (transparansi)
+- Jendela mock fase ini beririsan dengan uji langsung user: user
+  menempelkan token bot ASLI-nya di workspace aslinya "WS Mas Romo"
+  saat API masih menunjuk mock, sehingga terbentuk satu baris channel
+  Telegram berbasis mock (@sk_mock_bot_6a1, bot_id 777001) di tenant
+  asli itu. Pada cleanup fase ini baris tersebut **DIHAPUS**
+  (terverifikasi: 0 percakapan/identitas/pesan terkait — tidak ada
+  data lain yang menempel padanya). Satu entri audit `channel.created`
+  atas aksi connect user sendiri dibiarkan sebagai jejak audit yang
+  jujur (tidak memuat token).
+- Koneksi asli user **@botaramyid_bot di "Mas Romo WS Baru" TIDAK
+  disentuh** (baris sama, status connected, webhook Telegram asli
+  tidak berubah — selama jendela mock tidak ada panggilan Bot API
+  sungguhan yang keluar). Selama jendela, tepat 1 pesan masuk ASLI
+  tercatat normal lewat webhook di workspace itu dan TIDAK ada satu
+  pun pesan keluar untuk tenant asli user — jadi tidak ada balasan
+  sungguhan yang tertelan mock.
+- Pelajaran & tindak lanjut (di luar fase ini, sudah dicatat parent):
+  belum ada penjaga "satu bot = satu koneksi" — bot yang sama bisa
+  terhubung di banyak workspace sekaligus; diantrekan sebagai hotfix
+  tersendiri (unique parsial (provider, external_id) + 409 saat
+  connect ganda).
+
+### Batas jujur
+- Di grup SUNGGUHAN, apakah bot menerima semua pesan grup bergantung
+  **privacy mode BotFather milik user** (default: hanya mention/
+  perintah/reply ke bot) — di luar kendali kode; matikan privacy mode
+  bila bot harus membaca semua pesan grup.
+- Semantik sequence tidak diubah: enrollment menunjuk kontak
+  percakapan (di grup = kontak jangkar/pengirim pertama utas), dan
+  placeholder `{name}` pada balasan automation/agent di grup merender
+  nama kontak jangkar itu, bukan nama anggota pemicu per pesan.
+  Atribusi per pesan yang akurat hidup di `sender_name`.
+- Judul grup mengikuti `chat.title` terakhir yang terlihat; bot yang
+  dikeluarkan dari grup tidak menutup percakapan otomatis (audit
+  `my_chat_member` adalah jejaknya).
