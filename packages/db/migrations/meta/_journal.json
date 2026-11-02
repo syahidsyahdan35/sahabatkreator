@@ -183,6 +183,13 @@
       "when": 1793595138734,
       "tag": "0025_rls_profile_photos",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793597514817,
+      "tag": "0026_meta_channels",
+      "breakpoints": true
     }
   ]
 }

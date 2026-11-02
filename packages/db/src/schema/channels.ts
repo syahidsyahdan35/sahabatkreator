@@ -56,6 +56,13 @@ export const channelAccounts = pgTable(
     webhookSecret: varchar("webhook_secret", { length: 255 }),
     /** Username bot Telegram (tanpa '@', dari getMe — Fase 6A). Bukan rahasia; untuk tampilan. */
     botUsername: varchar("bot_username", { length: 255 }),
+    /**
+     * Handle publik akun Meta (Fase 7A): username Page Facebook
+     * (messenger) / username akun IG Professional (instagram), dari
+     * Graph saat connect. Bukan rahasia; dipakai kartu Channels sebagai
+     * @handle + tautan publik m.me/ig.me. Null bila Page tak ber-username.
+     */
+    publicHandle: varchar("public_handle", { length: 255 }),
     /** Versi Graph API yang ter-pin untuk akun Meta ini (mis. 'v26.0', RANCANGAN §12.1). */
     graphApiVersion: varchar("graph_api_version", { length: 16 }),
     /**

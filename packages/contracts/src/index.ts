@@ -17,6 +17,10 @@ export const ErrorCodeSchema = z.enum([
   "CHANNEL_DISCONNECTED",
   "TELEGRAM_TOKEN_INVALID",
   "TELEGRAM_BOT_ALREADY_CONNECTED",
+  "META_TOKEN_INVALID",
+  "META_ACCOUNT_ALREADY_CONNECTED",
+  "META_NOT_CONFIGURED",
+  "META_SIGNATURE_INVALID",
   "CHANNEL_DELETE_CONFIRMATION_MISMATCH",
   "CHANNEL_ALREADY_TRASHED",
   "CHANNEL_NOT_TRASHED",
@@ -284,6 +288,23 @@ export const CreateChannelRequestSchema = z.object({
    * disimpan terenkripsi di server.
    */
   botToken: z.string().trim().min(10).max(255).optional(),
+  /**
+   * Page Access Token Meta (Fase 7A) — wajib hanya untuk provider
+   * 'messenger'/'instagram'. Pola yang sama seperti botToken: divalidasi
+   * ke Graph API, disimpan terenkripsi, TIDAK PERNAH dikembalikan API.
+   */
+  pageAccessToken: z.string().trim().min(10).max(1024).optional(),
+  /**
+   * Facebook Page ID (Fase 7A) — untuk 'messenger' ini menjadi
+   * external_id akun; untuk 'instagram' ini Page yang terhubung ke akun
+   * IG (token divalidasi terhadap Page ini juga).
+   */
+  pageId: z.string().trim().min(1).max(64).optional(),
+  /**
+   * ID akun Instagram Professional (Fase 7A) — wajib hanya untuk
+   * provider 'instagram'; menjadi external_id akun itu.
+   */
+  igUserId: z.string().trim().min(1).max(64).optional(),
 });
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequestSchema>;
 
@@ -295,6 +316,14 @@ export const ChannelAccountResponseSchema = z.object({
   displayName: z.string().nullable(),
   /** Untuk telegram: username bot (`@...` tanpa '@') dari getMe. Provider lain: null. */
   botUsername: z.string().nullable(),
+  /**
+   * Handle publik akun Meta (Fase 7A): username Page Facebook untuk
+   * 'messenger', username akun untuk 'instagram' — dipakai kartu
+   * Channels sebagai baris @handle dan menyusun tautan publik
+   * (m.me / ig.me). Null bila akun tidak punya username (Page tanpa
+   * username adalah hal yang sah) atau provider non-Meta.
+   */
+  publicHandle: z.string().nullable(),
   /**
    * URL foto profil akun (Fase 6D): endpoint avatar kita sendiri
    * (`/api/tenants/:tenantId/avatars/channels/:id`) bila foto tersimpan
@@ -327,6 +356,25 @@ export const ChannelAccountListResponseSchema = z.object({
 });
 export type ChannelAccountListResponse = z.infer<
   typeof ChannelAccountListResponseSchema
+>;
+
+/**
+ * Info pemasangan webhook Meta (Fase 7A) — hanya untuk owner/admin
+ * workspace (endpoint menjawab 403 untuk peran lain): URL webhook publik
+ * platform + verify token yang harus ditempel ke dashboard Meta App.
+ * Verify token BUKAN kredensial Meta; ia nilai yang kita tentukan
+ * sendiri. App secret TIDAK pernah termasuk di sini.
+ */
+export const MetaWebhookInfoResponseSchema = z.object({
+  /** URL publik webhook tunggal: `{publicBaseUrl}/api/meta/webhook`. */
+  webhookUrl: z.string(),
+  /** Verify token untuk ditempel ke Meta App; null bila env belum diset. */
+  verifyToken: z.string().nullable(),
+  /** True bila platform sudah punya app secret untuk memverifikasi tanda tangan. */
+  appSecretConfigured: z.boolean(),
+});
+export type MetaWebhookInfoResponse = z.infer<
+  typeof MetaWebhookInfoResponseSchema
 >;
 
 /**

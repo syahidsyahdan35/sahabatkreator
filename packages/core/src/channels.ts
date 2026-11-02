@@ -126,11 +126,15 @@ export function channelPurgeAt(account: ChannelAccount): Date | null {
  * tidak pernah rahasia.
  */
 export function channelConfirmationName(
-  account: Pick<ChannelAccount, "displayName" | "botUsername" | "externalId">,
+  account: Pick<
+    ChannelAccount,
+    "displayName" | "botUsername" | "publicHandle" | "externalId"
+  >,
 ): string {
   const display = account.displayName?.trim();
   if (display) return display;
   if (account.botUsername) return account.botUsername;
+  if (account.publicHandle) return account.publicHandle;
   return account.externalId;
 }
 

@@ -29,6 +29,8 @@ import { createApiKeysRoutes } from "./modules/api-keys/routes";
 import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { createWebchatRoutes } from "./modules/webchat/routes";
 import { createTelegramRoutes } from "./modules/telegram/routes";
+import { createMetaRoutes } from "./modules/meta/routes";
+import { startMetaDeliveryPoller } from "./modules/meta/poller";
 import { createAvatarsRoutes } from "./modules/avatars/routes";
 import { createAdminRoutes } from "./modules/admin/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
@@ -99,6 +101,22 @@ routes.route(
     channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
     telegramApiBase: env.TELEGRAM_API_BASE,
     publicBaseUrl: env.BETTER_AUTH_URL,
+    metaApiBase: env.META_API_BASE,
+    metaWebhookVerifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
+    metaAppSecretConfigured: Boolean(env.META_APP_SECRET),
+  }),
+);
+// Modul meta publik (Fase 7A) — webhook TUNGGAL Meta /meta/webhook untuk
+// Messenger + Instagram: handshake verify token + event bertanda tangan
+// HMAC app secret (fail-closed 503 META_NOT_CONFIGURED tanpa secret).
+routes.route(
+  "/",
+  createMetaRoutes(authBundle, realtimePublisher, {
+    appSecret: env.META_APP_SECRET,
+    verifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    metaApiBase: env.META_API_BASE,
+    graphApiVersion: META_GRAPH_API_VERSION,
   }),
 );
 // Modul telegram publik (Fase 6A) — webhook Bot API /telegram/webhook/:id.
@@ -185,6 +203,15 @@ if (process.env.NODE_ENV !== "test") {
     startTelegramDeliveryPoller(authBundle, {
       channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
       telegramApiBase: env.TELEGRAM_API_BASE,
+      publisher: realtimePublisher,
+    });
+    // Poller pengiriman Meta (Fase 7A): mengirim pesan outbound `queued`
+    // percakapan messenger/instagram via Graph Send API (token Page
+    // terdekripsi sesaat di memori) + nudge status (Fase 6G).
+    startMetaDeliveryPoller(authBundle, {
+      channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+      metaApiBase: env.META_API_BASE,
+      graphApiVersion: META_GRAPH_API_VERSION,
       publisher: realtimePublisher,
     });
   }

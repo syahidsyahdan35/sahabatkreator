@@ -4,7 +4,10 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import type { ChannelAccountResponse } from "@sahabat-kreator/contracts";
+import type {
+  ChannelAccountResponse,
+  MetaWebhookInfoResponse,
+} from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
@@ -28,7 +31,7 @@ interface ChannelsPageProps {
 }
 
 /** Provider yang belum bisa dihubungkan — ditampilkan jujur sebagai "segera". */
-const UPCOMING_PROVIDERS = ["whatsapp", "instagram", "messenger"] as const;
+const UPCOMING_PROVIDERS = ["whatsapp"] as const;
 
 function providerLabel(t: Translate, provider: string): string {
   return t(`inbox.providers.${provider}` as TranslationKey);
@@ -58,6 +61,13 @@ function handleLine(channel: ChannelAccountResponse): string | null {
   if (channel.provider === "telegram") {
     return channel.botUsername ? `@${channel.botUsername}` : null;
   }
+  if (channel.provider === "messenger" || channel.provider === "instagram") {
+    // Fase 7A: handle publik Meta dari Graph; Page tanpa username
+    // menampilkan Page ID-nya (terpotong rapi seperti siteKey webchat).
+    return channel.publicHandle
+      ? `@${channel.publicHandle}`
+      : truncateMiddle(channel.externalId);
+  }
   if (channel.provider === "webchat") {
     // Webchat tidak punya @handle — siteKey terpotong adalah identitasnya.
     return truncateMiddle(channel.externalId);
@@ -81,6 +91,23 @@ function publicLink(channel: ChannelAccountResponse): PublicLink | null {
     return {
       url: `https://t.me/${channel.botUsername}`,
       display: `t.me/${channel.botUsername}`,
+    };
+  }
+  // Fase 7A: tautan publik Meta hanya saat connected (pola webchat) —
+  // Messenger memakai m.me/<username atau Page ID>; Instagram butuh
+  // username (akun IG selalu punya) untuk ig.me/m/<username>.
+  if (channel.provider === "messenger" && channel.status === "connected") {
+    const slug = channel.publicHandle || channel.externalId;
+    return { url: `https://m.me/${slug}`, display: `m.me/${slug}` };
+  }
+  if (
+    channel.provider === "instagram" &&
+    channel.status === "connected" &&
+    channel.publicHandle
+  ) {
+    return {
+      url: `https://ig.me/m/${channel.publicHandle}`,
+      display: `ig.me/m/${channel.publicHandle}`,
     };
   }
   if (channel.provider === "webchat" && channel.status === "connected") {
@@ -223,6 +250,24 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   const [tgToken, setTgToken] = useState("");
   const [tgCreating, setTgCreating] = useState(false);
   const [tgError, setTgError] = useState<string | null>(null);
+  // Form Meta (Fase 7A): Messenger (Page) & Instagram — token-based
+  // seperti Telegram; token hanya hidup di state selama form terisi.
+  const [msName, setMsName] = useState("");
+  const [msPageId, setMsPageId] = useState("");
+  const [msToken, setMsToken] = useState("");
+  const [msCreating, setMsCreating] = useState(false);
+  const [msError, setMsError] = useState<string | null>(null);
+  const [igName, setIgName] = useState("");
+  const [igPageId, setIgPageId] = useState("");
+  const [igId, setIgId] = useState("");
+  const [igToken, setIgToken] = useState("");
+  const [igCreating, setIgCreating] = useState(false);
+  const [igError, setIgError] = useState<string | null>(null);
+  const [metaWebhook, setMetaWebhook] =
+    useState<MetaWebhookInfoResponse | null>(null);
+  const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(
+    null,
+  );
   const [disconnectTarget, setDisconnectTarget] =
     useState<ChannelAccountResponse | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -257,6 +302,25 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Info webhook Meta (Fase 7A): hanya owner/admin yang bisa membaca
+  // endpoint-nya — peran lain menerima 403 dan panel disembunyikan
+  // diam-diam (bukan error halaman).
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    api.channels
+      .metaWebhookInfo(tenantId)
+      .then((info) => {
+        if (!cancelled) setMetaWebhook(info);
+      })
+      .catch(() => {
+        if (!cancelled) setMetaWebhook(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
@@ -305,6 +369,76 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
       );
     } finally {
       setTgCreating(false);
+    }
+  };
+
+  const handleConnectMessenger = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!tenantId) return;
+    setMsCreating(true);
+    setMsError(null);
+    try {
+      await api.channels.create(tenantId, {
+        provider: "messenger",
+        displayName: msName.trim() || undefined,
+        pageId: msPageId.trim(),
+        pageAccessToken: msToken.trim(),
+      });
+      // Token tidak disimpan di state lebih lama dari yang perlu.
+      setMsToken("");
+      setMsName("");
+      setMsPageId("");
+      await load();
+    } catch (err) {
+      setMsError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+    } finally {
+      setMsCreating(false);
+    }
+  };
+
+  const handleConnectInstagram = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!tenantId) return;
+    setIgCreating(true);
+    setIgError(null);
+    try {
+      await api.channels.create(tenantId, {
+        provider: "instagram",
+        displayName: igName.trim() || undefined,
+        pageId: igPageId.trim(),
+        igUserId: igId.trim(),
+        pageAccessToken: igToken.trim(),
+      });
+      setIgToken("");
+      setIgName("");
+      setIgPageId("");
+      setIgId("");
+      await load();
+    } catch (err) {
+      setIgError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+    } finally {
+      setIgCreating(false);
+    }
+  };
+
+  const copyWebhookValue = async (field: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedWebhookField(field);
+      window.setTimeout(
+        () => setCopiedWebhookField((cur) => (cur === field ? null : cur)),
+        2000,
+      );
+    } catch {
+      /* clipboard tidak tersedia — nilai tetap terlihat untuk disalin manual */
     }
   };
 
@@ -397,9 +531,23 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     }
   };
 
-  /** "Hubungkan lagi" (Telegram terputus): arahkan ke form Telegram yang ada. */
+  /** "Hubungkan lagi" (channel terputus): arahkan ke form provider yang ada. */
   const focusTelegramForm = () => {
     const el = document.getElementById("telegram-token");
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => el.focus({ preventScroll: true }), 350);
+  };
+
+  const focusMessengerForm = () => {
+    const el = document.getElementById("messenger-page-id");
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => el.focus({ preventScroll: true }), 350);
+  };
+
+  const focusInstagramForm = () => {
+    const el = document.getElementById("instagram-ig-id");
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     window.setTimeout(() => el.focus({ preventScroll: true }), 350);
@@ -460,6 +608,7 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     name={
                       channel.displayName ||
                       channel.botUsername ||
+                      channel.publicHandle ||
                       providerLabel(t, channel.provider)
                     }
                     imageUrl={channel.avatarUrl ?? undefined}
@@ -499,6 +648,22 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       <button
                         type="button"
                         onClick={focusTelegramForm}
+                        className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
+                      >
+                        {t("channels.reconnectButton")}
+                      </button>
+                    ) : channel.provider === "messenger" ? (
+                      <button
+                        type="button"
+                        onClick={focusMessengerForm}
+                        className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
+                      >
+                        {t("channels.reconnectButton")}
+                      </button>
+                    ) : channel.provider === "instagram" ? (
+                      <button
+                        type="button"
+                        onClick={focusInstagramForm}
                         className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
                       >
                         {t("channels.reconnectButton")}
@@ -668,6 +833,201 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
         </button>
       </form>
 
+      <form
+        onSubmit={handleConnectMessenger}
+        className="mt-8 rounded-lg border border-line bg-surface p-4"
+      >
+        <h2 className="font-semibold">{t("channels.messengerTitle")}</h2>
+        <label className="mt-3 block text-sm font-medium" htmlFor="messenger-name">
+          {t("channels.metaNameLabel")}
+        </label>
+        <input
+          id="messenger-name"
+          value={msName}
+          onChange={(e) => setMsName(e.target.value)}
+          placeholder={t("channels.metaNamePlaceholder")}
+          maxLength={255}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="messenger-page-id">
+          {t("channels.pageIdLabel")}
+        </label>
+        <input
+          id="messenger-page-id"
+          value={msPageId}
+          onChange={(e) => setMsPageId(e.target.value)}
+          placeholder={t("channels.pageIdPlaceholder")}
+          maxLength={64}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="messenger-token">
+          {t("channels.pageTokenLabel")}
+        </label>
+        <input
+          id="messenger-token"
+          type="password"
+          autoComplete="off"
+          value={msToken}
+          onChange={(e) => setMsToken(e.target.value)}
+          placeholder={t("channels.pageTokenPlaceholder")}
+          maxLength={1024}
+          className={`${inputClassName} mt-1`}
+        />
+        <p className="mt-1 text-xs text-muted">{t("channels.metaTokenHint")}</p>
+        {msError ? (
+          <div className="mt-2">
+            <FieldError message={msError} />
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={msCreating || !msPageId.trim() || !msToken.trim()}
+          className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {msCreating ? t("channels.metaConnecting") : t("channels.messengerConnectButton")}
+        </button>
+      </form>
+
+      <form
+        onSubmit={handleConnectInstagram}
+        className="mt-8 rounded-lg border border-line bg-surface p-4"
+      >
+        <h2 className="font-semibold">{t("channels.instagramTitle")}</h2>
+        <label className="mt-3 block text-sm font-medium" htmlFor="instagram-name">
+          {t("channels.metaNameLabel")}
+        </label>
+        <input
+          id="instagram-name"
+          value={igName}
+          onChange={(e) => setIgName(e.target.value)}
+          placeholder={t("channels.metaNamePlaceholder")}
+          maxLength={255}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="instagram-ig-id">
+          {t("channels.igIdLabel")}
+        </label>
+        <input
+          id="instagram-ig-id"
+          value={igId}
+          onChange={(e) => setIgId(e.target.value)}
+          placeholder={t("channels.igIdPlaceholder")}
+          maxLength={64}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="instagram-page-id">
+          {t("channels.pageIdLabel")}
+        </label>
+        <input
+          id="instagram-page-id"
+          value={igPageId}
+          onChange={(e) => setIgPageId(e.target.value)}
+          placeholder={t("channels.pageIdPlaceholder")}
+          maxLength={64}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="instagram-token">
+          {t("channels.pageTokenLabel")}
+        </label>
+        <input
+          id="instagram-token"
+          type="password"
+          autoComplete="off"
+          value={igToken}
+          onChange={(e) => setIgToken(e.target.value)}
+          placeholder={t("channels.pageTokenPlaceholder")}
+          maxLength={1024}
+          className={`${inputClassName} mt-1`}
+        />
+        <p className="mt-1 text-xs text-muted">{t("channels.metaTokenHint")}</p>
+        {igError ? (
+          <div className="mt-2">
+            <FieldError message={igError} />
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={igCreating || !igId.trim() || !igPageId.trim() || !igToken.trim()}
+          className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {igCreating ? t("channels.metaConnecting") : t("channels.instagramConnectButton")}
+        </button>
+      </form>
+
+      {metaWebhook ? (
+        <div className="mt-8 rounded-lg border border-line bg-surface p-4">
+          <h2 className="font-semibold">{t("channels.metaWebhookTitle")}</h2>
+          <p className="mt-1 text-sm text-muted">{t("channels.metaWebhookBody")}</p>
+          <label className="mt-3 block text-sm font-medium">
+            {t("channels.metaWebhookUrlLabel")}
+          </label>
+          <div className="mt-1 flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-md bg-elevated px-3 py-2 font-mono text-xs">
+              {metaWebhook.webhookUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => void copyWebhookValue("url", metaWebhook.webhookUrl)}
+              aria-label={t("channels.copyLink")}
+              title={
+                copiedWebhookField === "url"
+                  ? t("channels.copied")
+                  : t("channels.copyLink")
+              }
+              className="shrink-0 rounded-lg border border-line bg-surface p-2 text-muted hover:text-ink"
+            >
+              {copiedWebhookField === "url" ? (
+                <span className="text-success">
+                  <CheckIcon />
+                </span>
+              ) : (
+                <CopyIcon />
+              )}
+            </button>
+          </div>
+          <label className="mt-3 block text-sm font-medium">
+            {t("channels.metaWebhookTokenLabel")}
+          </label>
+          {metaWebhook.verifyToken ? (
+            <div className="mt-1 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md bg-elevated px-3 py-2 font-mono text-xs">
+                {metaWebhook.verifyToken}
+              </code>
+              <button
+                type="button"
+                onClick={() =>
+                  void copyWebhookValue("token", metaWebhook.verifyToken ?? "")
+                }
+                aria-label={t("channels.copyLink")}
+                title={
+                  copiedWebhookField === "token"
+                    ? t("channels.copied")
+                    : t("channels.copyLink")
+                }
+                className="shrink-0 rounded-lg border border-line bg-surface p-2 text-muted hover:text-ink"
+              >
+                {copiedWebhookField === "token" ? (
+                  <span className="text-success">
+                    <CheckIcon />
+                  </span>
+                ) : (
+                  <CopyIcon />
+                )}
+              </button>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-muted">
+              {t("channels.metaWebhookNotConfigured")}
+            </p>
+          )}
+          {!metaWebhook.appSecretConfigured ? (
+            <p className="mt-2 text-xs text-muted">
+              {t("channels.metaWebhookSecretMissing")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="mt-8">
         <h2 className="font-semibold">{t("common.comingSoon")}</h2>
         <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -733,6 +1093,7 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                   name={
                     channel.displayName ||
                     channel.botUsername ||
+                    channel.publicHandle ||
                     providerLabel(t, channel.provider)
                   }
                   imageUrl={channel.avatarUrl ?? undefined}

@@ -42,6 +42,30 @@ const EnvSchema = z.object({
    * override hanya untuk uji mock lokal di staging.
    */
   TELEGRAM_API_BASE: z.string().url().optional(),
+  /**
+   * Base URL Meta Graph API (Fase 7A). Default https://graph.facebook.com
+   * (versi ter-pin v26.0 ditambahkan klien sebagai segmen path); override
+   * hanya untuk uji mock lokal di staging — pola yang sama dengan
+   * TELEGRAM_API_BASE.
+   */
+  META_API_BASE: z.string().url().optional(),
+  /**
+   * Secret Meta App milik PLATFORM (Fase 7A): memverifikasi tanda tangan
+   * `X-Hub-Signature-256` pada webhook /api/meta/webhook. Hanya di env
+   * server — tidak pernah masuk repo/log. Belum diset = webhook Meta
+   * menjawab 503 META_NOT_CONFIGURED (fail-closed). Nilai staging saat
+   * ini PLACEHOLDER dan WAJIB diganti secret Meta App asli sebelum
+   * trafik live (lihat docs/DEPLOY-STAGING.md).
+   */
+  META_APP_SECRET: z.string().min(1).optional(),
+  /**
+   * Token verifikasi handshake webhook Meta (Fase 7A): nilai bebas yang
+   * KITA tentukan dan ditempel pemilik platform ke dashboard Meta App
+   * (Webhook > Verify Token). Bukan rahasia dari Meta — ia dibagikan ke
+   * owner/admin workspace lewat endpoint meta-webhook-info agar mereka
+   * bisa memasang webhook. Hanya di env server.
+   */
+  META_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
   REDIS_URL: z.string().url().optional(),
   /**
    * Pemilihan provider LLM agent (Fase 3A): 'mock' (default, deterministik,

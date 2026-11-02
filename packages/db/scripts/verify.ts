@@ -127,8 +127,9 @@ const policies = await db.query<{ count: string }>(
 //   `platform_audit` pada audit_logs (Fase 6C, migrasi 0022)
 // + lengan pindai `system_purge_scan` pada channel_accounts
 //   (Fase 6I, migrasi 0023)
-// + `tenant_isolation` pada profile_photos (Fase 6D, migrasi 0025) = 37.
-assert.equal(Number(policies.rows[0].count), 37);
+// + `tenant_isolation` pada profile_photos (Fase 6D, migrasi 0025)
+// + 4 policy `meta_delivery_scan` (Fase 7A, migrasi 0026) = 41.
+assert.equal(Number(policies.rows[0].count), 41);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -977,6 +978,103 @@ try {
 assert.equal(photoDupeBlocked, true);
 console.log(
   "[18] Fase 6D: profile_photos terisolasi per tenant (konteks A hanya baris A, bytea utuh 4 byte, insert lintas ditolak), unik satu foto per (tenant, jenis pemilik, pemilik): OK",
+);
+
+// ---------- 19. Fase 7A: Meta (Messenger + Instagram) ----------
+// Migrasi 0026: (a) kolom public_handle ada di channel_accounts;
+// (b) lengan `meta_delivery_scan` — tanpa flag app.system_delivery,
+// role aplikasi tidak melihat baris Meta apa pun di luar konteks
+// tenant; dengan 'meta' hanya baris messenger/instagram lintas tenant
+// yang terbuka (akun telegram TIDAK ikut), dan query cerminan poller
+// core hanya menghasilkan antrean Meta dengan alamat penerima yang
+// teresolusi (coalesce provider_chat_id → identitas kontak).
+const META_ACC_A = "12121212-1212-4121-8121-121212121212";
+const META_ACC_B = "34343434-3434-4343-8434-343434343434";
+const META_CONV_A = "56565656-5656-4565-8565-565656565656";
+const META_CONV_B = "78787878-7878-4787-8787-787878787878";
+const contactB = await db.query<{ id: string }>(
+  `SELECT id FROM contacts WHERE tenant_id = $1 LIMIT 1`,
+  [TENANT_B],
+);
+const CONTACT_B = contactB.rows[0].id;
+await db.query(
+  `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, display_name, status, public_handle)
+   VALUES ($1, $3, 'messenger', 'page_verify_a', 'Page Uji A', 'connected', 'pageujia'),
+          ($2, $4, 'instagram', 'ig_verify_b', 'IG Uji B', 'connected', 'igujib'),
+          ('90909090-9090-4909-8909-909090909090', $3, 'telegram', '777999', 'Bot Uji Meta', 'connected', 'bot_meta')`,
+  [META_ACC_A, META_ACC_B, TENANT_A, TENANT_B],
+);
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider, provider_chat_id)
+   VALUES ($1, $3, $5, $7, 'messenger', 'psid_verify_a'),
+          ($2, $4, $6, $8, 'instagram', 'igsid_verify_b')`,
+  [META_CONV_A, META_CONV_B, TENANT_A, TENANT_B, META_ACC_A, META_ACC_B, CONTACT_A, CONTACT_B],
+);
+await db.query(
+  `INSERT INTO channel_identities (tenant_id, contact_id, channel_account_id, provider, external_user_id)
+   VALUES ($1, $3, $5, 'messenger', 'psid_verify_a'),
+          ($2, $4, $6, 'instagram', 'igsid_verify_b')`,
+  [TENANT_A, TENANT_B, CONTACT_A, CONTACT_B, META_ACC_A, META_ACC_B],
+);
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+   VALUES ($1, $3, 'outbound', 'user', 'text', 'Balasan messenger uji', 'queued'),
+          ($2, $4, 'outbound', 'user', 'text', 'Balasan instagram uji', 'queued')`,
+  [TENANT_A, TENANT_B, META_CONV_A, META_CONV_B],
+);
+const metaCol = await db.query<{ column_name: string }>(
+  `SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'channel_accounts' AND column_name = 'public_handle'`,
+);
+assert.deepEqual(metaCol.rows.map((r) => r.column_name), ["public_handle"]);
+const metaSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noFlag = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM channel_accounts
+      WHERE provider IN ('messenger', 'instagram')`,
+  );
+  await tx.query(`SELECT set_config('app.system_delivery', 'meta', true)`);
+  const scanAccounts = await tx.query<{ id: string }>(
+    `SELECT id FROM channel_accounts ORDER BY id`,
+  );
+  const scanConvs = await tx.query<{ id: string }>(
+    `SELECT id FROM conversations ORDER BY id`,
+  );
+  const scanQueue = await tx.query<{ content_text: string; recipient: string }>(
+    `SELECT m.content_text,
+            coalesce(cv.provider_chat_id, ci.external_user_id) AS recipient
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_accounts ca ON ca.id = cv.channel_account_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.direction = 'outbound' AND m.status = 'queued'
+      ORDER BY m.content_text`,
+  );
+  await tx.query(`SELECT set_config('app.system_delivery', 'telegram', true)`);
+  const telegramFlagMeta = await tx.query<{ id: string }>(
+    `SELECT id FROM channel_accounts
+      WHERE provider IN ('messenger', 'instagram')`,
+  );
+  return { noFlag, scanAccounts, scanConvs, scanQueue, telegramFlagMeta };
+});
+assert.equal(metaSeen.noFlag.rows[0].n, "0");
+assert.deepEqual(
+  metaSeen.scanAccounts.rows.map((r) => r.id),
+  [META_ACC_A, META_ACC_B],
+);
+assert.deepEqual(
+  metaSeen.scanConvs.rows.map((r) => r.id),
+  [META_CONV_A, META_CONV_B],
+);
+assert.deepEqual(
+  metaSeen.scanQueue.rows.map((r) => `${r.content_text}:${r.recipient}`),
+  ["Balasan instagram uji:igsid_verify_b", "Balasan messenger uji:psid_verify_a"],
+);
+assert.equal(metaSeen.telegramFlagMeta.rows.length, 0);
+console.log(
+  "[19] Fase 7A: kolom public_handle ada; pindai app.system_delivery='meta' hanya membuka akun/percakapan messenger+instagram lintas tenant (telegram tertutup), antrean poller Meta teresolusi penerimanya; flag 'telegram' tidak membuka baris Meta: OK",
 );
 
 await db.close();

@@ -50,6 +50,10 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.TELEGRAM_TOKEN_INVALID");
     case "TELEGRAM_BOT_ALREADY_CONNECTED":
       return t("errors.TELEGRAM_BOT_ALREADY_CONNECTED");
+    case "META_TOKEN_INVALID":
+      return t("errors.META_TOKEN_INVALID");
+    case "META_ACCOUNT_ALREADY_CONNECTED":
+      return t("errors.META_ACCOUNT_ALREADY_CONNECTED");
     case "CHANNEL_DELETE_CONFIRMATION_MISMATCH":
       return t("errors.CHANNEL_DELETE_CONFIRMATION_MISMATCH");
     case "CHANNEL_ALREADY_TRASHED":

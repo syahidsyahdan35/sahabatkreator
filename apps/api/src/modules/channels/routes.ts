@@ -4,12 +4,14 @@ import {
   ChannelAccountListResponseSchema,
   ChannelAccountResponseSchema,
   CreateChannelRequestSchema,
+  MetaWebhookInfoResponseSchema,
   TrashChannelRequestSchema,
   type ChannelAccountResponse,
 } from "@sahabat-kreator/contracts";
 import {
   channelConfirmationName,
   channelPurgeAt,
+  createMetaChannelAccount,
   createTelegramChannelAccount,
   createWebchatChannelAccount,
   decryptChannelSecret,
@@ -27,12 +29,20 @@ import {
   markChannelAccountTrashed,
   restoreChannelAccount,
   setChannelAccountStatus,
+  storeProfilePhoto,
+  updateMetaChannelAccountCredentials,
   updateTelegramChannelAccountCredentials,
+  type MetaProvider,
 } from "@sahabat-kreator/core";
 import {
   TelegramApiError,
   TelegramBotApiClient,
 } from "@sahabat-kreator/channel-telegram";
+import {
+  MetaGraphClient,
+  MetaGraphError,
+} from "@sahabat-kreator/channel-messenger";
+import { META_GRAPH_API_VERSION } from "@sahabat-kreator/config";
 import type { ChannelAccount } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
@@ -51,6 +61,7 @@ function serializeChannel(
     externalId: row.externalId,
     displayName: row.displayName,
     botUsername: row.botUsername,
+    publicHandle: row.publicHandle,
     avatarUrl,
     status: row.status,
     confirmationName: channelConfirmationName(row),
@@ -183,8 +194,18 @@ export interface ChannelsModuleOptions {
   channelTokenSecret?: string;
   /** Base URL Bot API (env TELEGRAM_API_BASE; default api.telegram.org). */
   telegramApiBase?: string;
-  /** URL publik aplikasi (env BETTER_AUTH_URL) — dasar URL webhook Telegram. */
+  /** URL publik aplikasi (env BETTER_AUTH_URL) — dasar URL webhook Telegram & Meta. */
   publicBaseUrl?: string;
+  /** Base URL Graph API (env META_API_BASE; default graph.facebook.com). */
+  metaApiBase?: string;
+  /**
+   * Verify token webhook Meta (env META_WEBHOOK_VERIFY_TOKEN) — nilai
+   * yang KITA tentukan; dibagikan ke owner/admin lewat endpoint
+   * meta-webhook-info agar bisa ditempel ke dashboard Meta App.
+   */
+  metaWebhookVerifyToken?: string;
+  /** Apakah env META_APP_SECRET sudah diset (boolean saja — nilainya tidak pernah masuk modul ini). */
+  metaAppSecretConfigured?: boolean;
 }
 
 /**
@@ -197,12 +218,16 @@ export interface ChannelsModuleOptions {
  *   POST   /tenants/:tenantId/channels/:channelId/trash   buang ke Sampah
  *   POST   /tenants/:tenantId/channels/:channelId/restore pulihkan dari Sampah
  *   GET    /tenants/:tenantId/channels/:channelId/export  unduh ekspor JSON
+ *   GET    /tenants/:tenantId/channels/meta-webhook-info  info wiring webhook Meta (Fase 7A, owner/admin)
  * Hapus permanen BERPENJAGA (Fase 6I): membuang = disconnect penuh (bila
  * masih terhubung) + `trashed_at`; masa tenggang 30 hari di Sampah bisa
  * dipulihkan/diekspor, sesudahnya worker meng-purge permanen. Purge
  * manual sengaja TIDAK dibuat — masa tenggang adalah pengamannya.
- * Provider Meta belum bisa dihubungkan → 422 CHANNEL_NOT_AVAILABLE_YET
- * (jujur; koneksi Meta tiba di fase channel-nya bersama user).
+ * Provider yang belum bisa dihubungkan (whatsapp) → 422
+ * CHANNEL_NOT_AVAILABLE_YET secara jujur. Messenger & Instagram (Fase
+ * 7A) dihubungkan token-based seperti Telegram: Page Access Token
+ * divalidasi ke Graph, disimpan terenkripsi; webhook-nya TUNGGAL milik
+ * platform (modul meta), bukan per akun.
  * Untuk webchat, respons POST memuat siteKey di `externalId` — kunci
  * publik yang dipasang tenant di situsnya. Untuk telegram, token bot
  * TIDAK PERNAH muncul di respons: yang tampil hanya status + username bot.
@@ -235,6 +260,7 @@ export function createChannelsRoutes(
     app.post(`${base}/:channelId/trash`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.post(`${base}/:channelId/restore`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.get(`${base}/:channelId/export`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(`${base}/meta-webhook-info`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     return app;
   }
 
@@ -288,6 +314,20 @@ export function createChannelsRoutes(
         userId: appUser.id,
         displayName: parsed.data.displayName,
         botToken: parsed.data.botToken,
+      });
+    }
+    if (
+      parsed.data.provider === "messenger" ||
+      parsed.data.provider === "instagram"
+    ) {
+      return connectMeta(c, bundle, opts, {
+        tenantId: tenant.id,
+        userId: appUser.id,
+        provider: parsed.data.provider,
+        displayName: parsed.data.displayName,
+        pageAccessToken: parsed.data.pageAccessToken,
+        pageId: parsed.data.pageId,
+        igUserId: parsed.data.igUserId,
       });
     }
     if (parsed.data.provider !== "webchat") {
@@ -365,6 +405,30 @@ export function createChannelsRoutes(
     const rows = await listTrashedChannelAccounts(bundle.db, { tenantId: tenant.id });
     const body = ChannelAccountListResponseSchema.parse({
       channels: rows.map((row) => serializeChannel(row)),
+    });
+    return c.json(body);
+  });
+
+  /**
+   * Info pemasangan webhook Meta (Fase 7A): URL webhook publik platform
+   * + verify token untuk ditempel ke dashboard Meta App (bidang Webhook:
+   * Callback URL + Verify Token, lalu subscribe ke field `messages`).
+   * Hanya owner/admin — verify token adalah nilai yang kita tentukan
+   * sendiri (bukan kredensial Meta), tetapi tetap tidak dibagikan ke
+   * peran yang tidak memasang integrasi. App secret TIDAK pernah
+   * termasuk dalam respons ini.
+   */
+  app.get(`${base}/meta-webhook-info`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can view Meta webhook settings");
+    }
+    const baseUrl = (opts.publicBaseUrl ?? "").replace(/\/+$/, "");
+    const body = MetaWebhookInfoResponseSchema.parse({
+      webhookUrl: `${baseUrl}/api/meta/webhook`,
+      verifyToken: opts.metaWebhookVerifyToken ?? null,
+      appSecretConfigured: opts.metaAppSecretConfigured ?? false,
     });
     return c.json(body);
   });
@@ -783,4 +847,234 @@ async function reviveTelegramAccount(
   });
 
   return c.json(serializeChannel(updated), 200);
+}
+
+/**
+ * Menghubungkan akun Meta (Fase 7A — Messenger & Instagram, token-based
+ * v1 meniru pola Telegram 6A):
+ * 1. Validasi ke Graph: `GET /{id}?fields=name,username` dengan token
+ *    yang ditempel. Messenger memvalidasi Page-nya; Instagram
+ *    memvalidasi akun IG-nya DAN Page yang terhubung (token harus milik
+ *    Page itu). Graph menolak → 422 META_TOKEN_INVALID; Graph tak
+ *    terjangkau → 503.
+ * 2. Penjaga satu akun = satu koneksi (pola hotfix Telegram, kode
+ *    generik Meta): akun yang sama masih AKTIF di workspace lain → 409
+ *    META_ACCOUNT_ALREADY_CONNECTED (tanpa baris baru). Di workspace
+ *    ini: 'connected' → idempoten 200; 'disconnected'/'error' → baris
+ *    yang sama dihidupkan lagi (revive).
+ * 3. Buat akun: external_id = Page ID (messenger) / ID akun IG
+ *    (instagram); displayName dari form atau nama Graph; handle publik
+ *    (username) disimpan; token TERENKRIPSI (AES-256-GCM). Tidak ada
+ *    pendaftaran webhook per akun — webhook Meta adalah milik platform
+ *    (satu URL untuk semua akun, dipasang sekali di Meta App).
+ * 4. Foto profil Page/akun IG diambil & disimpan (pola 6D,
+ *    fire-and-forget).
+ */
+async function connectMeta(
+  c: Parameters<typeof apiError>[0],
+  bundle: AuthBundle,
+  opts: ChannelsModuleOptions,
+  input: {
+    tenantId: string;
+    userId: string;
+    provider: MetaProvider;
+    displayName?: string;
+    pageAccessToken?: string;
+    pageId?: string;
+    igUserId?: string;
+  },
+) {
+  if (!input.pageAccessToken) {
+    return apiError(c, 400, "VALIDATION_ERROR", "pageAccessToken is required for Meta channels");
+  }
+  // external_id akun: messenger = Page ID; instagram = ID akun IG.
+  const accountExternalId =
+    input.provider === "instagram" ? input.igUserId : input.pageId;
+  if (!accountExternalId) {
+    return apiError(
+      c,
+      400,
+      "VALIDATION_ERROR",
+      input.provider === "instagram"
+        ? "igUserId is required for instagram"
+        : "pageId is required for messenger",
+    );
+  }
+  if (input.provider === "instagram" && !input.pageId) {
+    return apiError(c, 400, "VALIDATION_ERROR", "pageId (the connected Facebook Page) is required for instagram");
+  }
+  if (!opts.channelTokenSecret) {
+    return apiError(c, 503, "INTERNAL_ERROR", "Meta is not configured");
+  }
+  const client = new MetaGraphClient({
+    baseUrl: opts.metaApiBase,
+    apiVersion: META_GRAPH_API_VERSION,
+    accessToken: input.pageAccessToken,
+  });
+
+  // Validasi token + ambil identitas publik akun dari Graph.
+  let profile;
+  try {
+    profile = await client.getObjectProfile(accountExternalId);
+    if (input.provider === "instagram" && input.pageId) {
+      // Token juga harus berlaku untuk Page yang terhubung — inilah
+      // satu-satunya guna Page ID pada connect IG (tidak disimpan).
+      await client.getObjectProfile(input.pageId);
+    }
+  } catch (err) {
+    if (err instanceof MetaGraphError) {
+      if (err.status === 0) {
+        return apiError(c, 503, "INTERNAL_ERROR", "Meta Graph API is unreachable");
+      }
+      return apiError(c, 422, "META_TOKEN_INVALID", "Meta rejected the page access token or account id");
+    }
+    return apiError(c, 503, "INTERNAL_ERROR", "Meta Graph API is unreachable");
+  }
+
+  let encryptedAccessToken: string;
+  try {
+    encryptedAccessToken = encryptChannelSecret(
+      opts.channelTokenSecret,
+      input.pageAccessToken,
+    );
+  } catch {
+    return apiError(c, 503, "INTERNAL_ERROR", "Channel credential encryption is not configured");
+  }
+
+  // Penjaga "satu akun = satu koneksi": akun ini tidak boleh AKTIF di
+  // workspace lain (pesan Page/IG hanya boleh masuk ke satu inbox).
+  const existing = await lookupChannelAccountsByProviderExternalId(
+    bundle.db,
+    input.provider,
+    accountExternalId,
+  );
+  const activeElsewhere = existing.find(
+    (r) => r.tenantId !== input.tenantId && r.status !== "disconnected",
+  );
+  if (activeElsewhere) {
+    return apiError(
+      c,
+      409,
+      "META_ACCOUNT_ALREADY_CONNECTED",
+      "This Meta account is already connected to another workspace",
+    );
+  }
+  const own = existing.find((r) => r.tenantId === input.tenantId);
+  if (own) {
+    if (own.status === "connected") {
+      const row = await getChannelAccount(
+        bundle.db,
+        { tenantId: input.tenantId },
+        own.id,
+      );
+      if (row) return c.json(await serializeChannelWithAvatar(bundle, row), 200);
+    }
+    // Akun milik workspace ini 'disconnected'/'error': hidupkan lagi
+    // baris yang sama dengan kredensial baru (pola revive Telegram).
+    const updated = await updateMetaChannelAccountCredentials(
+      bundle.db,
+      { tenantId: input.tenantId },
+      own.id,
+      {
+        encryptedAccessToken,
+        publicHandle: profile.username,
+        graphName: profile.name,
+        displayName: input.displayName,
+        status: "connected",
+      },
+    );
+    if (!updated) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    scheduleMetaAccountPhoto(bundle, client, input.tenantId, updated.id, accountExternalId);
+    return c.json(serializeChannel(updated), 200);
+  }
+
+  let row: ChannelAccount;
+  try {
+    row = await createMetaChannelAccount(
+      bundle.db,
+      { tenantId: input.tenantId, userId: input.userId },
+      {
+        provider: input.provider,
+        accountExternalId,
+        graphName: profile.name,
+        publicHandle: profile.username,
+        displayName: input.displayName,
+        encryptedAccessToken,
+        graphApiVersion: META_GRAPH_API_VERSION,
+      },
+    );
+  } catch {
+    // Balapan dengan connect lain (pola Telegram): petakan ulang dari
+    // keadaan terbaru — milik workspace lain → 409 yang sama; milik
+    // workspace ini → kembalikan akun pemenang balapan (idempoten).
+    const now = await lookupChannelAccountsByProviderExternalId(
+      bundle.db,
+      input.provider,
+      accountExternalId,
+    );
+    const other = now.find(
+      (r) => r.tenantId !== input.tenantId && r.status !== "disconnected",
+    );
+    if (other) {
+      return apiError(
+        c,
+        409,
+        "META_ACCOUNT_ALREADY_CONNECTED",
+        "This Meta account is already connected to another workspace",
+      );
+    }
+    const ownNow = now.find(
+      (r) => r.tenantId === input.tenantId && r.status !== "disconnected",
+    );
+    if (ownNow) {
+      const winner = await getChannelAccount(
+        bundle.db,
+        { tenantId: input.tenantId },
+        ownNow.id,
+      );
+      if (winner) return c.json(await serializeChannelWithAvatar(bundle, winner), 200);
+    }
+    return apiError(
+      c,
+      422,
+      "CHANNEL_NOT_CONNECTED",
+      "This Meta account is already connected to this workspace",
+    );
+  }
+
+  scheduleMetaAccountPhoto(bundle, client, input.tenantId, row.id, accountExternalId);
+  return c.json(serializeChannel(row), 201);
+}
+
+/**
+ * Ambil & simpan foto profil Page/akun IG sesudah connect (Fase 7A,
+ * pola 6D): best-effort fire-and-forget memakai token yang sedang di
+ * tangan — kegagalan foto tidak pernah menggagalkan connect. Byte
+ * disimpan ke `profile_photos`; URL CDN Graph tidak diedarkan ke klien.
+ */
+function scheduleMetaAccountPhoto(
+  bundle: AuthBundle,
+  client: MetaGraphClient,
+  tenantId: string,
+  channelAccountId: string,
+  accountExternalId: string,
+): void {
+  void (async () => {
+    try {
+      const picture = await client.getAccountPicture(accountExternalId);
+      if (!picture) return;
+      await storeProfilePhoto(bundle.db, { tenantId }, {
+        ownerType: "channel_account",
+        ownerId: channelAccountId,
+        contentType: picture.contentType,
+        data: picture.data,
+      });
+    } catch {
+      console.error(
+        `[meta] pengambilan foto profil akun ${channelAccountId} gagal`,
+      );
+    }
+  })();
 }

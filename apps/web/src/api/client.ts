@@ -27,6 +27,7 @@ import type {
   KbDocumentResponse,
   MessageListResponse,
   MessageResponse,
+  MetaWebhookInfoResponse,
   PaymentLinkListResponse,
   PaymentLinkResponse,
   PlatformSettingKey,
@@ -224,14 +225,36 @@ export const api = {
       );
       return body.channels;
     },
-    /** POST /api/tenants/:tenantId/channels {provider, displayName, botToken?} (1F webchat, 6A telegram). */
+    /**
+     * POST /api/tenants/:tenantId/channels — buat/hubungkan channel
+     * (1F webchat, 6A telegram, 7A messenger/instagram dengan
+     * pageId/igUserId/pageAccessToken).
+     */
     create(
       tenantId: string,
-      input: { provider: string; displayName?: string; botToken?: string },
+      input: {
+        provider: string;
+        displayName?: string;
+        botToken?: string;
+        pageId?: string;
+        igUserId?: string;
+        pageAccessToken?: string;
+      },
     ): Promise<ChannelAccountResponse> {
       return request<ChannelAccountResponse>(
         `/api/tenants/${tenantId}/channels`,
         { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/channels/meta-webhook-info — URL webhook
+     * Meta + verify token untuk dipasang di Meta App (Fase 7A).
+     * Owner/admin saja; peran lain menerima 403 (UI menyembunyikan panel).
+     */
+    metaWebhookInfo(tenantId: string): Promise<MetaWebhookInfoResponse> {
+      return request<MetaWebhookInfoResponse>(
+        `/api/tenants/${tenantId}/channels/meta-webhook-info`,
+        { method: "GET" },
       );
     },
     /** DELETE /api/tenants/:tenantId/channels/:channelId — putuskan koneksi (hotfix Telegram); riwayat percakapan tidak dihapus. */

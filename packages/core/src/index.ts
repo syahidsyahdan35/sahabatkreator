@@ -163,6 +163,23 @@ export {
   type TelegramMyChatMemberInput,
 } from "./telegram";
 export {
+  createMetaChannelAccount,
+  updateMetaChannelAccountCredentials,
+  resolveMetaAccountByExternalId,
+  recordMetaInboundMessage,
+  fetchAndStoreMetaContactProfile,
+  listQueuedMetaDeliveries,
+  metaContactFallbackName,
+  type MetaProvider,
+  type CreateMetaChannelInput,
+  type UpdateMetaCredentialsInput,
+  type MetaAccountRef,
+  type RecordMetaInboundInput,
+  type RecordMetaInboundResult,
+  type FetchMetaContactProfileInput,
+  type MetaQueuedDelivery,
+} from "./meta";
+export {
   PROFILE_PHOTO_MAX_EDGE,
   deleteChannelAccountProfilePhoto,
   fetchAndStoreTelegramProfilePhoto,
