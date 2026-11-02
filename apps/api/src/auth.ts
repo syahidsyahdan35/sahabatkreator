@@ -70,6 +70,64 @@ function createAuthInstance(
       },
     }),
     emailAndPassword: { enabled: true },
+    /**
+     * Rate limit auth (Fase 6B — menutup catatan pra-produksi QA-1).
+     *
+     * Masalah lama: Better Auth mengunci rate limit per IP sumber
+     * koneksi. Di balik Cloudflare Tunnel semua trafik tampak berasal
+     * dari 127.0.0.1 (cloudflared), sehingga ember per-IP TERBAGI untuk
+     * semua pengguna — pendaftaran ke-±9 yang cepat dari mana pun sudah
+     * menghabiskan jatah bersama (aturan khusus bawaan library untuk
+     * /sign-in|/sign-up adalah 3 req/10 dtk per IP+jalur).
+     *
+     * Perbaikan: identitas IP diambil dari header lewat
+     * `advanced.ipAddress.ipAddressHeaders` di bawah (urutan diperiksa
+     * dari depan; IP valid pertama yang menang — lihat getIp di
+     * better-auth). `cf-connecting-ip` adalah IP pengunjung asli yang
+     * diset edge Cloudflare.
+     *
+     * ASUMSI KEPERCAYAAN (penting): header `cf-connecting-ip` hanya
+     * boleh dipercaya karena origin staging ter-bind 127.0.0.1 dan
+     * HANYA bisa dicapai lewat cloudflared — tidak ada jalur bagi klien
+     * untuk menyuntikkan header ini sendiri, dan edge Cloudflare selalu
+     * menimpa/menyetelnya dari IP koneksi sebenarnya. Bila suatu hari
+     * API diekspos langsung tanpa Cloudflare di depannya, header ini
+     * menjadi bisa dipalsukan klien dan asumsi ini WAJIB ditinjau ulang.
+     * Fallback `x-forwarded-for` (default library) dipertahankan untuk
+     * pengembangan lokal; di dev tanpa header apa pun library sendiri
+     * jatuh ke 127.0.0.1.
+     *
+     * Batas per IP ASLI (customRules menimpa aturan khusus bawaan
+     * 3/10 dtk untuk jalur ini):
+     * - sign-up: 10 req / 60 dtk per IP
+     * - sign-in: 20 req / 60 dtk per IP
+     * Jalur sensitif lain (/change-password, /change-email) sengaja
+     * tetap pada aturan khusus bawaan library yang ketat (3/10 dtk).
+     * Default global 10 dtk/100 req adalah default library, ditulis
+     * eksplisit agar konfigurasi efektif terlihat utuh di satu tempat.
+     *
+     * Penyimpanan: bawaan library = in-memory (satu proses API);
+     * penghitung reset saat API restart — dapat diterima untuk staging
+     * satu proses; untuk multi-proses gunakan storage database /
+     * secondary-storage.
+     *
+     * `enabled: true` ditulis eksplisit (default library: hanya aktif
+     * di production) agar perilaku tidak bergantung pada NODE_ENV.
+     */
+    rateLimit: {
+      enabled: true,
+      window: 10,
+      max: 100,
+      customRules: {
+        "/sign-up/*": { window: 60, max: 10 },
+        "/sign-in/*": { window: 60, max: 20 },
+      },
+    },
+    advanced: {
+      ipAddress: {
+        ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+      },
+    },
     databaseHooks: {
       user: {
         create: {
