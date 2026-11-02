@@ -501,6 +501,13 @@ function SuggestionsQueue({
     try {
       const list = await api.suggestions.list(tenantId, { status: "pending" });
       setDrafts(list);
+      // Sinkronkan badge navigasi dengan data antrean yang BARU dimuat:
+      // provider badge hanya memuat ulang saat workspace berganti atau
+      // setelah approve/reject, jadi draf yang tiba saat pemilik berada
+      // di halaman lain tidak pernah menaikkan badge (bug QA-1 — antrean
+      // terlihat berisi tetapi badge tetap kosong). Pola yang sama
+      // dengan InboxPage menyinkronkan badge unread dari daftarnya.
+      void refreshBadge();
       // Nama kontak bersifat pelengkap: ambil per kontak unik, abaikan gagal.
       const uniqueContactIds = [
         ...new Set(

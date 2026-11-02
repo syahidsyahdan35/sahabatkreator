@@ -61,6 +61,8 @@ export function InboxPage({ t, locale }: InboxPageProps) {
   const threadRef = useRef<HTMLDivElement | null>(null);
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
+  const conversationsRef = useRef<ConversationResponse[]>([]);
+  conversationsRef.current = conversations;
 
   const loadConversations = useCallback(async () => {
     if (!tenantId) return;
@@ -99,6 +101,22 @@ export function InboxPage({ t, locale }: InboxPageProps) {
         );
         if (selectedRef.current !== conversationId) return;
         setMessages(list);
+        // Server menandai percakapan terbaca saat utas dibuka (API GET
+        // messages) — sinkronkan daftar lokal & badge navigasi sekarang
+        // juga, tanpa menunggu muat ulang daftar (bug QA-1: chip unread
+        // & badge tidak pernah bersih setelah percakapan dibuka).
+        const current = conversationsRef.current;
+        if (
+          current.some(
+            (c) => c.id === conversationId && c.unreadCount > 0,
+          )
+        ) {
+          const next = current.map((c) =>
+            c.id === conversationId ? { ...c, unreadCount: 0 } : c,
+          );
+          setConversations(next);
+          setFromConversations(next);
+        }
       } catch (err) {
         if (selectedRef.current !== conversationId) return;
         setMessagesError(translateApiError(t, err));

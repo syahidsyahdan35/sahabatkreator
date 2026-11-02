@@ -138,6 +138,33 @@ export async function listMessages(
 }
 
 /**
+ * Menandai percakapan sebagai sudah dibaca pemilik (unread_count → 0).
+ * Dipanggil lapisan transport saat manusia MEMBUKA utas dari inbox —
+ * membuka percakapan adalah tindakan membaca; tanpa ini badge unread
+ * tidak pernah bersih (bug QA-1: unread hanya pernah naik dari pesan
+ * masuk webchat, tidak pernah turun). Jalur agent (agent-runtime)
+ * sengaja TIDAK lewat sini: agent membaca riwayat bukan berarti pemilik
+ * sudah membaca. No-op senyap bila percakapan bukan milik tenant ini.
+ */
+export async function markConversationRead(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  conversationId: string,
+): Promise<void> {
+  await withTenantDb(db, ctx.tenantId, async (tx) => {
+    await tx
+      .update(conversations)
+      .set({ unreadCount: 0 })
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.id, conversationId),
+        ),
+      );
+  });
+}
+
+/**
  * Membuat pesan outbound manual dari inbox (fondasi balasan manusia):
  * baris `messages` (direction=outbound, sender_type=user, status=queued),
  * memperbarui `conversations.last_message_at`, dan menulis audit

@@ -12,6 +12,7 @@ import {
   getConversationDeliveryTarget,
   listConversations,
   listMessages,
+  markConversationRead,
   markOutboundMessageSent,
   queueOutboundMessage,
   type ConversationWithSummary,
@@ -104,6 +105,11 @@ export function createInboxRoutes(bundle: AuthBundle | null, webchatHub?: Webcha
     }
     const rows = await listMessages(bundle.db, { tenantId: tenant.id }, id, query.data);
     if (!rows) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    // Membuka utas dari inbox = membaca: bersihkan unread_count agar chip
+    // daftar & badge navigasi konsisten (bug QA-1 — sebelumnya unread
+    // tidak pernah turun). Hanya jalur manusia ini; agent membaca riwayat
+    // lewat core langsung dan tidak menandai terbaca.
+    await markConversationRead(bundle.db, { tenantId: tenant.id }, id);
     const body = MessageListResponseSchema.parse({
       messages: rows.map(serializeMessage),
     });

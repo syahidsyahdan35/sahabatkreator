@@ -36,6 +36,7 @@ export {
   queueOutboundMessage,
   listQueuedOutboundMessages,
   getConversationDeliveryTarget,
+  markConversationRead,
   markOutboundMessageSent,
   type ConversationWithSummary,
   type ConversationDeliveryTarget,
