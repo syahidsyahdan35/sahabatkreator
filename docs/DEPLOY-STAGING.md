@@ -813,3 +813,63 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   dicatat apa adanya. (3) Klik UI penuh dari VM tetap dibatasi artefak
   POST proxy egress; yang terbukti adalah bundle tersaji publik (memuat
   label EN/ID sequence) + seluruh rantai HTTP/WS yang dipakai UI.
+
+---
+
+## Update Fase QA-1 — Suite Playwright E2E browser sungguhan + perbaikan bug UI/UX (2026-11-02)
+
+### Perubahan
+- **Suite baru `tests/e2e`** (paket workspace `@sahabat-kreator/e2e`,
+  Playwright 1.49.1): 13 tes dalam 8 spec — auth (3), workspace (1),
+  contacts (1), channels-webchat dua konteks browser (1), automations
+  keyword+sequence (2), agents suggest/approve/reject (1), products-pay
+  (1), shell-ux tema/bahasa/overflow/mobile (3). Selektor berbasis
+  role/teks; akun uji baru berawalan `e2e-...@sk.test` per run.
+- **Jalur eksekusi: DI SERVER terhadap `https://botara.my.id`** (POST dari
+  VM ke publik timeout — artefak proxy egress; dari server lancar).
+  Tanpa sudo: Node mandiri `~/opt/node` (v22.14.0, tarball resmi) +
+  Chromium `~/.cache/ms-playwright` + 8 library sistem yang diekstrak
+  dari `.deb` ke `~/opt/chromelibs/root` dan dipakai lewat
+  `LD_LIBRARY_PATH` (detail & perintah persis: `tests/e2e/README.md`).
+- **Bug aplikasi yang ditemukan suite & diperbaiki pada fase ini:**
+  1. *Unread inbox tidak pernah bersih.* Membuka percakapan tidak
+     menandai terbaca di mana pun (unread hanya naik dari webchat).
+     Perbaikan: `markConversationRead` di core — dipanggil route API
+     GET messages (jalur manusia; agent membaca riwayat lewat core
+     langsung dan TIDAK menandai terbaca) — dan InboxPage menyinkronkan
+     daftar lokal + badge navigasi segera setelah utas dibuka.
+  2. *Badge persetujuan AI Agents basi.* `PendingApprovalsProvider`
+     hanya memuat ulang saat workspace berganti / setelah approve-reject,
+     sehingga draf yang tiba saat pemilik di halaman lain tidak pernah
+     menaikkan badge (antrean berisi, badge kosong). Perbaikan:
+     `SuggestionsQueue` menyinkronkan badge setiap selesai memuat
+     antrean (pola yang sama dengan badge unread Inbox).
+- Penyesuaian TES (bukan aplikasi): assertion gelembung utas dibatasi ke
+  elemen `<p>` gelembung agar tidak ambigu dengan `<span>` cuplikan
+  daftar (strict-mode violation di viewport mobile); helper auth
+  menunggu & mengirim ulang saat menabrak rate limit (lihat bawah).
+- Deploy perbaikan: build api+web di VM → rsync → proses API & web
+  dihentikan (pola lama) → systemd mengangkat bundle `index-Zn6H821K.js`.
+  Worker tidak berubah perilaku (fungsi core baru tidak dipakainya).
+
+### Verifikasi Fase QA-1
+- Run pertama (sebelum perbaikan): **9 lulus / 4 gagal** — agents
+  (badge), channels-webchat (unread), shell-ux overflow (rate limit),
+  shell-ux mobile (selektor ambigu).
+- Run akhir setelah perbaikan terdeploy: **13/13 LULUS (3,3 menit)**
+  dari server terhadap URL publik asli, termasuk adegan dua konteks
+  browser (pengunjung widget ↔ pemilik dashboard) yang selama fase
+  1E–4A hanya dibuktikan lewat rantai HTTP/WS.
+- `/api/health` publik ok; bundle publik `index-Zn6H821K.js` sama dengan
+  build perbaikan.
+
+### Catatan operasional: rate limit auth di balik tunnel
+- Suite menabrak rate limit bawaan Better Auth (kode kita tidak
+  mengonfigurasi rate limit apa pun) setelah ±9 pendaftaran akun dalam
+  satu jendela dari server: form register menjawab "Too many requests".
+  Karena staging berada di balik Cloudflare Tunnel, API melihat semua
+  lalu lintas dari IP yang sama → jendela rate limit per-IP TERBAGI
+  untuk semua pengguna. Untuk staging ini dapat diterima; sebelum
+  production, putuskan dengan sadar: percayai header IP dari tunnel /
+  naikkan batas / nonaktifkan untuk jalur tertentu — jangan biarkan
+  default ini mengunci banyak pengguna NAT di belakang satu bucket.
