@@ -5662,3 +5662,85 @@ dashboard.
   lenyap saat reset 11A). (3) `check:drift` bersifat statis (baca
   sumber) — ia menjaga PEMETAAN permukaan, bukan perilaku runtime;
   perilaku tetap dibuktikan rantai + verify-sdk/mcp tiap fase.
+
+---
+
+## Update Fase 11A — Normalisasi skema (migrasi 0040) + RESET TOTAL staging (2026-11-03)
+
+### Normalisasi (audit penuh: `docs/DB-NORMALIZATION-11A.md`)
+
+- Migrasi **0040_normalization** (jurnal kini **41 entri**): menjatuhkan
+  dua kolom warisan yang terbukti nol pemakaian kode **dan** 0 baris
+  non-NULL di staging — `contacts.avatar_url` (warisan pra-6D; avatar
+  kini dari `profile_photos`) dan `messages.provider_cost` (sisa desain
+  lama; biaya nyata hidup di `usage_ledger`) — serta menambah **12 index
+  FK** pada kolom yang nyata difilter/di-join (pola merge kontak 9B,
+  join flows/products, tautan komentar & penerima broadcast). Skema
+  Drizzle diselaraskan (2 kolom dihapus, 12 index ditambah).
+- Sengaja TIDAK diubah (alasan per temuan di dokumen audit): tipe ID
+  (semua PK/FK internal sudah `uuid`→`uuid`; `users.auth_user_id text`
+  adalah satu-satunya jembatan Better Auth; `actor_id`/`ref_id`
+  polimorfik secara desain), semua kolom JSONB (konfigurasi polimorfik,
+  custom_fields tenant, payload/jejak apa adanya), dan 57 policy RLS
+  (pola `tenant_isolation` seragam + lengan sempit SELECT-only yang
+  masing-masing unik kebutuhannya).
+- **Utang perkakas yang kini terdokumentasi**: rantai snapshot
+  drizzle-kit berhenti di 0026 sejak migrasi kustom tulis-tangan dipakai,
+  sehingga `drizzle-kit generate` TIDAK bisa dipakai terhadap tree ini
+  (mengusulkan pembuatan ulang tabel 0027+). Jalur hidup = jurnal +
+  file SQL lewat `drizzle-kit migrate` (DATABASE_URL wajib
+  `MIGRATION_DATABASE_URL`) dan verify PGlite dari nol. Migrasi baru
+  ditulis tangan mengikuti pola 0027–0039 (SQL + entri jurnal manual,
+  `when` menaik dari entri terakhir).
+
+### Smoke perawan di DB buangan (sebelum staging dihancurkan)
+
+- DB `sk_virgin_test` dibuat di container yang sama, dimigrasi PENUH
+  dari nol (jurnal 41, 44 tabel, 57 policy, 162 index, grant `sk_app`
+  via default privileges), lalu API+worker chain (port 3211, Redis DB 6,
+  `LLM_PROVIDER=mock`, mock Telegram lokal) menjalankan baterai lintas
+  fitur: **25 PASS / 0 FAIL** — register → sesi → workspace → KB
+  (chunk ≥1) → agent auto → webchat (agent menjawab memuat fakta KB
+  "349" — retrieval hidup) → flow buat/aktivasi/jalan membalas
+  pengunjung → telegram connect via mock (setWebhook+secret tertangkap)
+  → webhook inbound → percakapan tercipta → broadcast completed &
+  sendMessage tertangkap mock → API v1 (kunci penuh 200; kunci
+  `contacts:read`-only → 403 di `/v1/broadcasts`, tetap 200 di
+  `/v1/contacts`). Dua lari awal menemukan artefak skrip sendiri
+  (field `contentText`; bot mock yang sama ditolak 409
+  `TELEGRAM_BOT_ALREADY_CONNECTED` oleh penjaga satu-bot-satu-workspace
+  pada lari kedua — perilaku produk yang benar), bukan cacat produk.
+  DB buangan di-drop & Redis chain di-flush sesudahnya.
+
+### Reset total staging
+
+- **Backup pengaman satu arah** (TIDAK di-restore): pg_dump pra-reset di
+  server `/home/ubuntu/backups/sahabat-kreator-pre-reset-20261103.sql.gz`
+  (1.075.082 byte, `gzip -t` OK). DB hasil reset tetap perawan; berkas
+  ini hanya parasut darurat di disk server.
+- Redis proyek di-FLUSHALL (container khusus proyek) agar antrean/sesi
+  hantu tidak merujuk tenant yang sudah tidak ada.
+- `sahabat_kreator_staging` di-drop (koneksi diblokir + backend
+  di-terminate lebih dulu) dan dibuat ulang dengan pemilik
+  `sk_migration`; default privileges Fase 1B dipasang ulang SEBELUM
+  migrasi; migrasi penuh dari nol dengan `DATABASE_URL=
+  $MIGRATION_DATABASE_URL` → **jurnal 41 entri**.
+- Verifikasi pasca-reset (read-only): 44 tabel / 57 policy / 162 index,
+  ekstensi `vector` aktif, dua kolom terjatuh absen, dan **semua 44
+  tabel 0 baris** (termasuk `auth_user`, `users`, `tenants`,
+  `platform_settings` = kunci Panel Admin ikut terhapus sesuai perintah
+  user, `channel_accounts`, `plans`). Empat service di-restart via kill
+  MainPID eksplisit (tanpa pkill generik) dan mengangkat dist baru;
+  health publik ok, `/` & `/register` publik 200, worker boot bersih
+  (resolusi LLM awal = mock karena panel kosong — kembali ke OpenRouter
+  begitu user mengisi ulang kunci di Panel Admin).
+- Sesudah titik reset TIDAK ada data uji yang ditulis ke DB perawan.
+  Konsekuensinya `verify-sdk`/`verify-mcp` terhadap staging SENGAJA
+  tidak dijalankan pada fase ini (keduanya membutuhkan tenant+kunci
+  dan akan menulis data uji); permukaan v1 dibuktikan oleh smoke
+  perawan di atas + `check:drift`. `.env.staging` TIDAK disentuh
+  sepanjang fase: sha256 tetap `9c1ded2a…` byte-identik.
+- Langkah user berikutnya (ujicoba dari awal): daftar lagi dengan
+  `mas@romo.com` (allowlist admin platform berbasis env, jadi hak admin
+  kembali otomatis), isi ulang kunci Panel Admin (OpenRouter, Meta,
+  R2), hubungkan ulang channel.
