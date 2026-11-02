@@ -147,6 +147,9 @@ const EXPECTED_TOOLS = [
   "list_knowledge_documents",
   "get_knowledge_document",
   "get_knowledge_stats",
+  // Fase 13B: growth links — permukaan BACA.
+  "list_growth_links",
+  "get_growth_link",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -192,6 +195,9 @@ try {
       hintOf("list_knowledge_documents") === true &&
       hintOf("get_knowledge_document") === true &&
       hintOf("get_knowledge_stats") === true &&
+      // Fase 13B: growth links adalah BACA.
+      hintOf("list_growth_links") === true &&
+      hintOf("get_growth_link") === true &&
       hintOf("create_contact") === false &&
       hintOf("update_contact") === false &&
       hintOf("send_message") === false &&
@@ -383,6 +389,27 @@ try {
       ? `chunks=${kbStats.embeddedChunks}/${kbStats.totalChunks}`
       : resultText(kbStatsResult),
   );
+
+  // Fase 13B: growth links (BACA) — daftar + get pertama bila ada.
+  const growthResult = await call(client, "list_growth_links");
+  const growthList = resultJson<{
+    links: Array<{ id: string; slug: string; stats: { clicks: number } }>;
+  }>(growthResult);
+  check(
+    "list_growth_links",
+    !growthResult.isError && !!growthList && Array.isArray(growthList.links),
+    growthList ? `count=${growthList.links.length}` : resultText(growthResult),
+  );
+  if (growthList && growthList.links.length > 0) {
+    const first = growthList.links[0]!;
+    const oneResult = await call(client, "get_growth_link", { linkId: first.id });
+    const one = resultJson<{ id: string; slug: string }>(oneResult);
+    check(
+      "get_growth_link konsisten dengan daftar",
+      !oneResult.isError && !!one && one.id === first.id && one.slug === first.slug,
+      one ? `slug=${one.slug}` : resultText(oneResult),
+    );
+  }
 } finally {
   await client.close();
 }

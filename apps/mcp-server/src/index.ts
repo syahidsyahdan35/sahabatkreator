@@ -510,6 +510,29 @@ server.registerTool(
   async () => run(() => client.getKnowledgeStats()),
 );
 
+server.registerTool(
+  "list_growth_links",
+  {
+    description:
+      "Daftar tautan growth workspace (scope growth_links:read, Fase 13B): slug publik, channel tujuan, dan statistik turunan event (klik, tampilan picker, konversi). Hasil: { links }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listGrowthLinks()),
+);
+
+server.registerTool(
+  "get_growth_link",
+  {
+    description: "Satu tautan growth beserta statistiknya (scope growth_links:read).",
+    inputSchema: {
+      linkId: z.string().uuid().describe("Id tautan growth (dari list_growth_links)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ linkId }) => run(() => client.getGrowthLink(linkId)),
+);
+
 await server.connect(new StdioServerTransport());
 console.error(
   `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl} — tier: ${

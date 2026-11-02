@@ -18,6 +18,8 @@ import type {
   FlowListResponse,
   FlowResponse,
   FlowTemplateListResponse,
+  GrowthLinkListResponse,
+  GrowthLinkResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -75,6 +77,8 @@ export type {
   FlowListResponse,
   FlowResponse,
   FlowTemplateListResponse,
+  GrowthLinkListResponse,
+  GrowthLinkResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -432,5 +436,18 @@ export class SahabatKreatorClient {
   /** GET /v1/knowledge/stats (scope `knowledge:read`) — cakupan embedding + status pencarian semantik. */
   async getKnowledgeStats(): Promise<KbStatsResponse> {
     return this.request<KbStatsResponse>("GET", "/knowledge/stats");
+  }
+
+  /** GET /v1/growth-links (scope `growth_links:read`) — tautan growth + statistik turunan event (Fase 13B). */
+  async listGrowthLinks(): Promise<GrowthLinkListResponse> {
+    return this.request<GrowthLinkListResponse>("GET", "/growth-links");
+  }
+
+  /** GET /v1/growth-links/:id (scope `growth_links:read`). */
+  async getGrowthLink(linkId: string): Promise<GrowthLinkResponse> {
+    return this.request<GrowthLinkResponse>(
+      "GET",
+      `/growth-links/${encodeURIComponent(linkId)}`,
+    );
   }
 }

@@ -159,6 +159,34 @@ await checkRead(
   (v) => typeof v.totalChunks === "number" && typeof v.embeddedChunks === "number",
   (v) => `chunks=${v.embeddedChunks}/${v.totalChunks} semantic=${v.semanticSearch.active}`,
 );
+// Fase 13B: growth links — daftar + get pertama bila ada.
+let growthFirstId: string | null = null;
+let growthFirstSlug: string | null = null;
+try {
+  const list = await client.listGrowthLinks();
+  check(
+    "listGrowthLinks() berhasil",
+    Array.isArray(list.links),
+    `count=${list.links.length}`,
+  );
+  growthFirstId = list.links[0]?.id ?? null;
+  growthFirstSlug = list.links[0]?.slug ?? null;
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listGrowthLinks() (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+if (growthFirstId) {
+  await checkRead(
+    "getGrowthLink(id) konsisten dengan daftar",
+    () => client.getGrowthLink(growthFirstId!),
+    (v) => v.id === growthFirstId && v.slug === growthFirstSlug && typeof v.stats.clicks === "number",
+    (v) => `slug=${v.slug} clicks=${v.stats.clicks}`,
+  );
+}
 
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
