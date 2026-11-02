@@ -4,19 +4,26 @@ import {
   ChannelAccountListResponseSchema,
   ChannelAccountResponseSchema,
   CreateChannelRequestSchema,
+  TrashChannelRequestSchema,
   type ChannelAccountResponse,
 } from "@sahabat-kreator/contracts";
 import {
+  channelConfirmationName,
+  channelPurgeAt,
   createTelegramChannelAccount,
   createWebchatChannelAccount,
   decryptChannelSecret,
   disconnectChannelAccount,
   encryptChannelSecret,
+  exportChannelAccount,
   generateChannelWebhookSecret,
   getChannelAccount,
   hashChannelWebhookSecret,
   listChannelAccounts,
+  listTrashedChannelAccounts,
   lookupChannelAccountsByProviderExternalId,
+  markChannelAccountTrashed,
+  restoreChannelAccount,
   setChannelAccountStatus,
   updateTelegramChannelAccountCredentials,
 } from "@sahabat-kreator/core";
@@ -31,6 +38,7 @@ import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
 function serializeChannel(row: ChannelAccount): ChannelAccountResponse {
+  const purgeAt = channelPurgeAt(row);
   return ChannelAccountResponseSchema.parse({
     id: row.id,
     provider: row.provider,
@@ -38,9 +46,57 @@ function serializeChannel(row: ChannelAccount): ChannelAccountResponse {
     displayName: row.displayName,
     botUsername: row.botUsername,
     status: row.status,
+    confirmationName: channelConfirmationName(row),
+    trashedAt: row.trashedAt?.toISOString() ?? null,
+    purgeAt: purgeAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   });
+}
+
+/**
+ * Mencabut webhook Telegram sebuah akun HANYA bila akun ini memang
+ * pemilik webhook saat ini (getWebhookInfo menunjuk ke URL akun ini) —
+ * akun duplikat warisan yang bukan pemilik tidak boleh mencabut webhook
+ * pemilik sah. Kegagalan Bot API ditelan (disconnect lokal tetap aman:
+ * hash secret dikosongkan core → sisa webhook ditolak 401). Dipakai
+ * bersama oleh DELETE (disconnect) dan POST trash (Fase 6I).
+ * Mengembalikan true bila webhook benar-benar dicabut.
+ */
+async function deleteTelegramWebhookIfOwner(
+  opts: ChannelsModuleOptions,
+  account: ChannelAccount,
+): Promise<boolean> {
+  if (
+    account.provider !== "telegram" ||
+    account.status === "disconnected" ||
+    !account.accessTokenEncrypted ||
+    !opts.channelTokenSecret ||
+    !opts.publicBaseUrl
+  ) {
+    return false;
+  }
+  const botToken = decryptChannelSecret(
+    opts.channelTokenSecret,
+    account.accessTokenEncrypted,
+  );
+  if (!botToken) return false;
+  const client = new TelegramBotApiClient({
+    baseUrl: opts.telegramApiBase,
+    token: botToken,
+  });
+  const expectedUrl = `${opts.publicBaseUrl.replace(/\/+$/, "")}/api/telegram/webhook/${account.id}`;
+  try {
+    const info = await client.getWebhookInfo();
+    if (info.url === expectedUrl) {
+      await client.deleteWebhook();
+      return true;
+    }
+  } catch {
+    // Bot API tak terjangkau/token tak berlaku lagi: disconnect lokal
+    // tetap dilanjutkan pemanggil.
+  }
+  return false;
 }
 
 export interface ChannelsModuleOptions {
@@ -53,11 +109,19 @@ export interface ChannelsModuleOptions {
 }
 
 /**
- * Modul channels (Fase 1F, diperluas 6A; hotfix Telegram) — route
- * bersarang di workspace:
+ * Modul channels (Fase 1F, diperluas 6A; hotfix Telegram; 6I Sampah) —
+ * route bersarang di workspace:
  *   POST   /tenants/:tenantId/channels            buat channel (webchat, telegram)
  *   GET    /tenants/:tenantId/channels            daftar channel workspace
  *   DELETE /tenants/:tenantId/channels/:channelId putuskan koneksi channel
+ *   GET    /tenants/:tenantId/channels/trash      daftar Sampah (Fase 6I)
+ *   POST   /tenants/:tenantId/channels/:channelId/trash   buang ke Sampah
+ *   POST   /tenants/:tenantId/channels/:channelId/restore pulihkan dari Sampah
+ *   GET    /tenants/:tenantId/channels/:channelId/export  unduh ekspor JSON
+ * Hapus permanen BERPENJAGA (Fase 6I): membuang = disconnect penuh (bila
+ * masih terhubung) + `trashed_at`; masa tenggang 30 hari di Sampah bisa
+ * dipulihkan/diekspor, sesudahnya worker meng-purge permanen. Purge
+ * manual sengaja TIDAK dibuat — masa tenggang adalah pengamannya.
  * Provider Meta belum bisa dihubungkan → 422 CHANNEL_NOT_AVAILABLE_YET
  * (jujur; koneksi Meta tiba di fase channel-nya bersama user).
  * Untuk webchat, respons POST memuat siteKey di `externalId` — kunci
@@ -88,6 +152,10 @@ export function createChannelsRoutes(
     app.get(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.post(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.delete(`${base}/:channelId`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(`${base}/trash`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.post(`${base}/:channelId/trash`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.post(`${base}/:channelId/restore`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(`${base}/:channelId/export`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     return app;
   }
 
@@ -177,36 +245,7 @@ export function createChannelsRoutes(
     );
     if (!account) return apiError(c, 404, "NOT_FOUND", "Channel not found");
 
-    let webhookDeleted = false;
-    if (
-      account.provider === "telegram" &&
-      account.status !== "disconnected" &&
-      account.accessTokenEncrypted &&
-      opts.channelTokenSecret &&
-      opts.publicBaseUrl
-    ) {
-      const botToken = decryptChannelSecret(
-        opts.channelTokenSecret,
-        account.accessTokenEncrypted,
-      );
-      if (botToken) {
-        const client = new TelegramBotApiClient({
-          baseUrl: opts.telegramApiBase,
-          token: botToken,
-        });
-        const expectedUrl = `${opts.publicBaseUrl.replace(/\/+$/, "")}/api/telegram/webhook/${account.id}`;
-        try {
-          const info = await client.getWebhookInfo();
-          if (info.url === expectedUrl) {
-            await client.deleteWebhook();
-            webhookDeleted = true;
-          }
-        } catch {
-          // Bot API tak terjangkau/token tak berlaku lagi: lanjutkan
-          // disconnect lokal (lihat komentar di atas).
-        }
-      }
-    }
+    const webhookDeleted = await deleteTelegramWebhookIfOwner(opts, account);
 
     await disconnectChannelAccount(
       bundle.db,
@@ -215,6 +254,164 @@ export function createChannelsRoutes(
       account.provider === "telegram" ? { webhookDeleted } : {},
     );
     return c.body(null, 204);
+  });
+
+  /**
+   * Daftar Sampah (Fase 6I): akun yang dibuang, terlama dibuang lebih
+   * dulu, masing-masing dengan `trashedAt` + `purgeAt` (trashedAt + 30
+   * hari) dari serializer. Daftar channel baku (GET base) mengecualikan
+   * akun-akun ini. Membership cukup — membaca Sampah tidak destruktif;
+   * aksi di dalamnya (restore/export/trash) dibatasi owner/admin.
+   */
+  app.get(`${base}/trash`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const rows = await listTrashedChannelAccounts(bundle.db, { tenantId: tenant.id });
+    const body = ChannelAccountListResponseSchema.parse({
+      channels: rows.map(serializeChannel),
+    });
+    return c.json(body);
+  });
+
+  /**
+   * Buang channel ke Sampah (Fase 6I, hapus permanen BERPENJAGA).
+   * Hanya owner/admin. Urutan penjagaan, semuanya SEBELUM mutasi apa pun:
+   * akun tak ditemukan → 404; sudah di Sampah → 409
+   * CHANNEL_ALREADY_TRASHED (jujur, bukan idempoten diam-diam);
+   * `confirmationName` tidak sama PERSIS dengan nama konfirmasi akun
+   * (displayName ?? botUsername ?? externalId — lihat core) → 422
+   * CHANNEL_DELETE_CONFIRMATION_MISMATCH. Sesudah lolos: bila akun
+   * masih terhubung, semantik disconnect yang ADA dijalankan persis
+   * (webhook Telegram dicabut bila pemilik, kredensial dikosongkan,
+   * audit channel.disconnected), baru `trashed_at` diisi (audit
+   * channel.trashed). Akun berakhir 'disconnected' — penjaga satu-bot
+   * otomatis membebaskan botnya. Sukses → 200 akun terserialisasi
+   * (dengan trashedAt + purgeAt).
+   */
+  app.post(`${base}/:channelId/trash`, async (c) => {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), appUser.id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can delete channels");
+    }
+    const channelId = c.req.param("channelId");
+    if (!z.string().uuid().safeParse(channelId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = TrashChannelRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid trash payload");
+    }
+    const account = await getChannelAccount(
+      bundle.db,
+      { tenantId: tenant.id },
+      channelId,
+    );
+    if (!account) return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    if (account.trashedAt) {
+      return apiError(c, 409, "CHANNEL_ALREADY_TRASHED", "This channel is already in the trash");
+    }
+    if (parsed.data.confirmationName !== channelConfirmationName(account)) {
+      return apiError(
+        c,
+        422,
+        "CHANNEL_DELETE_CONFIRMATION_MISMATCH",
+        "The confirmation name does not match this channel's name",
+      );
+    }
+
+    if (account.status !== "disconnected") {
+      const webhookDeleted = await deleteTelegramWebhookIfOwner(opts, account);
+      await disconnectChannelAccount(
+        bundle.db,
+        { tenantId: tenant.id, actorType: "user", actorId: appUser.id },
+        account.id,
+        account.provider === "telegram" ? { webhookDeleted } : {},
+      );
+    }
+
+    const outcome = await markChannelAccountTrashed(
+      bundle.db,
+      { tenantId: tenant.id, actorType: "user", actorId: appUser.id },
+      account.id,
+    );
+    if (outcome.outcome === "not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    if (outcome.outcome === "already_trashed") {
+      return apiError(c, 409, "CHANNEL_ALREADY_TRASHED", "This channel is already in the trash");
+    }
+    return c.json(serializeChannel(outcome.account), 200);
+  });
+
+  /**
+   * Pulihkan channel dari Sampah (Fase 6I): membersihkan `trashed_at`;
+   * status TETAP 'disconnected' — tidak ada reconnect diam-diam. Akun
+   * yang tidak sedang di Sampah → 409 CHANNEL_NOT_TRASHED. Sukses →
+   * 200 akun terserialisasi.
+   */
+  app.post(`${base}/:channelId/restore`, async (c) => {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), appUser.id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can restore channels");
+    }
+    const channelId = c.req.param("channelId");
+    if (!z.string().uuid().safeParse(channelId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    const outcome = await restoreChannelAccount(
+      bundle.db,
+      { tenantId: tenant.id, actorType: "user", actorId: appUser.id },
+      channelId,
+    );
+    if (outcome.outcome === "not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    if (outcome.outcome === "not_trashed") {
+      return apiError(c, 409, "CHANNEL_NOT_TRASHED", "This channel is not in the trash");
+    }
+    return c.json(serializeChannel(outcome.account), 200);
+  });
+
+  /**
+   * Ekspor riwayat channel (Fase 6I): unduhan JSON metadata channel +
+   * semua percakapan + pesan-pesannya (struktur
+   * `sahabat-kreator/channel-export@1`, lihat core). Berlaku untuk
+   * channel aktif maupun di Sampah — jalan keluar data sebelum purge.
+   * Nama berkas aman: provider + 8 char pertama id. Audit
+   * `channel.exported` ditulis core dengan meta hitungan saja.
+   */
+  app.get(`${base}/:channelId/export`, async (c) => {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), appUser.id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can export channels");
+    }
+    const channelId = c.req.param("channelId");
+    if (!z.string().uuid().safeParse(channelId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    const data = await exportChannelAccount(
+      bundle.db,
+      { tenantId: tenant.id, actorType: "user", actorId: appUser.id },
+      channelId,
+    );
+    if (!data) return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    const filename = `channel-export-${data.channel.provider}-${data.channel.id.slice(0, 8)}.json`;
+    return c.body(JSON.stringify(data, null, 2), 200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    });
   });
 
   return app;

@@ -5,6 +5,7 @@ import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
 import {
   evaluateInboundMessageForAutomations,
   executeSequenceStep,
+  purgeExpiredTrashedChannels,
   relayUnpublishedOutboxEvents,
   resolveOpenRouterConfig,
   respondToInboundMessage,
@@ -324,6 +325,42 @@ async function relayTick(): Promise<void> {
 const relayTimer = setInterval(() => void relayTick(), RELAY_INTERVAL_MS);
 void relayTick();
 
+// ---------------------------------------------------------------------------
+// Purge Sampah channel (Fase 6I): akun channel yang dibuang ke Sampah
+// lebih dari 30 hari lalu dihapus PERMANEN oleh core
+// (purgeExpiredTrashedChannels — satu transaksi per akun, audit
+// `channel.purged` dengan hitungan). Pola poller yang sama seperti relay
+// outbox: jalan sekali saat boot lalu tiap jam, dengan penjaga anti-
+// tumpang-tindih. Tidak memakai job BullMQ terjadwal: tidak ada antrean
+// yang perlu diantar — cukup pemindaian berkala yang idempoten. Jalan
+// run-once untuk pengujian/operasi: `pnpm purge:channels` (skrip
+// scripts/purge-trashed-channels.ts).
+const PURGE_INTERVAL_MS = 60 * 60 * 1000;
+let purgeRunning = false;
+async function purgeTick(): Promise<void> {
+  if (purgeRunning) return;
+  purgeRunning = true;
+  try {
+    const result = await purgeExpiredTrashedChannels(db);
+    for (const p of result.purged) {
+      console.log(
+        `[worker] channel purge: ${p.channelAccountId} (tenant ${p.tenantId}) terhapus permanen — ${p.counts.conversations} percakapan, ${p.counts.messages} pesan`,
+      );
+    }
+    for (const f of result.failed) {
+      console.error(
+        `[worker] channel purge GAGAL untuk ${f.channelAccountId} (tenant ${f.tenantId}): ${f.error}`,
+      );
+    }
+  } catch (err) {
+    console.error("[worker] channel purge gagal (akan dicoba lagi):", err);
+  } finally {
+    purgeRunning = false;
+  }
+}
+const purgeTimer = setInterval(() => void purgeTick(), PURGE_INTERVAL_MS);
+void purgeTick();
+
 console.log(
   `[worker] Sahabat Kreator worker aktif — antrean "${MAIN_QUEUE_NAME}", relay outbox tiap ${RELAY_INTERVAL_MS}ms`,
 );
@@ -334,6 +371,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[worker] menerima ${signal}, berhenti secara anggun...`);
   clearInterval(relayTimer);
+  clearInterval(purgeTimer);
   await bullWorker.close();
   await queue.close();
   realtimePublisher.close();

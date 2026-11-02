@@ -241,6 +241,71 @@ export const api = {
         { method: "DELETE" },
       );
     },
+    /** GET /api/tenants/:tenantId/channels/trash — daftar Sampah (Fase 6I). */
+    async listTrash(tenantId: string): Promise<ChannelAccountResponse[]> {
+      const body = await request<ChannelAccountListResponse>(
+        `/api/tenants/${tenantId}/channels/trash`,
+        { method: "GET" },
+      );
+      return body.channels;
+    },
+    /** POST .../channels/:channelId/trash {confirmationName} — buang ke Sampah; server memvalidasi nama persis (Fase 6I). */
+    trash(
+      tenantId: string,
+      channelId: string,
+      confirmationName: string,
+    ): Promise<ChannelAccountResponse> {
+      return request<ChannelAccountResponse>(
+        `/api/tenants/${tenantId}/channels/${channelId}/trash`,
+        { method: "POST", body: JSON.stringify({ confirmationName }) },
+      );
+    },
+    /** POST .../channels/:channelId/restore — pulihkan dari Sampah (tetap disconnected; Fase 6I). */
+    restore(
+      tenantId: string,
+      channelId: string,
+    ): Promise<ChannelAccountResponse> {
+      return request<ChannelAccountResponse>(
+        `/api/tenants/${tenantId}/channels/${channelId}/restore`,
+        { method: "POST" },
+      );
+    },
+    /**
+     * GET .../channels/:channelId/export — unduh ekspor riwayat JSON
+     * (Fase 6I). Bukan `request` biasa: responsnya berkas unduhan, jadi
+     * fetch berkredensial langsung, lalu simpan lewat blob URL dengan
+     * nama berkas dari Content-Disposition server.
+     */
+    async downloadExport(tenantId: string, channelId: string): Promise<void> {
+      let res: Response;
+      try {
+        res = await fetch(
+          `/api/tenants/${tenantId}/channels/${channelId}/export`,
+          { credentials: "include" },
+        );
+      } catch {
+        throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
+      }
+      if (!res.ok) {
+        throw new ApiClientError(
+          res.status,
+          fallbackCodeForStatus(res.status),
+          res.statusText,
+        );
+      }
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const filename = match?.[1] ?? `channel-export-${channelId.slice(0, 8)}.json`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    },
   },
   conversations: {
     /** GET /api/tenants/:tenantId/conversations?status= */

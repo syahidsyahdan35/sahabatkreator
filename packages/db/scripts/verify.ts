@@ -123,8 +123,10 @@ const policies = await db.query<{ count: string }>(
 // + lengan lookup `provider_external_lookup` pada channel_accounts
 //   (hotfix Telegram, migrasi 0020)
 // + policy `platform_settings_admin` pada platform_settings dan
-//   `platform_audit` pada audit_logs (Fase 6C, migrasi 0022) = 35.
-assert.equal(Number(policies.rows[0].count), 35);
+//   `platform_audit` pada audit_logs (Fase 6C, migrasi 0022)
+// + lengan pindai `system_purge_scan` pada channel_accounts
+//   (Fase 6I, migrasi 0023) = 36.
+assert.equal(Number(policies.rows[0].count), 36);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -873,6 +875,52 @@ const psTenantView = await db.transaction(async (tx) => {
 assert.equal(psTenantView.rows.length, 0);
 console.log(
   "[16] Fase 6C: platform_settings fail-closed tanpa flag (0 baris + insert ditolak), terbuka dengan flag app.platform_settings='admin'; audit platform tenant_id NULL tertulis ber-flag dan tak terlihat dari konteks tenant: OK",
+);
+
+// ---------- 17. Fase 6I: kolom trashed_at + lengan pindai purge ----------
+// Worker purge memindai akun Sampah dari SEMUA tenant tanpa konteks
+// tenant. Lengan `system_purge_scan` (migrasi 0023) menuntut flag
+// app.system_relay='channel_purge' dan HANYA membuka baris trashed —
+// baris aktif tidak pernah terlihat lewat lengan ini, dan tanpa flag
+// role aplikasi tidak melihat apa pun di luar konteks tenantnya.
+await db.query(
+  `INSERT INTO channel_accounts (tenant_id, provider, external_id, status, trashed_at)
+   VALUES ($1, 'webchat', 'wc_verify_trashed_a', 'disconnected', now() - interval '31 days'),
+          ($1, 'webchat', 'wc_verify_active_a', 'connected', NULL),
+          ($2, 'telegram', '777123', 'disconnected', now() - interval '40 days')`,
+  [TENANT_A, TENANT_B],
+);
+const purgeNoFlag = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  return tx.query<{ external_id: string }>(
+    `SELECT external_id FROM channel_accounts`,
+  );
+});
+assert.equal(purgeNoFlag.rows.length, 0);
+const purgeScan = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.system_relay', 'channel_purge', true)`);
+  return tx.query<{ external_id: string }>(
+    `SELECT external_id FROM channel_accounts ORDER BY external_id`,
+  );
+});
+assert.deepEqual(
+  purgeScan.rows.map((r) => r.external_id),
+  ["777123", "wc_verify_trashed_a"],
+);
+const purgeTenantView = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  return tx.query<{ external_id: string }>(
+    `SELECT external_id FROM channel_accounts ORDER BY external_id`,
+  );
+});
+const tenantAExternalIds = purgeTenantView.rows.map((r) => r.external_id);
+assert.ok(tenantAExternalIds.includes("wc_verify_active_a"));
+assert.ok(tenantAExternalIds.includes("wc_verify_trashed_a"));
+assert.ok(!tenantAExternalIds.includes("777123"));
+console.log(
+  "[17] Fase 6I: channel_accounts.trashed_at ada; tanpa flag pindai purge buta (0 baris), dengan app.system_relay='channel_purge' hanya baris trashed lintas tenant yang terlihat; konteks tenant tetap melihat semua barisnya sendiri: OK",
 );
 
 await db.close();

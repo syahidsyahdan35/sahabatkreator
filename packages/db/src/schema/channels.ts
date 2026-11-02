@@ -58,6 +58,16 @@ export const channelAccounts = pgTable(
     botUsername: varchar("bot_username", { length: 255 }),
     /** Versi Graph API yang ter-pin untuk akun Meta ini (mis. 'v26.0', RANCANGAN §12.1). */
     graphApiVersion: varchar("graph_api_version", { length: 16 }),
+    /**
+     * Kapan akun dibuang ke Sampah (Fase 6I — hapus permanen BERPENJAGA);
+     * NULL = akun hidup normal. Membuang selalu mendahului disconnect
+     * (status berakhir 'disconnected' + kredensial kosong), jadi baris
+     * Sampah tidak pernah aktif dan tidak menghalangi penjaga satu-bot.
+     * Setelah `trashed_at` + 30 hari, worker menghapus baris ini beserta
+     * percakapan/pesan/identitasnya secara permanen (purge); sebelum itu
+     * akun bisa dipulihkan (restore) apa adanya.
+     */
+    trashedAt: timestamp("trashed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -77,6 +87,11 @@ export const channelAccounts = pgTable(
       .on(t.provider, t.externalId)
       .where(sql`${t.status} <> 'disconnected'`),
     index("channel_accounts_tenant_id_idx").on(t.tenantId),
+    // Antrean purge worker (Fase 6I): pindai baris Sampah yang masa
+    // tenggangnya lewat — index parsial hanya memuat baris trashed.
+    index("channel_accounts_trashed_at_idx")
+      .on(t.trashedAt)
+      .where(sql`${t.trashedAt} IS NOT NULL`),
   ],
 );
 

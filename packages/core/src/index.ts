@@ -108,19 +108,38 @@ export {
   type RejectSuggestionOutcome,
 } from "./suggestions";
 export {
+  CHANNEL_TRASH_GRACE_DAYS,
+  channelConfirmationName,
+  channelPurgeAt,
   createWebchatChannelAccount,
   listChannelAccounts,
+  listTrashedChannelAccounts,
   generateWebchatSiteKey,
   setChannelAccountStatus,
   getChannelAccount,
   lookupChannelAccountsByProviderExternalId,
   disconnectChannelAccount,
+  exportChannelAccount,
+  markChannelAccountTrashed,
+  restoreChannelAccount,
   updateTelegramChannelAccountCredentials,
+  type ChannelExport,
   type ChannelProviderName,
   type ChannelAccountLookupRef,
   type DisconnectChannelContext,
+  type RestoreChannelOutcome,
+  type TrashChannelOutcome,
   type UpdateTelegramCredentialsInput,
 } from "./channels";
+export {
+  findExpiredTrashedChannelAccounts,
+  purgeExpiredTrashedChannels,
+  purgeTrashedChannelAccount,
+  trashExpiryCutoff,
+  type ChannelPurgeCounts,
+  type ChannelPurgeRunResult,
+  type ExpiredTrashedChannelRef,
+} from "./channel-purge";
 export {
   encryptChannelSecret,
   decryptChannelSecret,

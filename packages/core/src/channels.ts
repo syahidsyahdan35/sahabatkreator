@@ -1,8 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
+  contacts,
+  conversations,
+  messages,
   type ChannelAccount,
   type Database,
 } from "@sahabat-kreator/db";
@@ -80,7 +83,8 @@ export async function setChannelAccountStatus(
   });
 }
 
-/** Daftar akun channel milik tenant, terlama lebih dulu. */
+/** Daftar akun channel milik tenant, terlama lebih dulu.
+ * Akun di Sampah (Fase 6I) TIDAK ikut — mereka hidup di daftar Sampah. */
 export async function listChannelAccounts(
   db: Database,
   ctx: Pick<TenantContext, "tenantId">,
@@ -89,8 +93,359 @@ export async function listChannelAccounts(
     return tx
       .select()
       .from(channelAccounts)
-      .where(eq(channelAccounts.tenantId, ctx.tenantId))
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          isNull(channelAccounts.trashedAt),
+        ),
+      )
       .orderBy(asc(channelAccounts.createdAt));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sampah channel (Fase 6I — hapus permanen BERPENJAGA)
+// ---------------------------------------------------------------------------
+
+/** Masa tenggang Sampah sebelum purge permanen oleh worker (hari). */
+export const CHANNEL_TRASH_GRACE_DAYS = 30;
+
+/** Batas waktu purge sebuah akun Sampah: trashedAt + masa tenggang. */
+export function channelPurgeAt(account: ChannelAccount): Date | null {
+  if (!account.trashedAt) return null;
+  return new Date(
+    account.trashedAt.getTime() + CHANNEL_TRASH_GRACE_DAYS * 24 * 3600 * 1000,
+  );
+}
+
+/**
+ * Nama konfirmasi pembuangan: nama yang harus diketik persis oleh pemilik
+ * workspace. displayName adalah nama yang tampil di kartu; akun tanpa
+ * displayName jatuh ke botUsername (telegram) lalu externalId (siteKey
+ * webchat / id provider) — selalu nilai yang memang terlihat di UI,
+ * tidak pernah rahasia.
+ */
+export function channelConfirmationName(
+  account: Pick<ChannelAccount, "displayName" | "botUsername" | "externalId">,
+): string {
+  const display = account.displayName?.trim();
+  if (display) return display;
+  if (account.botUsername) return account.botUsername;
+  return account.externalId;
+}
+
+/** Daftar akun di Sampah milik tenant, yang paling lama dibuang lebih dulu. */
+export async function listTrashedChannelAccounts(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+): Promise<ChannelAccount[]> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    return tx
+      .select()
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          isNotNull(channelAccounts.trashedAt),
+        ),
+      )
+      .orderBy(asc(channelAccounts.trashedAt));
+  });
+}
+
+export type TrashChannelOutcome =
+  | { outcome: "trashed"; account: ChannelAccount }
+  | { outcome: "already_trashed"; account: ChannelAccount }
+  | { outcome: "not_found" };
+
+/**
+ * Menandai akun sebagai di Sampah (Fase 6I): mengisi `trashed_at` +
+ * audit `channel.trashed`. PRASYARAT: akun sudah 'disconnected' —
+ * pemanggil (route API) menjalankan semantik disconnect penuh lebih
+ * dulu (termasuk pencabutan webhook Telegram) persis seperti endpoint
+ * DELETE, lalu memanggil fungsi ini; di sini status dipastikan ulang
+ * dengan mengosongkan kredensial secara defensif bila masih ada.
+ * Mengembalikan outcome diskriminan agar route menjawab jujur
+ * (404 / 409 / 200) tanpa menebak.
+ */
+export async function markChannelAccountTrashed(
+  db: Database,
+  ctx: DisconnectChannelContext,
+  channelAccountId: string,
+): Promise<TrashChannelOutcome> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      )
+      .limit(1);
+    if (!row) return { outcome: "not_found" } as const;
+    if (row.trashedAt) return { outcome: "already_trashed", account: row } as const;
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(channelAccounts)
+      .set({
+        trashedAt: now,
+        status: "disconnected",
+        accessTokenEncrypted: null,
+        webhookSecret: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      )
+      .returning();
+
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: ctx.actorType,
+      actorId: ctx.actorId,
+      action: "channel.trashed",
+      meta: {
+        channelAccountId: row.id,
+        provider: row.provider,
+        purgeAt: channelPurgeAt(updated)?.toISOString() ?? null,
+      },
+    });
+
+    return { outcome: "trashed", account: updated } as const;
+  });
+}
+
+export type RestoreChannelOutcome =
+  | { outcome: "restored"; account: ChannelAccount }
+  | { outcome: "not_trashed"; account: ChannelAccount }
+  | { outcome: "not_found" };
+
+/**
+ * Memulihkan akun dari Sampah (Fase 6I): membersihkan `trashed_at`.
+ * Status TETAP 'disconnected' — restore tidak pernah menghubungkan
+ * ulang secara diam-diam; pemilik menghubungkan lagi secara eksplisit
+ * (Telegram: revive lewat form connect; Webchat: channel baru).
+ */
+export async function restoreChannelAccount(
+  db: Database,
+  ctx: DisconnectChannelContext,
+  channelAccountId: string,
+): Promise<RestoreChannelOutcome> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      )
+      .limit(1);
+    if (!row) return { outcome: "not_found" } as const;
+    if (!row.trashedAt) return { outcome: "not_trashed", account: row } as const;
+
+    const [updated] = await tx
+      .update(channelAccounts)
+      .set({ trashedAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      )
+      .returning();
+
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: ctx.actorType,
+      actorId: ctx.actorId,
+      action: "channel.restored",
+      meta: { channelAccountId: row.id, provider: row.provider },
+    });
+
+    return { outcome: "restored", account: updated } as const;
+  });
+}
+
+export interface ChannelExport {
+  format: "sahabat-kreator/channel-export@1";
+  exportedAt: string;
+  channel: {
+    id: string;
+    provider: ChannelAccount["provider"];
+    externalId: string;
+    displayName: string | null;
+    botUsername: string | null;
+    status: ChannelAccount["status"];
+    trashedAt: string | null;
+    createdAt: string;
+  };
+  counts: { conversations: number; messages: number };
+  conversations: Array<{
+    id: string;
+    kind: string;
+    title: string | null;
+    status: string;
+    providerChatId: string | null;
+    contact: {
+      id: string;
+      name: string;
+      email: string | null;
+      phone: string | null;
+    } | null;
+    createdAt: string;
+    messages: Array<{
+      id: string;
+      direction: string;
+      senderType: string;
+      senderName: string | null;
+      type: string;
+      contentText: string | null;
+      providerMessageId: string | null;
+      status: string;
+      createdAt: string;
+    }>;
+  }>;
+}
+
+/**
+ * Ekspor riwayat satu channel (Fase 6I): metadata akun + SEMUA
+ * percakapannya + pesan-pesannya (kronologis menaik per percakapan,
+ * dengan nama kontak lawan bicara). Berlaku untuk akun aktif maupun di
+ * Sampah — inilah jalan keluar data sebelum purge permanen. Menulis
+ * audit `channel.exported` dengan meta HITUNGAN saja (isi pesan tidak
+ * pernah masuk audit/log). Null bila akun tak ditemukan di tenant ini.
+ */
+export async function exportChannelAccount(
+  db: Database,
+  ctx: DisconnectChannelContext,
+  channelAccountId: string,
+): Promise<ChannelExport | null> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [account] = await tx
+      .select()
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      )
+      .limit(1);
+    if (!account) return null;
+
+    const convs = await tx
+      .select()
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.channelAccountId, account.id),
+        ),
+      )
+      .orderBy(asc(conversations.createdAt));
+
+    const contactIds = [...new Set(convs.map((cv) => cv.contactId))];
+    const contactRows =
+      contactIds.length > 0
+        ? await tx
+            .select()
+            .from(contacts)
+            .where(
+              and(
+                eq(contacts.tenantId, ctx.tenantId),
+                inArray(contacts.id, contactIds),
+              ),
+            )
+        : [];
+    const contactById = new Map(contactRows.map((ct) => [ct.id, ct]));
+
+    const convIds = convs.map((cv) => cv.id);
+    const messageRows =
+      convIds.length > 0
+        ? await tx
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.tenantId, ctx.tenantId),
+                inArray(messages.conversationId, convIds),
+              ),
+            )
+            .orderBy(asc(messages.createdAt))
+        : [];
+    const messagesByConv = new Map<string, typeof messageRows>();
+    for (const m of messageRows) {
+      const list = messagesByConv.get(m.conversationId) ?? [];
+      list.push(m);
+      messagesByConv.set(m.conversationId, list);
+    }
+
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: ctx.actorType,
+      actorId: ctx.actorId,
+      action: "channel.exported",
+      meta: {
+        channelAccountId: account.id,
+        provider: account.provider,
+        conversations: convs.length,
+        messages: messageRows.length,
+      },
+    });
+
+    return {
+      format: "sahabat-kreator/channel-export@1",
+      exportedAt: new Date().toISOString(),
+      channel: {
+        id: account.id,
+        provider: account.provider,
+        externalId: account.externalId,
+        displayName: account.displayName,
+        botUsername: account.botUsername,
+        status: account.status,
+        trashedAt: account.trashedAt?.toISOString() ?? null,
+        createdAt: account.createdAt.toISOString(),
+      },
+      counts: { conversations: convs.length, messages: messageRows.length },
+      conversations: convs.map((cv) => {
+        const contact = contactById.get(cv.contactId);
+        return {
+          id: cv.id,
+          kind: cv.kind,
+          title: cv.title,
+          status: cv.status,
+          providerChatId: cv.providerChatId,
+          contact: contact
+            ? {
+                id: contact.id,
+                name: contact.name,
+                email: contact.email,
+                phone: contact.phone,
+              }
+            : null,
+          createdAt: cv.createdAt.toISOString(),
+          messages: (messagesByConv.get(cv.id) ?? []).map((m) => ({
+            id: m.id,
+            direction: m.direction,
+            senderType: m.senderType,
+            senderName: m.senderName,
+            type: m.type,
+            contentText: m.contentText,
+            providerMessageId: m.providerMessageId,
+            status: m.status,
+            createdAt: m.createdAt.toISOString(),
+          })),
+        };
+      }),
+    };
   });
 }
 
@@ -277,6 +632,10 @@ export async function updateTelegramChannelAccountCredentials(
       patch.displayName = input.displayName;
     }
     if (input.status !== undefined) patch.status = input.status;
+    // Menghubungkan lagi = menghidupkan lagi (Fase 6I): baris yang sama
+    // tidak boleh hidup kembali sambil tetap berstatus Sampah — akun
+    // yang berhasil di-connect ulang selalu keluar dari Sampah.
+    if (input.status === "connected") patch.trashedAt = null;
 
     const [row] = await tx
       .update(channelAccounts)

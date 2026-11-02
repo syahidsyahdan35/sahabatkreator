@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -58,7 +58,14 @@ export async function listConversations(
       })
       .from(conversations)
       .innerJoin(contacts, eq(conversations.contactId, contacts.id))
-      .where(and(...conditions))
+      // Fase 6I: percakapan milik channel yang sedang di Sampah hilang
+      // dari inbox (kontaknya sendiri tetap ada di CRM) sampai channel
+      // dipulihkan atau di-purge permanen.
+      .innerJoin(
+        channelAccounts,
+        eq(conversations.channelAccountId, channelAccounts.id),
+      )
+      .where(and(...conditions, isNull(channelAccounts.trashedAt)))
       .orderBy(desc(conversations.lastMessageAt), desc(conversations.createdAt));
 
     if (rows.length === 0) return [];

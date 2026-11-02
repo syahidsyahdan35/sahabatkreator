@@ -17,6 +17,9 @@ export const ErrorCodeSchema = z.enum([
   "CHANNEL_DISCONNECTED",
   "TELEGRAM_TOKEN_INVALID",
   "TELEGRAM_BOT_ALREADY_CONNECTED",
+  "CHANNEL_DELETE_CONFIRMATION_MISMATCH",
+  "CHANNEL_ALREADY_TRASHED",
+  "CHANNEL_NOT_TRASHED",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -279,6 +282,17 @@ export const ChannelAccountResponseSchema = z.object({
   /** Untuk telegram: username bot (`@...` tanpa '@') dari getMe. Provider lain: null. */
   botUsername: z.string().nullable(),
   status: ChannelAccountStatusSchema,
+  /**
+   * Nama yang harus diketik PERSIS untuk mengonfirmasi pembuangan ke
+   * Sampah (Fase 6I): displayName bila ada, else botUsername (telegram),
+   * else externalId. Dihitung server agar UI & validasi server selalu
+   * sepakat — ini nama yang memang sudah terlihat di kartu, bukan rahasia.
+   */
+  confirmationName: z.string(),
+  /** Kapan akun dibuang ke Sampah (Fase 6I); null = akun hidup normal. */
+  trashedAt: z.string().datetime().nullable(),
+  /** trashedAt + 30 hari masa tenggang; null bila tidak di Sampah. */
+  purgeAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -292,6 +306,16 @@ export const ChannelAccountListResponseSchema = z.object({
 export type ChannelAccountListResponse = z.infer<
   typeof ChannelAccountListResponseSchema
 >;
+
+/**
+ * Buang channel ke Sampah (Fase 6I): nama konfirmasi wajib sama PERSIS
+ * dengan `confirmationName` akun di respons channel — server memvalidasi
+ * ulang; ketidakcocokan ditolak CHANNEL_DELETE_CONFIRMATION_MISMATCH.
+ */
+export const TrashChannelRequestSchema = z.object({
+  confirmationName: z.string().min(1).max(255),
+});
+export type TrashChannelRequest = z.infer<typeof TrashChannelRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // Webchat publik (Fase 1F) — API widget untuk pengunjung situs tenant.

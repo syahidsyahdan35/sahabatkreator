@@ -108,6 +108,27 @@ function PowerIcon() {
   );
 }
 
+function TrashIcon() {
+  return (
+    <svg
+      className="h-5 w-5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden={true}
+    >
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  );
+}
+
 function CopyIcon() {
   return (
     <svg
@@ -180,8 +201,10 @@ function StatusPill({
  * daftar channel workspace aktif sebagai KARTU (avatar + badge provider,
  * nama/@handle, pill status + tanggal terhubung, chip tautan publik) +
  * form hubungkan Webchat & Telegram. Ikon power pada kartu memakai alur
- * Disconnect yang sudah ada; ikon sampah SENGAJA belum dipasang —
- * fungsinya (hapus berpenjaga) dibangun Fase 6I.
+ * Disconnect yang sudah ada; ikon sampah (Fase 6I) membuka dialog hapus
+ * BERPENJAGA (ketik nama untuk konfirmasi + tombol ekspor riwayat di
+ * dialog yang sama) → channel masuk seksi Sampah di bawah (masa tenggang
+ * 30 hari: Pulihkan / Ekspor) sebelum worker meng-purge permanen.
  */
 export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   const { active } = useWorkspace();
@@ -204,13 +227,26 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     useState<ChannelAccountResponse | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+  const [trashItems, setTrashItems] = useState<ChannelAccountResponse[]>([]);
+  const [deleteTarget, setDeleteTarget] =
+    useState<ChannelAccountResponse | null>(null);
+  const [deleteName, setDeleteName] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!tenantId) return;
     setLoading(true);
     setError(null);
     try {
-      setItems(await api.channels.list(tenantId));
+      const [channels, trashed] = await Promise.all([
+        api.channels.list(tenantId),
+        api.channels.listTrash(tenantId),
+      ]);
+      setItems(channels);
+      setTrashItems(trashed);
     } catch (err) {
       setError(translateApiError(t, err));
     } finally {
@@ -288,6 +324,53 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
       );
     } finally {
       setDisconnecting(false);
+    }
+  };
+
+  const handleTrash = async () => {
+    if (!tenantId || !deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.channels.trash(tenantId, deleteTarget.id, deleteName);
+      setDeleteTarget(null);
+      setDeleteName("");
+      await load();
+    } catch (err) {
+      setDeleteError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("channels.deleteError"),
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleRestore = async (channel: ChannelAccountResponse) => {
+    if (!tenantId) return;
+    setRestoringId(channel.id);
+    setRestoreError(null);
+    try {
+      await api.channels.restore(tenantId, channel.id);
+      await load();
+    } catch (err) {
+      setRestoreError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("channels.restoreError"),
+      );
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const handleExport = async (channel: ChannelAccountResponse) => {
+    if (!tenantId) return;
+    try {
+      await api.channels.downloadExport(tenantId, channel.id);
+    } catch {
+      /* unduhan gagal — riwayat tetap aman; pengguna bisa mencoba lagi */
     }
   };
 
@@ -393,32 +476,47 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       {providerLabel(t, channel.provider)}
                     </div>
                   </div>
-                  {channel.status !== "disconnected" ? (
+                  <div className="flex shrink-0 items-start gap-1">
+                    {channel.status !== "disconnected" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDisconnectError(null);
+                          setDisconnectTarget(channel);
+                        }}
+                        aria-label={t("channels.disconnectButton")}
+                        title={t("channels.disconnectButton")}
+                        className={`rounded-md p-1.5 hover:bg-elevated ${
+                          channel.status === "connected"
+                            ? "text-success"
+                            : "text-muted"
+                        }`}
+                      >
+                        <PowerIcon />
+                      </button>
+                    ) : channel.provider === "telegram" ? (
+                      <button
+                        type="button"
+                        onClick={focusTelegramForm}
+                        className="rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
+                      >
+                        {t("channels.reconnectButton")}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => {
-                        setDisconnectError(null);
-                        setDisconnectTarget(channel);
+                        setDeleteError(null);
+                        setDeleteName("");
+                        setDeleteTarget(channel);
                       }}
-                      aria-label={t("channels.disconnectButton")}
-                      title={t("channels.disconnectButton")}
-                      className={`shrink-0 rounded-md p-1.5 hover:bg-elevated ${
-                        channel.status === "connected"
-                          ? "text-success"
-                          : "text-muted"
-                      }`}
+                      aria-label={t("channels.deleteButton")}
+                      title={t("channels.deleteButton")}
+                      className="rounded-md p-1.5 text-muted hover:bg-elevated hover:text-danger"
                     >
-                      <PowerIcon />
+                      <TrashIcon />
                     </button>
-                  ) : channel.provider === "telegram" ? (
-                    <button
-                      type="button"
-                      onClick={focusTelegramForm}
-                      className="shrink-0 rounded-md px-2 py-1.5 text-sm font-medium text-accent hover:bg-elevated"
-                    >
-                      {t("channels.reconnectButton")}
-                    </button>
-                  ) : null}
+                  </div>
                 </div>
 
                 <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -612,6 +710,137 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
           })}
         </div>
       </div>
+
+      <div className="mt-8">
+        <h2 className="font-semibold">{t("channels.trashTitle")}</h2>
+        {restoreError ? (
+          <div className="mt-2">
+            <FieldError message={restoreError} />
+          </div>
+        ) : null}
+        {trashItems.length === 0 ? (
+          <p className="mt-2 text-sm text-muted">{t("channels.trashEmpty")}</p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {trashItems.map((channel) => (
+              <div
+                key={channel.id}
+                className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-3 opacity-80"
+              >
+                <ChannelAvatar
+                  provider={channel.provider}
+                  name={
+                    channel.displayName ||
+                    channel.botUsername ||
+                    providerLabel(t, channel.provider)
+                  }
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-semibold">
+                    {channel.displayName || providerLabel(t, channel.provider)}
+                  </div>
+                  <div className="text-xs text-muted">
+                    {providerLabel(t, channel.provider)}
+                    {channel.trashedAt
+                      ? ` · ${t("channels.trashedOn", {
+                          date: formatDate(channel.trashedAt, locale),
+                        })}`
+                      : ""}
+                    {channel.purgeAt
+                      ? ` · ${t("channels.purgeOn", {
+                          date: formatDate(channel.purgeAt, locale),
+                        })}`
+                      : ""}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleExport(channel)}
+                  className="rounded-md bg-elevated px-3 py-1.5 text-sm font-medium"
+                >
+                  {t("channels.exportButton")}
+                </button>
+                <button
+                  type="button"
+                  disabled={restoringId === channel.id}
+                  onClick={() => void handleRestore(channel)}
+                  className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {restoringId === channel.id
+                    ? t("channels.restoring")
+                    : t("channels.restoreButton")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+            <h2 className="text-lg font-bold">{t("channels.deleteTitle")}</h2>
+            <p className="mt-2 text-sm text-muted">
+              {t("channels.deleteBody", {
+                name:
+                  deleteTarget.displayName ||
+                  providerLabel(t, deleteTarget.provider),
+              })}
+            </p>
+            <button
+              type="button"
+              onClick={() => void handleExport(deleteTarget)}
+              className="mt-3 rounded-lg bg-elevated px-4 py-2 text-sm font-medium"
+            >
+              {t("channels.deleteExportButton")}
+            </button>
+            <label
+              className="mt-4 block text-sm font-medium"
+              htmlFor="delete-confirm-name"
+            >
+              {t("channels.deleteConfirmLabel")}:{" "}
+              <span className="font-mono font-semibold">
+                {deleteTarget.confirmationName}
+              </span>
+            </label>
+            <input
+              id="delete-confirm-name"
+              value={deleteName}
+              onChange={(e) => setDeleteName(e.target.value)}
+              className={`${inputClassName} mt-1`}
+              autoComplete="off"
+            />
+            {deleteError ? (
+              <div className="mt-2">
+                <FieldError message={deleteError} />
+              </div>
+            ) : null}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                disabled={deleting || deleteName !== deleteTarget.confirmationName}
+                onClick={() => void handleTrash()}
+                className="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {deleting
+                  ? t("channels.deleting")
+                  : t("channels.deleteConfirmButton")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium"
+              >
+                {t("common.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {disconnectTarget ? (
         <div
