@@ -23,8 +23,11 @@ import type {
   CreateKbDocumentRequest,
   CreatePaymentLinkRequest,
   CreateProductRequest,
+  FailedMessageListResponse,
+  FailedMessageRetryResponse,
   IntegrationLogDetailResponse,
   IntegrationLogListResponse,
+  IntegrationLogReplayResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   MessageListResponse,
@@ -723,6 +726,54 @@ export const api = {
       return request<IntegrationLogDetailResponse>(
         `/api/logs/unresolved/${logId}`,
         { method: "GET" },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/logs/:logId/replay — proses ulang event
+     * masuk yang eligible (Fase 7B.2; owner/admin). Respons membawa
+     * outcome baris-baris baru hasil replay.
+     */
+    replay(
+      tenantId: string,
+      logId: string,
+    ): Promise<IntegrationLogReplayResponse> {
+      return request<IntegrationLogReplayResponse>(
+        `/api/tenants/${tenantId}/logs/${logId}/replay`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  failures: {
+    /**
+     * GET /api/tenants/:tenantId/failed-messages — pusat pesan keluar
+     * `failed` lintas provider (Fase 7B.2; owner/admin saja).
+     */
+    list(
+      tenantId: string,
+      query: { provider?: string; cursor?: string; limit?: number } = {},
+    ): Promise<FailedMessageListResponse> {
+      const params = new URLSearchParams();
+      if (query.provider) params.set("provider", query.provider);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<FailedMessageListResponse>(
+        `/api/tenants/${tenantId}/failed-messages${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/failed-messages/:messageId/retry —
+     * antrekan ulang pesan failed → queued; pengiriman sungguhan oleh
+     * poller pada siklus berikutnya.
+     */
+    retry(
+      tenantId: string,
+      messageId: string,
+    ): Promise<FailedMessageRetryResponse> {
+      return request<FailedMessageRetryResponse>(
+        `/api/tenants/${tenantId}/failed-messages/${messageId}/retry`,
+        { method: "POST", body: JSON.stringify({}) },
       );
     },
   },

@@ -62,6 +62,16 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.CHANNEL_NOT_TRASHED");
     case "PRODUCT_HAS_LINKS":
       return t("errors.PRODUCT_HAS_LINKS");
+    case "CHANNEL_DISCONNECTED":
+      return t("errors.CHANNEL_DISCONNECTED");
+    case "LOG_REPLAY_NOT_ALLOWED":
+      return t("errors.LOG_REPLAY_NOT_ALLOWED");
+    case "LOG_PAYLOAD_TRUNCATED":
+      return t("errors.LOG_PAYLOAD_TRUNCATED");
+    case "MESSAGE_NOT_FAILED":
+      return t("errors.MESSAGE_NOT_FAILED");
+    case "MESSAGE_RETRY_UNSUPPORTED":
+      return t("errors.MESSAGE_RETRY_UNSUPPORTED");
     default:
       break;
   }

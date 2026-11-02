@@ -1,25 +1,15 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
-  decryptChannelSecret,
-  fetchAndStoreTelegramProfilePhoto,
   recordIntegrationLog,
-  recordTelegramChannelPost,
-  recordTelegramInboundMessage,
-  recordTelegramMyChatMember,
   resolveTelegramAccountById,
   verifyChannelWebhookSecret,
   type RecordIntegrationLogInput,
-  type TelegramAccountRef,
 } from "@sahabat-kreator/core";
-import {
-  parseTelegramChannelPost,
-  parseTelegramUpdate,
-  type TelegramUpdate,
-} from "@sahabat-kreator/channel-telegram";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
+import { processTelegramUpdate } from "./process";
 
 /**
  * Modul telegram publik (Fase 6A) — webhook Bot API. TANPA sesi dashboard.
@@ -75,34 +65,6 @@ export function createTelegramRoutes(
     } catch {
       // Sengaja ditelan: log tidak boleh menjatuhkan webhook.
     }
-  };
-
-  /**
-   * Fase 6D: identitas Telegram yang BARU pertama kali terlihat memicu
-   * pengambilan foto profil kontaknya — best-effort & fire-and-forget
-   * (webhook tetap menjawab seketika; helper core tidak pernah melempar),
-   * dan TIDAK diulang pada pesan berikutnya dari kontak yang sama.
-   */
-  const triggerContactPhoto = (
-    db: AuthBundle["db"],
-    account: TelegramAccountRef,
-    contactId: string,
-    senderExternalId: string,
-  ): void => {
-    if (!account.accessTokenEncrypted || !opts.channelTokenSecret) return;
-    const botToken = decryptChannelSecret(
-      opts.channelTokenSecret,
-      account.accessTokenEncrypted,
-    );
-    if (!botToken) return;
-    void fetchAndStoreTelegramProfilePhoto(db, {
-      tenantId: account.tenantId,
-      botToken,
-      telegramApiBase: opts.telegramApiBase,
-      telegramUserId: senderExternalId,
-      ownerType: "contact",
-      ownerId: contactId,
-    });
   };
 
   app.post("/telegram/webhook/:channelAccountId", async (c) => {
@@ -174,223 +136,21 @@ export function createTelegramRoutes(
       });
       return c.json({ ok: true });
     }
-    if (account.status !== "connected") {
-      await logIntegration({
-        direction: "in",
-        provider: "telegram",
-        tenantId: account.tenantId,
-        channelAccountId: account.id,
-        signatureValid: true,
-        outcome: "ignored_disconnected",
-        summary: `update for ${account.status} account`,
-        payload,
-      });
-      return c.json({ ok: true });
-    }
-
-    // Update `my_chat_member` (Fase 6A.1): bot dimasukkan/dikeluarkan
-    // grup. Bukan pesan — cukup jejak audit. Fase 6A.2: untuk chat
-    // bertipe channel, bot yang menjadi ADMIN juga membuat percakapan
-    // channel-nya tampil di dashboard (diurus core).
-    // Kegagalan mencatat TIDAK boleh menggagalkan webhook (tetap 200).
-    const memberUpdate = (payload as TelegramUpdate).my_chat_member;
-    if (memberUpdate?.chat && typeof memberUpdate.chat.id === "number") {
-      try {
-        await recordTelegramMyChatMember(bundle.db, account, {
-          chatExternalId: String(memberUpdate.chat.id),
-          chatTitle: memberUpdate.chat.title ?? null,
-          memberStatus: memberUpdate.new_chat_member?.status ?? "unknown",
-          chatType: memberUpdate.chat.type ?? null,
-        });
-        await logIntegration({
-          direction: "in",
-          provider: "telegram",
-          tenantId: account.tenantId,
-          channelAccountId: account.id,
-          signatureValid: true,
-          outcome: "recorded",
-          summary: `my_chat_member update for chat ${memberUpdate.chat.id}`,
-          payload,
-        });
-      } catch (err) {
-        console.error("[telegram] gagal mencatat my_chat_member", err);
-        await logIntegration({
-          direction: "in",
-          provider: "telegram",
-          tenantId: account.tenantId,
-          channelAccountId: account.id,
-          signatureValid: true,
-          outcome: "error",
-          errorCode: "processing_error",
-          summary: "failed to record my_chat_member update",
-          payload,
-        });
-      }
-      return c.json({ ok: true });
-    }
-
-    // Update `channel_post` (Fase 6A.2): postingan channel tempat bot
-    // menjadi admin — termasuk pantulan postingan yang kita kirim
-    // sendiri dari dashboard (ter-dedup di core terhadap pesan outbound
-    // yang menyimpan message_id yang sama). Bukan pesan percakapan:
-    // masuk linimasa channel tanpa unread & tanpa automation/agent.
-    // Non-teks → parser mengembalikan null → 200 diabaikan.
-    if ((payload as TelegramUpdate).channel_post) {
-      const post = parseTelegramChannelPost(payload);
-      if (!post) {
-        await logIntegration({
-          direction: "in",
-          provider: "telegram",
-          tenantId: account.tenantId,
-          channelAccountId: account.id,
-          signatureValid: true,
-          outcome: "ignored_status_only",
-          summary: "non-text channel post",
-          payload,
-        });
-        return c.json({ ok: true });
-      }
-      let recorded: Awaited<ReturnType<typeof recordTelegramChannelPost>>;
-      try {
-        recorded = await recordTelegramChannelPost(bundle.db, account, {
-          chatExternalId: post.chatExternalId,
-          chatTitle: post.chatTitle,
-          // Sematkan id bot seperti jalur pesan: index unik global.
-          providerMessageId: `telegram:${account.externalId}:${post.providerMessageId}`,
-          text: post.text,
-        });
-      } catch (err) {
-        await logIntegration({
-          direction: "in",
-          provider: "telegram",
-          tenantId: account.tenantId,
-          channelAccountId: account.id,
-          signatureValid: true,
-          outcome: "error",
-          errorCode: "processing_error",
-          summary: "failed to record channel post",
-          payload,
-        });
-        throw err;
-      }
-      await logIntegration({
-        direction: "in",
-        provider: "telegram",
-        tenantId: account.tenantId,
-        channelAccountId: account.id,
-        signatureValid: true,
-        outcome: !recorded || recorded.duplicate ? "duplicate" : "recorded",
-        summary: `channel post in chat ${post.chatExternalId}`,
-        payload,
-      });
-      // Fase 6G: linimasa channel berubah — nudge dashboard (postingan
-      // pantulan milik tenant lain mengembalikan null di core dan
-      // tidak menghasilkan nudge di sini).
-      if (recorded && publisher) {
-        await publisher.publishNudge({
-          kind: "message.received",
-          tenantId: account.tenantId,
-          conversationId: recorded.message.conversationId,
-        });
-      }
-      return c.json({ ok: true });
-    }
-
-    const events = parseTelegramUpdate(payload);
-    let handledCount = 0;
-    if (events.length > 0) {
-      const update = payload as TelegramUpdate;
-      const from = update.message?.from;
-      const senderName =
-        [from?.first_name, from?.last_name]
-          .filter((part): part is string => Boolean(part?.trim()))
-          .join(" ")
-          .trim() || "Telegram user";
-      for (const event of events) {
-        if (event.type !== "message.received" || !event.message?.text) {
-          continue;
-        }
-        handledCount += 1;
-        let recorded: Awaited<
-          ReturnType<typeof recordTelegramInboundMessage>
-        >;
-        try {
-          recorded = await recordTelegramInboundMessage(bundle.db, account, {
-            senderExternalId: event.message.senderExternalId,
-            senderName,
-            senderUsername: from?.username,
-            // Fase 6A.1: alamat balasan = id CHAT (grup: id grup negatif),
-            // terpisah dari identitas pengirim di atas.
-            chatExternalId: event.message.conversationExternalId,
-            isGroup: event.message.conversationKind === "group",
-            chatTitle: event.message.conversationTitle ?? null,
-            // Index unik provider_message_id bersifat global → sematkan id
-            // bot agar pesan dari bot berbeda tidak bertabrakan.
-            providerMessageId: `telegram:${account.externalId}:${event.message.providerMessageId ?? event.providerEventId ?? ""}`,
-            text: event.message.text,
-          });
-        } catch (err) {
-          await logIntegration({
-            direction: "in",
-            provider: "telegram",
-            tenantId: account.tenantId,
-            channelAccountId: account.id,
-            signatureValid: true,
-            outcome: "error",
-            errorCode: "processing_error",
-            summary: `failed to record message from ${event.message.senderExternalId}`,
-            payload,
-          });
-          throw err;
-        }
-        await logIntegration({
-          direction: "in",
-          provider: "telegram",
-          tenantId: account.tenantId,
-          channelAccountId: account.id,
-          signatureValid: true,
-          outcome:
-            recorded === null || recorded.duplicate ? "duplicate" : "recorded",
-          summary: `text message from ${event.message.senderExternalId}`,
-          payload,
-        });
-        if (recorded) {
-          // Fase 6D: pengirim pertama kali terlihat → ambil foto profil
-          // kontaknya (best-effort, tidak menahan jawaban webhook).
-          if (recorded.identityCreated) {
-            triggerContactPhoto(
-              bundle.db,
-              account,
-              recorded.contactId,
-              event.message.senderExternalId,
-            );
-          }
-          // Fase 6G: nudge dashboard setelah commit (null = kembaran milik
-          // tenant lain / duplikat webhook — tidak ada perubahan lokal).
-          if (publisher) {
-            await publisher.publishNudge({
-              kind: "message.received",
-              tenantId: account.tenantId,
-              conversationId: recorded.message.conversationId,
-            });
-          }
-        }
-      }
-    }
-    if (handledCount === 0) {
-      // Update valid tanpa konten yang bisa dicatat (edit, reaksi,
-      // pesan non-teks, service update, ...) — tetap berjejak di log.
-      await logIntegration({
-        direction: "in",
-        provider: "telegram",
-        tenantId: account.tenantId,
-        channelAccountId: account.id,
-        signatureValid: true,
-        outcome: "ignored_status_only",
-        summary: "update without recordable message content",
-        payload,
-      });
-    }
+    // Pemrosesan update yang sudah lolos gerbang (Fase 7B.2:
+    // diekstrak ke process.ts agar jalur yang sama persis dipakai
+    // replay log integrasi). Error core per event dicatat di sana
+    // lalu dilempar ulang — perilaku respons route tidak berubah.
+    await processTelegramUpdate(
+      {
+        db: bundle.db,
+        publisher,
+        channelTokenSecret: opts.channelTokenSecret,
+        telegramApiBase: opts.telegramApiBase,
+        log: logIntegration,
+      },
+      account,
+      payload,
+    );
     return c.json({ ok: true });
   });
 

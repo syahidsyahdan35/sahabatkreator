@@ -1,31 +1,56 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import {
+  FailedMessageListQuerySchema,
+  FailedMessageListResponseSchema,
+  FailedMessageResponseSchema,
+  FailedMessageRetryResponseSchema,
   IntegrationLogDetailResponseSchema,
   IntegrationLogListQuerySchema,
   IntegrationLogListResponseSchema,
+  IntegrationLogReplayResponseSchema,
   IntegrationLogResponseSchema,
+  type FailedMessageResponse,
   type IntegrationLogDetailResponse,
   type IntegrationLogListQuery,
   type IntegrationLogResponse,
 } from "@sahabat-kreator/contracts";
 import {
+  evaluateIntegrationLogReplayEligibility,
   getIntegrationLog,
   getUnresolvedIntegrationLog,
   isPlatformAdminEmail,
+  listFailedOutboundMessages,
   listIntegrationLogs,
   listUnresolvedIntegrationLogs,
+  retryFailedOutboundMessage,
+  type FailedOutboundMessage,
   type ListIntegrationLogsInput,
 } from "@sahabat-kreator/core";
 import type { IntegrationLogRow } from "@sahabat-kreator/db";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
+import { runIntegrationLogReplay } from "./replay";
 
 export interface LogsRoutesOptions {
   /** Allowlist mentah env PLATFORM_ADMIN_EMAILS (koma-terpisah). */
   platformAdminEmails?: string;
+  /**
+   * Dependensi replay Fase 7B.2 — transport yang sama seperti route
+   * webhook live (publisher realtime + kredensial channel + base URL
+   * provider + versi Graph), dirakit di index.ts dari env yang sama.
+   * Tanpa ini endpoint replay menjawab 503.
+   */
+  replay?: {
+    publisher: RealtimePublisher | null;
+    channelTokenSecret?: string;
+    telegramApiBase?: string;
+    metaApiBase?: string;
+    graphApiVersion: string;
+  };
 }
 
 function serializeLog(row: IntegrationLogRow): IntegrationLogResponse {
@@ -52,6 +77,23 @@ function serializeLogDetail(row: IntegrationLogRow): IntegrationLogDetailRespons
   });
 }
 
+function serializeFailedMessage(
+  m: FailedOutboundMessage,
+): FailedMessageResponse {
+  return FailedMessageResponseSchema.parse({
+    id: m.id,
+    conversationId: m.conversationId,
+    provider: m.provider,
+    channelAccountId: m.channelAccountId,
+    channelDisplayName: m.channelDisplayName,
+    contactId: m.contactId,
+    contactName: m.contactName,
+    contentPreview: m.contentPreview,
+    errorCode: m.errorCode,
+    createdAt: m.createdAt.toISOString(),
+  });
+}
+
 function toListInput(query: IntegrationLogListQuery): ListIntegrationLogsInput {
   return {
     provider: query.provider,
@@ -69,6 +111,19 @@ function toListInput(query: IntegrationLogListQuery): ListIntegrationLogsInput {
  *   GET /tenants/:tenantId/logs/:logId       detail (payload tersimpan)
  *   GET /logs/unresolved                     baris platform (tenant NULL)
  *   GET /logs/unresolved/:logId              detail baris platform
+ *
+ * Fase 7B.2 — penanganan kegagalan (akses owner/admin yang sama):
+ *   POST /tenants/:tenantId/logs/:logId/replay
+ *        proses ulang baris arah masuk yang eligible (signature_valid
+ *        true, payload lengkap, outcome error/ignored_disconnected)
+ *        lewat jalur pemrosesan webhook live (lihat ./replay.ts);
+ *        tidak eligible → 422 LOG_REPLAY_NOT_ALLOWED /
+ *        LOG_PAYLOAD_TRUNCATED; akun sumber hilang → 422.
+ *   GET  /tenants/:tenantId/failed-messages  pusat pesan keluar `failed`
+ *   POST /tenants/:tenantId/failed-messages/:messageId/retry
+ *        antrekan ulang failed → queued secara atomik (core); channel
+ *        tidak connected → 409 CHANNEL_DISCONNECTED; bukan failed →
+ *        409 MESSAGE_NOT_FAILED; tak ditemukan → 404.
  *
  * AKSES (payload memuat isi pesan pelanggan — sensitif):
  * - Route tenant: sesi + membership; non-member 404 TENANT_NOT_FOUND
@@ -101,6 +156,15 @@ export function createLogsRoutes(
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
     );
     app.get("/logs/unresolved/:logId", (c) =>
+      apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
+    );
+    app.post(`${tenantBase}/:logId/replay`, (c) =>
+      apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
+    );
+    app.get("/tenants/:tenantId/failed-messages", (c) =>
+      apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
+    );
+    app.post("/tenants/:tenantId/failed-messages/:messageId/retry", (c) =>
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
     );
     return app;
@@ -199,6 +263,145 @@ export function createLogsRoutes(
     const row = await getUnresolvedIntegrationLog(bundle.db, logId);
     if (!row) return apiError(c, 404, "NOT_FOUND", "Log entry not found");
     return c.json(serializeLogDetail(row));
+  });
+
+  // ---------------------------------------------------------------------
+  // Fase 7B.2: replay webhook + pusat pesan gagal (owner/admin saja —
+  // penjaga yang sama seperti pembacaan log di atas).
+  // ---------------------------------------------------------------------
+
+  const guardOwnerAdmin = async (c: Context<{ Variables: AppVariables }>) => {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(
+      bundle,
+      c.req.param("tenantId") ?? "",
+      appUser.id,
+    );
+    if (!tenant) {
+      return {
+        error: apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found"),
+      } as const;
+    }
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return {
+        error: apiError(
+          c,
+          403,
+          "FORBIDDEN",
+          "Only workspace owners and admins can manage delivery failures",
+        ),
+      } as const;
+    }
+    return { tenant, appUser } as const;
+  };
+
+  app.post(`${tenantBase}/:logId/replay`, async (c) => {
+    const guard = await guardOwnerAdmin(c);
+    if ("error" in guard) return guard.error;
+    const logId = c.req.param("logId");
+    if (!z.string().uuid().safeParse(logId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Log entry not found");
+    }
+    const row = await getIntegrationLog(bundle.db, guard.tenant.id, logId);
+    if (!row) return apiError(c, 404, "NOT_FOUND", "Log entry not found");
+    const eligibility = evaluateIntegrationLogReplayEligibility(row);
+    if (!eligibility.ok) {
+      return apiError(
+        c,
+        422,
+        eligibility.code,
+        eligibility.code === "LOG_PAYLOAD_TRUNCATED"
+          ? "The stored payload for this entry is incomplete and cannot be replayed"
+          : "This log entry cannot be replayed",
+      );
+    }
+    if (!opts.replay) {
+      return apiError(c, 503, "INTERNAL_ERROR", "Replay is not configured");
+    }
+    const result = await runIntegrationLogReplay(
+      { bundle, ...opts.replay },
+      row,
+      guard.appUser.id,
+    );
+    if (result.kind === "account_unavailable") {
+      return apiError(
+        c,
+        422,
+        "LOG_REPLAY_NOT_ALLOWED",
+        "The channel account for this event no longer exists",
+      );
+    }
+    const body = IntegrationLogReplayResponseSchema.parse({
+      replayed: true,
+      sourceLogId: row.id,
+      outcomes: result.outcomes,
+    });
+    return c.json(body);
+  });
+
+  app.get("/tenants/:tenantId/failed-messages", async (c) => {
+    const guard = await guardOwnerAdmin(c);
+    if ("error" in guard) return guard.error;
+    const parsed = FailedMessageListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid failed message list query");
+    }
+    const page = await listFailedOutboundMessages(bundle.db, guard.tenant.id, {
+      provider: parsed.data.provider,
+      cursor: parsed.data.cursor,
+      limit: parsed.data.limit,
+    });
+    const body = FailedMessageListResponseSchema.parse({
+      messages: page.messages.map(serializeFailedMessage),
+      nextCursor: page.nextCursor,
+    });
+    return c.json(body);
+  });
+
+  app.post("/tenants/:tenantId/failed-messages/:messageId/retry", async (c) => {
+    const guard = await guardOwnerAdmin(c);
+    if ("error" in guard) return guard.error;
+    const messageId = c.req.param("messageId");
+    if (!z.string().uuid().safeParse(messageId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Message not found");
+    }
+    const result = await retryFailedOutboundMessage(
+      bundle.db,
+      { tenantId: guard.tenant.id, userId: guard.appUser.id },
+      messageId,
+    );
+    switch (result.kind) {
+      case "requeued": {
+        const body = FailedMessageRetryResponseSchema.parse({
+          id: result.message.id,
+          status: "queued",
+        });
+        return c.json(body);
+      }
+      case "not_found":
+        return apiError(c, 404, "NOT_FOUND", "Message not found");
+      case "not_failed":
+        return apiError(
+          c,
+          409,
+          "MESSAGE_NOT_FAILED",
+          "Only failed messages can be retried",
+        );
+      case "channel_disconnected":
+        return apiError(
+          c,
+          409,
+          "CHANNEL_DISCONNECTED",
+          "Channel is disconnected",
+        );
+      case "unsupported_provider":
+        return apiError(
+          c,
+          422,
+          "MESSAGE_RETRY_UNSUPPORTED",
+          "This provider does not support retrying failed messages",
+        );
+    }
   });
 
   return app;

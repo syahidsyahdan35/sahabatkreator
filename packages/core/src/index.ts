@@ -40,8 +40,15 @@ export {
   markConversationRead,
   markOutboundMessageSent,
   markOutboundMessageFailed,
+  RETRYABLE_FAILED_PROVIDERS,
+  listFailedOutboundMessages,
+  retryFailedOutboundMessage,
   type ConversationWithSummary,
   type ConversationDeliveryTarget,
+  type FailedOutboundMessage,
+  type ListFailedOutboundMessagesInput,
+  type FailedOutboundMessagePage,
+  type RetryFailedOutboundMessageResult,
 } from "./conversations";
 export {
   createAutomation,
@@ -271,6 +278,10 @@ export {
   listUnresolvedIntegrationLogs,
   getUnresolvedIntegrationLog,
   pruneIntegrationLogs,
+  REPLAYABLE_INBOUND_OUTCOMES,
+  isIntegrationLogPayloadTruncated,
+  evaluateIntegrationLogReplayEligibility,
+  recordIntegrationReplayAudit,
   type IntegrationLogDirection,
   type IntegrationLogInboundOutcome,
   type IntegrationLogOutboundOutcome,
@@ -278,6 +289,7 @@ export {
   type RecordIntegrationLogInput,
   type ListIntegrationLogsInput,
   type IntegrationLogPage,
+  type IntegrationLogReplayEligibility,
 } from "./integration-log";
 export {
   PLATFORM_SETTING_KEYS,

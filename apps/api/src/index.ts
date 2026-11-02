@@ -112,10 +112,19 @@ const platformOptions: PlatformSettingsOptions = {
 
 // Modul log integrasi (Fase 7B.1) — pembacaan integration_log:
 // /tenants/:tenantId/logs (owner/admin) + /logs/unresolved (platform admin).
+// Fase 7B.2: replay memakai dependensi transport yang sama seperti
+// route webhook live (publisher + kredensial + base URL provider).
 routes.route(
   "/",
   createLogsRoutes(authBundle, {
     platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
+    replay: {
+      publisher: realtimePublisher,
+      channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+      telegramApiBase: env.TELEGRAM_API_BASE,
+      metaApiBase: env.META_API_BASE,
+      graphApiVersion: META_GRAPH_API_VERSION,
+    },
   }),
 );
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.

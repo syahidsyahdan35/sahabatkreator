@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
+  auditLogs,
   integrationLog,
   type Database,
   type IntegrationLogRow,
@@ -371,4 +372,101 @@ export async function pruneIntegrationLogs(
     if (batch < PRUNE_BATCH_SIZE) break;
   }
   return { deleted };
+}
+
+// ---------------------------------------------------------------------------
+// Replay / proses ulang event masuk (Fase 7B.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome arah masuk yang BOLEH diproses ulang dari log: `error`
+ * (pemrosesan gagal di tengah jalan — pesannya mungkin belum tercatat)
+ * dan `ignored_disconnected` (akun sedang tidak connected saat event
+ * tiba; kini mungkin sudah terhubung lagi). Outcome lain sudah final
+ * secara makna: recorded/duplicate sudah masuk inbox, ignored_echo &
+ * ignored_status_only memang tidak memuat pesan, rejected_* tidak lolos
+ * gerbang kepercayaan, unresolved_account tidak ber-tenant.
+ */
+export const REPLAYABLE_INBOUND_OUTCOMES: readonly IntegrationLogInboundOutcome[] =
+  ["error", "ignored_disconnected"];
+
+/** Apakah payload tersimpan adalah objek penanda hasil pemotongan ±32KB? */
+export function isIntegrationLogPayloadTruncated(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as { truncated?: unknown }).truncated === true
+  );
+}
+
+export type IntegrationLogReplayEligibility =
+  | { ok: true }
+  | { ok: false; code: "LOG_REPLAY_NOT_ALLOWED" | "LOG_PAYLOAD_TRUNCATED" };
+
+/**
+ * Penilaian kelayakan replay SATU baris log — aturan keamanan Fase 7B.2:
+ * - hanya arah 'in' dengan `signatureValid === true` (event yang gagal
+ *   verifikasi TIDAK PERNAH diproses ulang — memprosesnya akan melewati
+ *   makna tanda tangan/secret webhook);
+ * - hanya outcome di REPLAYABLE_INBOUND_OUTCOMES;
+ * - payload harus tersimpan LENGKAP (tidak null, bukan penanda
+ *   truncated) — payload sepotong tidak boleh ditebak-tebak.
+ * Baris asli tidak pernah diubah oleh replay (append-only); hasil replay
+ * adalah baris-baris BARU dari jalur pemrosesan live yang sama.
+ */
+export function evaluateIntegrationLogReplayEligibility(
+  row: Pick<
+    IntegrationLogRow,
+    "direction" | "signatureValid" | "outcome" | "payload"
+  >,
+): IntegrationLogReplayEligibility {
+  if (row.direction !== "in") return { ok: false, code: "LOG_REPLAY_NOT_ALLOWED" };
+  if (row.signatureValid !== true) {
+    return { ok: false, code: "LOG_REPLAY_NOT_ALLOWED" };
+  }
+  if (
+    !(REPLAYABLE_INBOUND_OUTCOMES as readonly string[]).includes(row.outcome)
+  ) {
+    return { ok: false, code: "LOG_REPLAY_NOT_ALLOWED" };
+  }
+  if (row.payload === null || row.payload === undefined) {
+    return { ok: false, code: "LOG_PAYLOAD_TRUNCATED" };
+  }
+  if (isIntegrationLogPayloadTruncated(row.payload)) {
+    return { ok: false, code: "LOG_PAYLOAD_TRUNCATED" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Audit aksi replay oleh operator (Fase 7B.2): siapa memproses ulang
+ * baris log mana dan outcome apa yang dihasilkan replay-nya. Ditulis
+ * dalam konteks tenant pemilik baris sumber (baris tenant-NULL tidak
+ * bisa direplay lewat endpoint tenant). TANPA payload/secret — hanya id
+ * dan outcome. Berbeda dari `recordIntegrationLog`, audit ini BOLEH
+ * melempar: kegagalannya harus terlihat oleh pemanggil, bukan ditelan.
+ */
+export async function recordIntegrationReplayAudit(
+  db: Database,
+  input: {
+    tenantId: string;
+    userId: string;
+    sourceLogId: string;
+    provider: string;
+    outcomes: IntegrationLogOutcome[];
+  },
+): Promise<void> {
+  await withTenantDb(db, input.tenantId, async (tx) => {
+    await tx.insert(auditLogs).values({
+      tenantId: input.tenantId,
+      actorType: "user",
+      actorId: input.userId,
+      action: "integration.replay",
+      meta: {
+        sourceLogId: input.sourceLogId,
+        provider: input.provider,
+        outcomes: input.outcomes,
+      },
+    });
+  });
 }

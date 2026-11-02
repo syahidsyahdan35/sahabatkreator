@@ -9,6 +9,7 @@ import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { inputClassName } from "../components/AuthLayout";
 import { ChannelAvatar } from "../components/ChannelAvatar";
+import { FailedMessagesPanel } from "./FailedMessagesPanel";
 import { usePolling } from "../hooks/usePolling";
 import { formatDateTime } from "../utils/format";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
@@ -63,6 +64,23 @@ const OUTCOME_LABEL_KEYS: Record<OutcomeValue, TranslationKey> = {
   sent: "logs.outcomeSent",
   failed: "logs.outcomeFailed",
 };
+
+/**
+ * Kelayakan replay di sisi UI (cermin aturan server Fase 7B.2 — server
+ * tetap penegak akhirnya): arah masuk, tanda tangan valid saat intake,
+ * payload tersimpan, dan outcome yang belum final (`error` /
+ * `ignored_disconnected`). Payload yang terpotong lolos saringan ini
+ * tetapi ditolak server dengan LOG_PAYLOAD_TRUNCATED — pesan errornya
+ * tampil di dialog konfirmasi.
+ */
+function isReplayEligible(row: IntegrationLogResponse): boolean {
+  return (
+    row.direction === "in" &&
+    row.signatureValid === true &&
+    row.hasPayload &&
+    (row.outcome === "error" || row.outcome === "ignored_disconnected")
+  );
+}
 
 /** Warna chip outcome mengikuti token semantik (pola StatusPill Channels). */
 function outcomeChipClass(outcome: string): string {
@@ -131,6 +149,12 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [tab, setTab] = useState<"logs" | "failed">("logs");
+  const [replayTarget, setReplayTarget] =
+    useState<IntegrationLogResponse | null>(null);
+  const [replaying, setReplaying] = useState(false);
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const [replayNotice, setReplayNotice] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [details, setDetails] = useState<
     Record<string, IntegrationLogDetailResponse>
@@ -281,6 +305,30 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
   const channelById = (id: string | null) =>
     id ? (channels.find((ch) => ch.id === id) ?? null) : null;
 
+  /** Fase 7B.2: jalankan replay baris target, laporkan outcome baris
+   *  baru yang dihasilkannya, lalu muat ulang daftar dari awal. */
+  const confirmReplay = async () => {
+    if (!replayTarget || !tenantId || replaying) return;
+    setReplaying(true);
+    setReplayError(null);
+    try {
+      const result = await api.logs.replay(tenantId, replayTarget.id);
+      const outcomes = result.outcomes
+        .map(
+          (o) => t(OUTCOME_LABEL_KEYS[o as OutcomeValue] ?? "logs.outcomeError"),
+        )
+        .join(", ");
+      setReplayTarget(null);
+      setReplayNotice(t("logs.replayDone", { outcomes }));
+      setDetails({});
+      await load();
+    } catch (err) {
+      setReplayError(translateApiError(t, err));
+    } finally {
+      setReplaying(false);
+    }
+  };
+
   const selectClass = `${inputClassName} sm:w-auto`;
 
   return (
@@ -288,6 +336,34 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
       <h1 className="text-xl font-bold text-ink">{t("logs.title")}</h1>
       <p className="mt-1 max-w-2xl text-sm text-muted">{t("logs.subtitle")}</p>
 
+      <div className="mt-5 flex gap-2">
+        {(
+          [
+            { value: "logs", label: t("logs.tabLogs") },
+            { value: "failed", label: t("logs.tabFailed") },
+          ] as const
+        ).map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => setTab(option.value)}
+            className={
+              tab === option.value
+                ? "rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
+                : "rounded-lg border border-line bg-surface px-4 py-2 text-sm font-medium text-ink hover:bg-elevated"
+            }
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "failed" ? (
+        <div className="mt-6">
+          <FailedMessagesPanel t={t} locale={locale} />
+        </div>
+      ) : (
+        <>
       <div className="mt-5 flex flex-wrap items-end gap-3">
         <label className="block">
           <span className="mb-1 block text-xs font-medium text-muted">
@@ -372,6 +448,12 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
       {unresolvedMode ? (
         <p className="mt-3 max-w-2xl rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning">
           {t("logs.unresolvedHint")}
+        </p>
+      ) : null}
+
+      {replayNotice ? (
+        <p className="mt-4 rounded-lg bg-success/10 px-3 py-2 text-sm text-success">
+          {replayNotice}
         </p>
       ) : null}
 
@@ -497,6 +579,21 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
                       </p>
                     )}
                   </div>
+                  {!unresolvedMode && isReplayEligible(row) ? (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReplayError(null);
+                          setReplayNotice(null);
+                          setReplayTarget(row);
+                        }}
+                        className="rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-medium text-ink hover:bg-elevated"
+                      >
+                        {t("logs.replayButton")}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -514,6 +611,62 @@ export function LogsPage({ t, locale, isPlatformAdmin }: LogsPageProps) {
           >
             {loadingMore ? t("logs.loadingMore") : t("logs.loadMore")}
           </button>
+        </div>
+      ) : null}
+        </>
+      )}
+
+      {replayTarget ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="text-lg font-bold text-ink">
+                {t("logs.replayTitle")}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setReplayTarget(null)}
+                className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-ink"
+              >
+                {t("common.close")}
+              </button>
+            </div>
+            <p className="mt-3 text-sm text-muted">{t("logs.replayBody")}</p>
+            <p className="mt-3 text-sm text-muted">
+              {formatDateTime(replayTarget.createdAt, locale)} ·{" "}
+              {replayTarget.provider} ·{" "}
+              {t(
+                OUTCOME_LABEL_KEYS[replayTarget.outcome as OutcomeValue] ??
+                  "logs.outcomeError",
+              )}
+            </p>
+            {replayError ? (
+              <p className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">
+                {replayError}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReplayTarget(null)}
+                className="rounded-lg border border-line bg-surface px-4 py-2 text-sm font-medium text-ink"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmReplay()}
+                disabled={replaying}
+                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {replaying ? t("logs.replaying") : t("logs.replayConfirm")}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>
