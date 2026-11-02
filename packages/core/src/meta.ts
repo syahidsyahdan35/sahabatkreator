@@ -231,6 +231,17 @@ export async function resolveMetaAccountByExternalId(
           eq(channelAccounts.externalId, externalId),
         ),
       )
+      // Fase 7C (temuan rantai): external_id yang sama BOLEH hidup di
+      // beberapa tenant sebagai baris disconnected (penjaga 0020 hanya
+      // melarang >1 yang connected). Tanpa urutan ini resolver bisa
+      // memungut baris disconnected tenant lain dan webhook tenant
+      // pemilik koneksi aktif ter-abaikan sebagai ignored_disconnected.
+      // Penjaga menjamin maks. satu connected → dahulukan dia; bila
+      // tidak ada, ambil yang terbaru agar log tetap bermakna.
+      .orderBy(
+        sql`case when ${channelAccounts.status} = 'connected' then 0 else 1 end`,
+        desc(channelAccounts.createdAt),
+      )
       .limit(1);
     return row ?? null;
   });

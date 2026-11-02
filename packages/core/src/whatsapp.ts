@@ -224,6 +224,13 @@ export async function resolveWhatsAppAccountByPhoneNumberId(
           eq(channelAccounts.externalId, phoneNumberId),
         ),
       )
+      // Fase 7C: dahulukan akun connected (penjaga 0020 menjamin
+      // maks. satu per external_id) — alasan lengkap di
+      // resolveMetaAccountByExternalId (meta.ts).
+      .orderBy(
+        sql`case when ${channelAccounts.status} = 'connected' then 0 else 1 end`,
+        desc(channelAccounts.createdAt),
+      )
       .limit(1);
     return row ?? null;
   });
