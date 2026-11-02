@@ -573,42 +573,165 @@ function NodeConfigPanel({
       ) : null}
 
       {type === "delay" ? (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-3">
           <div>
-            <label className={labelClass} htmlFor="cfg-delay-amount">
-              {t("flows.delayAmountLabel")}
-            </label>
-            <input
-              id="cfg-delay-amount"
-              type="number"
-              min={0}
-              step={1}
-              className={inputClass}
-              disabled={readOnly}
-              value={
-                typeof config.amount === "number" ? config.amount : 0
-              }
-              onChange={(e) =>
-                set({ amount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })
-              }
-            />
+            <span className={labelClass}>{t("flows.delayModeLabel")}</span>
+            <div className="mt-2 space-y-1.5">
+              {(
+                [
+                  ["fixed", "flows.delayModeFixed"],
+                  ["random", "flows.delayModeRandom"],
+                ] as const
+              ).map(([mode, key]) => {
+                const randomCfg = config.random as
+                  | { min?: unknown; max?: unknown }
+                  | undefined;
+                const isRandom =
+                  typeof randomCfg === "object" && randomCfg !== null;
+                return (
+                  <label
+                    key={mode}
+                    className="flex items-center gap-2 text-sm text-ink"
+                  >
+                    <input
+                      type="radio"
+                      name="delay-mode"
+                      disabled={readOnly}
+                      checked={mode === "random" ? isRandom : !isRandom}
+                      onChange={() => {
+                        if (mode === "random") {
+                          const base =
+                            typeof config.amount === "number" &&
+                            config.amount >= 1
+                              ? Math.floor(config.amount)
+                              : 1;
+                          set({ random: { min: base, max: base + 5 } });
+                        } else {
+                          // Kembali ke mode tetap: kunci random DIHAPUS
+                          // dari config (bukan dinonaktifkan) agar graf
+                          // yang tersimpan persis yang dieksekusi.
+                          const { random: _drop, ...rest } = config;
+                          onChange(node.id, rest);
+                        }
+                      }}
+                    />
+                    {t(key)}
+                  </label>
+                );
+              })}
+            </div>
           </div>
-          <div>
-            <label className={labelClass} htmlFor="cfg-delay-unit">
-              {t("flows.delayUnitLabel")}
-            </label>
-            <select
-              id="cfg-delay-unit"
-              className={inputClass}
-              disabled={readOnly}
-              value={str(config.unit) || "minutes"}
-              onChange={(e) => set({ unit: e.target.value })}
-            >
-              <option value="seconds">{t("flows.unitSeconds")}</option>
-              <option value="minutes">{t("flows.unitMinutes")}</option>
-              <option value="hours">{t("flows.unitHours")}</option>
-            </select>
-          </div>
+          {(() => {
+            const randomCfg = config.random as
+              | { min?: unknown; max?: unknown }
+              | undefined;
+            const isRandom =
+              typeof randomCfg === "object" && randomCfg !== null;
+            const num = (v: unknown, fallback: number) =>
+              typeof v === "number" && Number.isFinite(v) ? v : fallback;
+            return isRandom ? (
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className={labelClass} htmlFor="cfg-delay-min">
+                    {t("flows.delayMinLabel")}
+                  </label>
+                  <input
+                    id="cfg-delay-min"
+                    type="number"
+                    min={1}
+                    step={1}
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={num(randomCfg?.min, 1)}
+                    onChange={(e) =>
+                      set({
+                        random: {
+                          min: Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                          max: num(randomCfg?.max, 1),
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-delay-max">
+                    {t("flows.delayMaxLabel")}
+                  </label>
+                  <input
+                    id="cfg-delay-max"
+                    type="number"
+                    min={1}
+                    step={1}
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={num(randomCfg?.max, 1)}
+                    onChange={(e) =>
+                      set({
+                        random: {
+                          min: num(randomCfg?.min, 1),
+                          max: Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-delay-unit">
+                    {t("flows.delayUnitLabel")}
+                  </label>
+                  <select
+                    id="cfg-delay-unit"
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={str(config.unit) || "minutes"}
+                    onChange={(e) => set({ unit: e.target.value })}
+                  >
+                    <option value="seconds">{t("flows.unitSeconds")}</option>
+                    <option value="minutes">{t("flows.unitMinutes")}</option>
+                    <option value="hours">{t("flows.unitHours")}</option>
+                  </select>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass} htmlFor="cfg-delay-amount">
+                    {t("flows.delayAmountLabel")}
+                  </label>
+                  <input
+                    id="cfg-delay-amount"
+                    type="number"
+                    min={0}
+                    step={1}
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={
+                      typeof config.amount === "number" ? config.amount : 0
+                    }
+                    onChange={(e) =>
+                      set({ amount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-delay-unit">
+                    {t("flows.delayUnitLabel")}
+                  </label>
+                  <select
+                    id="cfg-delay-unit"
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={str(config.unit) || "minutes"}
+                    onChange={(e) => set({ unit: e.target.value })}
+                  >
+                    <option value="seconds">{t("flows.unitSeconds")}</option>
+                    <option value="minutes">{t("flows.unitMinutes")}</option>
+                    <option value="hours">{t("flows.unitHours")}</option>
+                  </select>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       ) : null}
 

@@ -24,6 +24,7 @@ import {
   type Database,
 } from "@sahabat-kreator/db";
 import { withTenantDb, type DbTx } from "./tx";
+import { renderMessageText } from "./render-text";
 
 /**
  * Broadcasts v1 (Fase 7C) — kampanye siaran teks ke audiens kontak pada
@@ -1284,10 +1285,12 @@ export async function dispatchBroadcast(
             .returning();
           conversationId = created.id;
         }
-        const rendered = broadcast.messageText.replaceAll(
-          "{name}",
-          candidate.contactName,
-        );
+        // Render PER PENERIMA (Fase 9A): selain {name}, spintax diacak
+        // ulang untuk setiap penerima agar variasinya menyebar ke
+        // seluruh audiens, bukan satu varian untuk semua.
+        const rendered = renderMessageText(broadcast.messageText, {
+          name: candidate.contactName,
+        });
         const [message] = await tx
           .insert(messages)
           .values({

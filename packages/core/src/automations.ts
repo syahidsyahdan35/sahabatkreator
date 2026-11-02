@@ -17,6 +17,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
+import { renderMessageText } from "./render-text";
 import { startFlowRunsForInboundMessage } from "./flows";
 
 /**
@@ -718,10 +719,9 @@ export async function evaluateInboundMessageForAutomations(
         })
         .returning();
 
-      const rendered = automation.actionConfig.text.replaceAll(
-        "{name}",
-        context.contact?.name ?? "",
-      );
+      const rendered = renderMessageText(automation.actionConfig.text, {
+        name: context.contact?.name,
+      });
       const [outbound] = await tx
         .insert(messages)
         .values({
@@ -976,7 +976,7 @@ export async function executeSequenceStep(
       )
       .limit(1);
 
-    const rendered = step.text.replaceAll("{name}", contact?.name ?? "");
+    const rendered = renderMessageText(step.text, { name: contact?.name });
     const [outbound] = await tx
       .insert(messages)
       .values({

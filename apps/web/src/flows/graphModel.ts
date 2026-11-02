@@ -145,6 +145,20 @@ export function summarizeNodeConfig(
           : unit === "hours"
             ? "flows.unitHours"
             : "flows.unitMinutes";
+      // Smart Delay (Fase 9A): ringkasan menampilkan rentangnya.
+      const r = c.random as { min?: unknown; max?: unknown } | undefined;
+      if (
+        typeof r === "object" &&
+        r !== null &&
+        typeof r.min === "number" &&
+        typeof r.max === "number"
+      ) {
+        return t("flows.summaryDelayRandom", {
+          min: r.min,
+          max: r.max,
+          unit: t(unitKey as TranslationKey),
+        });
+      }
       return t("flows.summaryDelay", { amount, unit: t(unitKey as TranslationKey) });
     }
     case "add_tag":

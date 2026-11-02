@@ -21,6 +21,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { LlmProvider } from "@sahabat-kreator/ai";
 import { withTenantDb, type DbTx } from "./tx";
+import { renderMessageText } from "./render-text";
 import { respondToInboundMessage } from "./agent-runtime";
 
 /**
@@ -269,6 +270,29 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
       }
       if (c.unit !== "seconds" && c.unit !== "minutes" && c.unit !== "hours") {
         err("DELAY_UNIT_INVALID", "Node delay membutuhkan unit 'seconds'|'minutes'|'hours'");
+      }
+      // Smart Delay (Fase 9A): random opsional {min, max} dalam satuan
+      // node yang sama — keduanya bilangan bulat positif, min ≤ max,
+      // dalam batas yang sama seperti amount. Rentang rusak = error
+      // aktivasi, bukan kejutan saat eksekusi.
+      if (c.random !== undefined) {
+        const r = c.random as { min?: unknown; max?: unknown } | null;
+        const valid =
+          typeof r === "object" &&
+          r !== null &&
+          typeof r.min === "number" &&
+          Number.isInteger(r.min) &&
+          typeof r.max === "number" &&
+          Number.isInteger(r.max) &&
+          r.min >= 1 &&
+          r.max >= r.min &&
+          r.max <= 100_000;
+        if (!valid) {
+          err(
+            "DELAY_RANDOM_INVALID",
+            "Smart Delay membutuhkan config.random {min, max} bilangan bulat dengan 1 ≤ min ≤ max",
+          );
+        }
       }
       break;
     }
@@ -1406,7 +1430,7 @@ async function executeNodeInTx(
       if (!ctx.conversation) {
         throw new FlowNodeError("percakapan run tidak ditemukan");
       }
-      const rendered = text.replaceAll("{name}", ctx.contact?.name ?? "");
+      const rendered = renderMessageText(text, { name: ctx.contact?.name });
       const [outbound] = await tx
         .insert(messages)
         .values({
@@ -1479,6 +1503,38 @@ async function executeNodeInTx(
         c.unit === "seconds" ? 1_000 : c.unit === "minutes" ? 60_000 : c.unit === "hours" ? 3_600_000 : NaN;
       if (!Number.isFinite(amount) || !Number.isFinite(unitMs)) {
         throw new FlowNodeError("delay dengan config amount/unit tidak sah");
+      }
+      // Smart Delay (Fase 9A): config.random {min, max} yang sah
+      // mengalahkan amount tetap — durasi dipilih acak bilangan bulat
+      // dalam [min, max] pada satuan node, dan pilihan itu DICATAT di
+      // detail langkah (chosenAmount + rentangnya) agar bisa diaudit.
+      // Random yang rusak di graf aktif lama (pra-validasi) diabaikan:
+      // jatuh ke amount, tidak pernah menggagalkan run.
+      const r = c.random as { min?: unknown; max?: unknown } | undefined;
+      const randomValid =
+        typeof r === "object" &&
+        r !== null &&
+        typeof r.min === "number" &&
+        Number.isInteger(r.min) &&
+        typeof r.max === "number" &&
+        Number.isInteger(r.max) &&
+        r.min >= 1 &&
+        r.max >= r.min;
+      if (randomValid) {
+        const min = r.min as number;
+        const max = r.max as number;
+        const chosenAmount = min + Math.floor(Math.random() * (max - min + 1));
+        const waitMs = Math.max(0, Math.floor(chosenAmount * unitMs));
+        return {
+          detail: {
+            outcome: "waiting",
+            delayMs: waitMs,
+            resumeAt: new Date(Date.now() + waitMs).toISOString(),
+            random: { min, max, unit: String(c.unit) },
+            chosenAmount,
+          },
+          waitMs,
+        };
       }
       const waitMs = Math.max(0, Math.floor(amount * unitMs));
       return {

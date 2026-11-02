@@ -347,6 +347,7 @@ export {
   type CancelBroadcastResult,
   type DispatchBroadcastResult,
 } from "./broadcasts";
+export { renderMessageText } from "./render-text";
 export {
   FLOW_MAX_STEPS,
   normalizeFlowGraph,
@@ -380,6 +381,15 @@ export {
   type FlowStepDeps,
   type ExecuteFlowStepResult,
 } from "./flows";
+export {
+  listSavedReplies,
+  createSavedReply,
+  updateSavedReply,
+  deleteSavedReply,
+  type SavedReply,
+  type UpdateSavedReplyResult,
+  type DeleteSavedReplyResult,
+} from "./saved-replies";
 export {
   PLATFORM_SETTING_KEYS,
   PLATFORM_PUBLIC_CONFIG_KEYS,

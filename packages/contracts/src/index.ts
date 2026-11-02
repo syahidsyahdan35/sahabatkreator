@@ -1903,7 +1903,12 @@ export type BroadcastRecipientListQuery = z.infer<
  *                   "name"|"phone"|"email", value }
  *                 | { predicate: "message_contains", text } — memakai
  *                   teks pesan pemicu run.
- * - delay         { amount: int ≥ 0, unit: "seconds"|"minutes"|"hours" }
+ * - delay         { amount: int ≥ 0, unit: "seconds"|"minutes"|"hours",
+ *                   random?: { min: int, max: int } } — Smart Delay
+ *                   (Fase 9A): bila `random` ada, durasi dipilih acak
+ *                   bilangan bulat dalam [min, max] pada satuan node
+ *                   yang sama dan `amount` diabaikan; min ≥ 1,
+ *                   min ≤ max (ditegakkan validasi aktivasi).
  * - add_tag       { tag }    remove_tag { tag }    set_stage { stage }
  * - enroll_sequence { automationId } — sequence AKTIF milik tenant
  *                   yang sama (divalidasi saat aktivasi & eksekusi).
@@ -1973,6 +1978,15 @@ export const FlowNodeConfigSchema = z.union([
   z.object({
     amount: z.number().int().min(0).max(100_000),
     unit: z.enum(["seconds", "minutes", "hours"]),
+    // Smart Delay (Fase 9A): rentang acak opsional dalam satuan yang
+    // sama; keabsahan rentang (min ≥ 1, min ≤ max) ditegakkan validasi
+    // aktivasi di core, bukan di skema bentuk ini.
+    random: z
+      .object({
+        min: z.number().int(),
+        max: z.number().int(),
+      })
+      .optional(),
   }),
   z.object({ tag: z.string().min(1).max(64) }),
   z.object({ stage: z.string().min(1).max(64) }),
@@ -2129,3 +2143,48 @@ export const FlowRunStepListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 export type FlowRunStepListQuery = z.infer<typeof FlowRunStepListQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Fase 9A — Saved Replies (macro `/` di composer Inbox)
+// ---------------------------------------------------------------------------
+
+/**
+ * Satu balasan tersimpan milik workspace. `body` boleh memuat {name};
+ * substitusinya dilakukan klien saat penyisipan ke composer (WYSIWYG).
+ * `createdByUserId` adalah dasar gerbang edit/hapus di server: hanya
+ * pembuat atau owner/admin workspace yang boleh mengubah/menghapus;
+ * membaca & membuat boleh semua member.
+ */
+export const SavedReplyResponseSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  body: z.string(),
+  createdByUserId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type SavedReplyResponse = z.infer<typeof SavedReplyResponseSchema>;
+
+export const SavedReplyListResponseSchema = z.object({
+  replies: z.array(SavedReplyResponseSchema),
+});
+export type SavedReplyListResponse = z.infer<
+  typeof SavedReplyListResponseSchema
+>;
+
+export const CreateSavedReplyRequestSchema = z.object({
+  title: z.string().min(1).max(255),
+  body: z.string().min(1).max(4096),
+});
+export type CreateSavedReplyRequest = z.infer<
+  typeof CreateSavedReplyRequestSchema
+>;
+
+/** Edit parsial: minimal satu field (ditegakkan di route). */
+export const UpdateSavedReplyRequestSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+  body: z.string().min(1).max(4096).optional(),
+});
+export type UpdateSavedReplyRequest = z.infer<
+  typeof UpdateSavedReplyRequestSchema
+>;
