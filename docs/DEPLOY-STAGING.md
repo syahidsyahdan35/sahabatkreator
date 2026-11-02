@@ -2589,3 +2589,146 @@ lapis kedua.
   3/10 dtk, percobaan ke-4 sudah 429); sign-in benar sesudahnya 200.
 - Typecheck `@sahabat-kreator/api` hijau; health publik ok; API
   di-restart (PID baru) dengan dist hasil build commit ini.
+
+---
+
+## Update Fase 7A — Channel Instagram + Messenger + label shell & glyph merek (2026-11-02)
+
+Tiga permintaan user dalam satu fase: (A) label teks "Language"/"Theme"
+di shell dihapus, (B) glyph WhatsApp & Messenger diganti path SVG merek
+autentik, (C) channel Instagram + Messenger dibangun penuh (mock-first;
+wiring live menunggu artefak Meta App user).
+
+### Bagian A & B (commit `440d4f0`)
+
+- `App.tsx`: dua `<span>` label terlihat di samping kontrol preferensi
+  dihapus; tombol EN/ID + tombol ikon tema tetap (title/aria-label
+  dipertahankan). Kunci i18n yatim `common.language`/`common.theme`
+  DIBERSIHKAN dari resource en+id (satu-satunya pemakainya label itu).
+- `ChannelAvatar.tsx`: `ProviderMeta` diperluas flag `filled`; glyph
+  `whatsapp` (sebelumnya ikon gagang telepon generik Feather) dan
+  `messenger` (gelembung generik) kini path logo merek terisi
+  (fill currentColor, viewBox 24) — gelembung+gagang khas WhatsApp dan
+  gelembung+petir khas Messenger. Provider lain tidak diubah.
+
+### Bagian C — arsitektur Meta (commit `bf1fa34`)
+
+- **Model akun**: messenger external_id = Page ID; instagram
+  external_id = ID akun IG Professional; token keduanya Page Access
+  Token (token IG adalah token Page yang terhubung — Page ID pada form
+  IG hanya untuk memvalidasi token milik Page itu, TIDAK disimpan).
+  Migrasi **0026**: kolom `public_handle` (username Page/IG dari Graph)
+  + 4 policy RLS `meta_delivery_scan` (staging kini **41 policy**).
+  Resolusi webhook memakai ULANG lengan generik
+  `provider_external_lookup` (0020) — tanpa lengan baru. Versi Graph
+  ter-pin **v26.0** dari `@sahabat-kreator/config`; env baru
+  `META_API_BASE` (override mock, pola TELEGRAM_API_BASE).
+- **Connect** (token-based v1, pola Telegram): validasi
+  `GET /{id}?fields=name,username` → token/akun ditolak Graph = 422
+  `META_TOKEN_INVALID`; penjaga satu-akun-satu-koneksi = 409
+  `META_ACCOUNT_ALREADY_CONNECTED`; workspace sama: connected →
+  idempoten, disconnected/error → revive baris yang sama. Token
+  terenkripsi AES-256-GCM (helper channel-secrets yang sama). Foto
+  Page/akun IG diambil saat connect (`GET /{id}/picture`) dan disimpan
+  sebagai byte (`profile_photos`, pola 6D). Disconnect = semantik yang
+  ada persis (token dibersihkan; webhook Meta adalah urusan dashboard
+  Meta App — inbound untuk akun non-connected diabaikan di sisi kita).
+- **Webhook tunggal** `GET+POST /api/meta/webhook`: handshake
+  `hub.verify_token` vs env `META_WEBHOOK_VERIFY_TOKEN`; POST
+  memverifikasi `X-Hub-Signature-256` (HMAC-SHA256 raw body, env
+  `META_APP_SECRET`). Secret belum diset → **503 META_NOT_CONFIGURED**
+  (fail-closed, terbukti publik sebelum secret staging dipasang);
+  tanda tangan salah → 401 `META_SIGNATURE_INVALID`. Objek `page` →
+  Messenger, `instagram` → Instagram. `is_echo` dilewati; DM teks →
+  core `recordMetaInboundMessage` (identitas → kontak berlabel cadangan
+  per provider → percakapan privat → pesan + outbox `message.received`;
+  dedup mid majemuk `meta:<accountId>:<mid>` ON CONFLICT DO NOTHING).
+  Profil pengirim (nama + foto) diambil best-effort saat identitas
+  pertama terlihat — nama cadangan hanya diganti nama Graph bila belum
+  disunting pemilik.
+- **Pengiriman keluar**: poller API (±2 dtk, lengan `meta_delivery_scan`)
+  `POST /v26.0/{account-id}/messages` (untuk IG: id akun IG, token Page
+  yang sama), messaging_type RESPONSE. Sukses → `sent` + mid majemuk
+  tersimpan; error Graph → `failed` SATU percobaan dengan kode
+  `meta_graph_<kode>` di `messages.error_code` (jujur soal jendela
+  24 jam Meta — tidak ada retry tanpa henti).
+- **UI**: form connect Messenger & Instagram menggantikan kartu
+  "Segera" (WhatsApp tetap Segera); panel "Webhook Meta" (owner/admin)
+  menampilkan Callback URL + Verify Token dari endpoint baru
+  `GET /tenants/:tenantId/channels/meta-webhook-info` dengan tombol
+  salin + petunjuk dwibahasa (subscribe field `messages`); kartu
+  menampilkan @handle (`publicHandle`) + chip `m.me/<username|pageId>`
+  / `ig.me/m/<username>` hanya saat connected; tombol "Hubungkan lagi"
+  untuk akun Meta terputus.
+
+### Env staging baru (nilai TIDAK dicatat di sini)
+
+- `META_WEBHOOK_VERIFY_TOKEN` — dibangkitkan acak di server, permanen
+  di `.env.staging` (600). Inilah nilai yang ditempel user ke Meta App.
+- `META_APP_SECRET` — saat ini **PLACEHOLDER acak staging**.
+  **WAJIB diganti secret Meta App asli user sebelum trafik live** —
+  selama placeholder, tanda tangan webhook Meta sungguhan tidak akan
+  pernah cocok (401) dan itu disengaja (fail-closed).
+
+### Langkah wiring LIVE untuk user (di luar fase ini)
+
+1. Buat Meta App (developers.facebook.com) tipe Business; tambahkan
+   produk Messenger + Instagram.
+2. Di App > Webhooks: Callback URL = `https://botara.my.id/api/meta/webhook`,
+   Verify Token = nilai dari panel "Webhook Meta" di halaman Channels
+   (atau minta operator platform), lalu subscribe field **`messages`**
+   untuk objek Page dan Instagram.
+3. Ganti `META_APP_SECRET` di `.env.staging` server dengan App Secret
+   asli (lewat jalur aman, BUKAN chat) + restart API.
+4. Hubungkan Page/IG dari halaman Channels: Page ID (+ ID akun IG)
+   dan Page Access Token Page tersebut.
+5. Catatan mode pengembangan Meta: sebelum App Review lolos, hanya
+   akun yang berperan di app (admin/developer/tester) dan Page/IG
+   milik sendiri yang bisa bertukar pesan — audiens umum butuh App
+   Review untuk `pages_messaging` / `instagram_manage_messages`.
+
+### Deploy & verifikasi (TANPA Playwright)
+
+- Migrasi 0026 diterapkan via psql (`MIGRATION_DATABASE_URL`,
+  ON_ERROR_STOP) + baris jurnal `__drizzle_migrations` didaftarkan
+  manual (hash = sha256 isi file, terverifikasi cocok dengan skema
+  baris 0025). Build semua → rsync (`.env.staging` dikecualikan) →
+  restart api/web/worker. Bundle publik **`index-Dq8TNNMR.js`** identik
+  dengan build lokal.
+- Typecheck SEMUA proyek hijau; PGlite db verify lulus termasuk seksi
+  baru **[19]** (kolom public_handle; pindai `app.system_delivery='meta'`
+  hanya membuka baris messenger/instagram — telegram tertutup; antrean
+  poller teresolusi penerimanya) — hitungan policy verify 37 → 41.
+- **Rantai mock Graph dari server: 44/44 PASS** (tenant uji
+  `fase7a-*@sk.test`; jendela mock singkat: `META_API_BASE` lokal +
+  `META_APP_SECRET` uji, lalu env dipulihkan — `META_API_BASE` dicabut,
+  `META_APP_SECRET` diganti placeholder permanen): handshake benar →
+  challenge, salah → 403; tanda tangan salah → 401 berkode; connect
+  token buruk → 422 berkode; connect kedua provider → 201 dengan
+  nama/handle Graph persis; foto akun byte-identik mock; DM bertanda
+  tangan → percakapan/pesan di inbox; kontak bernama dari profil Graph
+  + foto byte-identik; balasan → `sent` + mid majemuk, mock menerima
+  POST ke endpoint Page (messenger) & akun IG (instagram) dengan
+  recipient/teks/messaging_type benar; echo tanpa pesan ganda; mid
+  duplikat ter-dedup; Page sama di tenant lain → 409 tanpa baris baru;
+  disconnect → DM berikutnya diabaikan.
+- Channel asli user TIDAK tersentuh (diverifikasi DB: bot Telegram
+  `8fb9b81c` tetap connected, `10be58d5` tetap disconnected, keduanya
+  tidak trashed; baris messenger/instagram hanya ada di tenant uji
+  "WS 7A a"). Health publik ok; 4 service active.
+
+### Batas jujur
+
+- Wiring live belum diuji ke Meta sungguhan — semua bukti lewat mock
+  Graph lokal. Langkah live (App Secret asli, pendaftaran webhook di
+  Meta App, Page Access Token asli) adalah milik user (lihat daftar di
+  atas); mode pengembangan Meta membatasi trafik ke akun milik app
+  sendiri sampai App Review lolos.
+- Jendela pesan Meta 24 jam berlaku sungguhan: balasan di luar jendela
+  akan ditolak Graph dan pesan ditandai `failed` berkode — v1 tidak
+  mengirim tag HUMAN_AGENT/template.
+- Page yang belum memasang foto: Graph `/picture` bisa mengembalikan
+  siluet bawaan Meta; dari API tak terbedakan dari foto asli.
+- Instagram: pengiriman memakai endpoint messages akun IG dengan token
+  Page terhubung (keputusan desain fase ini); Page ID tidak disimpan.
+- Grup/threads bersama & komentar IG belum dicakup — v1 hanya DM 1:1.
