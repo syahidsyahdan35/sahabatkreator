@@ -127,6 +127,9 @@ export function auditActionCategory(action: string): string {
  * sequence.*). Hanya nilai string non-kosong yang dipakai.
  */
 const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
+  // whatsappTemplateId didahulukan: meta whatsapp_template.* membawa
+  // juga channelAccountId, dan target utamanya adalah templatenya.
+  ["whatsappTemplateId", "whatsapp_template"],
   // flowRunId/flowId didahulukan: meta flow.* membawa keduanya
   // (run_started/run_completed/run_failed/run_cancelled → target run;
   // created/updated/activated/deactivated hanya membawa flowId).

@@ -12,6 +12,7 @@ import { tenants } from "./tenants";
 import { users } from "./identity";
 import { channelAccounts } from "./channels";
 import { contacts, conversations, messages } from "./inbox";
+import { whatsappTemplates } from "./whatsapp-templates";
 
 /**
  * Kelompok Campaign (Fase 7C — Broadcasts v1):
@@ -65,8 +66,31 @@ export const broadcasts = pgTable(
       .references(() => channelAccounts.id, { onDelete: "cascade" }),
     /** Judul internal kampanye (tidak dikirim ke penerima). */
     name: varchar("name", { length: 255 }).notNull(),
-    /** Isi pesan teks; placeholder {name} disubstitusi per penerima. */
+    /** Isi pesan teks; placeholder {name} disubstitusi per penerima. Untuk broadcast WhatsApp kolom ini menampung teks BODY template (snapshot saat dibuat). */
     messageText: varchar("message_text", { length: 4096 }).notNull(),
+    /**
+     * Template WhatsApp resmi untuk broadcast provider whatsapp
+     * (Fase 10A): wajib terisi (dan berstatus APPROVED) untuk channel
+     * WhatsApp; NULL untuk provider lain. SET NULL: template yang
+     * dihapus dari cermin membuat broadcast-nya kembali wajib memilih
+     * template (jadwal/dispatch menolak dengan kode template).
+     */
+    whatsappTemplateId: uuid("whatsapp_template_id").references(
+      () => whatsappTemplates.id,
+      { onDelete: "set null" },
+    ),
+    /**
+     * Sumber nilai variabel BODY template per posisi (Fase 10A):
+     * array sepanjang variable_count template; entri "name" = nama
+     * kontak, entri lain = kunci `contacts.custom_fields` penerima.
+     * Posisi tanpa sumber (array lebih pendek) membuat penerima
+     * di-skip `template_variable_missing` saat dispatch — kecuali
+     * posisi 1 yang jatuh kembali ke "name".
+     */
+    templateVariableSources: jsonb("template_variable_sources")
+      .notNull()
+      .default([])
+      .$type<string[]>(),
     /**
      * Filter audiens: { tags?: string[], stages?: string[] } — kontak
      * cocok bila punya SALAH SATU tag terdaftar (OR dalam kelompok tag)

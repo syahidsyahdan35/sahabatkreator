@@ -362,6 +362,14 @@ export {
 } from "./broadcasts";
 export { renderMessageText } from "./render-text";
 export {
+  listWhatsAppTemplates,
+  getWhatsAppTemplateById,
+  replaceSyncedWhatsAppTemplates,
+  recordCreatedWhatsAppTemplate,
+  deleteWhatsAppTemplateMirrorByName,
+  type WhatsAppTemplateUpsert,
+} from "./whatsapp-templates";
+export {
   FLOW_MAX_STEPS,
   normalizeFlowGraph,
   validateFlowGraph,

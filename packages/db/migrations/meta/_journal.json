@@ -253,6 +253,13 @@
       "when": 1793598414817,
       "tag": "0035_team_inbox",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1793598514817,
+      "tag": "0036_whatsapp_templates",
+      "breakpoints": true
     }
   ]
 }

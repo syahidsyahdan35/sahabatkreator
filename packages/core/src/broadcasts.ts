@@ -19,9 +19,11 @@ import {
   conversations,
   messages,
   outboxEvents,
+  whatsappTemplates,
   type Broadcast,
   type BroadcastRecipient,
   type Database,
+  type WhatsAppTemplate,
 } from "@sahabat-kreator/db";
 import { withTenantDb, type DbTx } from "./tx";
 import { renderMessageText } from "./render-text";
@@ -31,11 +33,18 @@ import { renderMessageText } from "./render-text";
  * SATU akun channel, dieksekusi worker.
  *
  * Keputusan desain yang mengikat modul ini:
- * - Provider yang didukung v1: telegram, messenger, instagram.
- *   WhatsApp dikecualikan (broadcast di luar jendela 24 jam wajib
- *   template resmi; manajemen template adalah fase tersendiri) dan
- *   webchat dikecualikan (pengunjung anonim — tidak ada semantik push).
- *   Keduanya ditolak berkode sejak buat/jadwalkan, bukan disembunyikan.
+ * - Provider yang didukung: telegram, messenger, instagram, dan
+ *   whatsapp LEWAT TEMPLATE resmi (Fase 10A — pesan template adalah
+ *   satu-satunya bentuk proaktif yang sah di luar jendela 24 jam).
+ *   Webchat tetap dikecualikan (pengunjung anonim — tidak ada
+ *   semantik push) dan ditolak berkode sejak buat/jadwalkan.
+ * - Broadcast WhatsApp WAJIB menunjuk template cermin lokal
+ *   berstatus APPROVED pada akun yang sama — diperiksa saat buat
+ *   (422 BROADCAST_TEMPLATE_REQUIRED / _NOT_APPROVED), diperiksa
+ *   ULANG saat jadwalkan dan saat dispatch (status di Meta bisa
+ *   berubah di antara ketiganya; dispatch yang gagal pemeriksaan
+ *   menutup broadcast `failed` berkode yang sama). Aturan jendela
+ *   24 jam Meta TIDAK berlaku untuk WhatsApp template.
  * - Audiens dimaterialisasi SAAT DISPATCH (bukan saat dibuat/
  *   dijadwalkan): kontak yang opt-out di antara jadwal dan kirim tetap
  *   dihormati. Kandidat = kontak yang punya identitas pada akun channel
@@ -60,7 +69,11 @@ import { renderMessageText } from "./render-text";
  *   member (data kampanye bersama workspace, selaras daftar kontak).
  */
 
-export type BroadcastProvider = "telegram" | "messenger" | "instagram";
+export type BroadcastProvider =
+  | "telegram"
+  | "messenger"
+  | "instagram"
+  | "whatsapp";
 export type BroadcastStatus = Broadcast["status"];
 export type BroadcastRecipientStatus = BroadcastRecipient["status"];
 
@@ -68,6 +81,9 @@ export const BROADCAST_SUPPORTED_PROVIDERS: ReadonlySet<string> = new Set([
   "telegram",
   "messenger",
   "instagram",
+  // Fase 10A: WhatsApp didukung LEWAT template resmi (gerbang
+  // template di bawah); webchat tetap satu-satunya yang ditolak.
+  "whatsapp",
 ]);
 
 export const META_24H_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -158,6 +174,8 @@ function normalizeFilter(
 export interface AudienceCandidate {
   contactId: string;
   contactName: string;
+  /** Fase 10A: dibaca untuk pemetaan variabel template WhatsApp. */
+  customFields: Record<string, unknown>;
   optInStatus: "unknown" | "opted_in" | "opted_out";
   /** Identitas kontak pada akun ini (alamat kirim cadangan poller). */
   externalUserId: string;
@@ -200,6 +218,7 @@ async function resolveAudienceCandidates(
     .select({
       contactId: contacts.id,
       contactName: contacts.name,
+      customFields: contacts.customFields,
       optInStatus: contacts.optInStatus,
       tags: contacts.tags,
       pipelineStage: contacts.pipelineStage,
@@ -222,6 +241,7 @@ async function resolveAudienceCandidates(
     byContact.set(row.contactId, {
       contactId: row.contactId,
       contactName: row.contactName,
+      customFields: (row.customFields ?? {}) as Record<string, unknown>,
       optInStatus: row.optInStatus,
       externalUserId: row.externalUserId,
       conversationId: null,
@@ -653,10 +673,122 @@ async function gateChannelForBroadcast(
   return { kind: "ok", provider: account.provider };
 }
 
+/** Hasil gerbang template WhatsApp (Fase 10A). */
+export type WhatsAppTemplateGate =
+  | { kind: "ok"; template: WhatsAppTemplate }
+  | { kind: "template_required" }
+  | { kind: "template_not_found" }
+  | { kind: "template_not_approved"; status: string };
+
+/**
+ * Gerbang template broadcast WhatsApp: wajib menunjuk baris cermin
+ * pada AKUN YANG SAMA berstatus APPROVED. Dipakai saat buat / edit /
+ * jadwalkan (lapisan API menerjemahkan kind menjadi kode kontrak)
+ * dan diperiksa ulang saat dispatch.
+ */
+async function gateWhatsAppTemplate(
+  tx: DbTx,
+  tenantId: string,
+  channelAccountId: string,
+  templateId: string | null | undefined,
+): Promise<WhatsAppTemplateGate> {
+  if (!templateId) return { kind: "template_required" };
+  const [template] = await tx
+    .select()
+    .from(whatsappTemplates)
+    .where(
+      and(
+        eq(whatsappTemplates.tenantId, tenantId),
+        eq(whatsappTemplates.id, templateId),
+        eq(whatsappTemplates.channelAccountId, channelAccountId),
+      ),
+    )
+    .limit(1);
+  if (!template) return { kind: "template_not_found" };
+  if (template.status !== "APPROVED") {
+    return { kind: "template_not_approved", status: template.status };
+  }
+  return { kind: "ok", template };
+}
+
+/**
+ * Normalisasi sumber variabel template: trim per posisi, maks 25.
+ * Entri kosong DIPERTAHANKAN (posisi adalah makna: menggeser entri
+ * akan memetakan variabel ke sumber yang salah); dispatch
+ * memperlakukan entri kosong sebagai tak terpetakan.
+ */
+function normalizeTemplateVariableSources(
+  sources: string[] | undefined,
+): string[] {
+  if (!sources) return [];
+  return sources.map((s) => s.trim()).slice(0, 25);
+}
+
+const TEMPLATE_PLACEHOLDER_RE = /\{\{(\d+)\}\}/g;
+
+/**
+ * Petakan nilai variabel BODY template untuk SATU penerima
+ * (keputusan v1 Fase 10A): posisi {{n}} mengambil sumber ke-n dari
+ * `sources` — "name" = nama kontak, nilai lain = kunci custom_fields
+ * kontak; posisi 1 tanpa sumber jatuh ke "name". Nilai kosong /
+ * kunci tidak ada / posisi tanpa sumber → null (penerima di-skip
+ * `template_variable_missing`) — TIDAK PERNAH string kosong.
+ */
+function resolveTemplateBodyParams(
+  template: WhatsAppTemplate,
+  sources: string[],
+  candidate: AudienceCandidate,
+): string[] | null {
+  const params: string[] = [];
+  for (let pos = 1; pos <= template.variableCount; pos++) {
+    const rawSource = sources[pos - 1];
+    const source =
+      rawSource && rawSource.trim() !== ""
+        ? rawSource
+        : pos === 1
+          ? "name"
+          : undefined;
+    if (!source) return null;
+    let value: string | null = null;
+    if (source === "name") {
+      value = candidate.contactName;
+    } else {
+      const raw = candidate.customFields?.[source];
+      if (typeof raw === "string") value = raw;
+      else if (typeof raw === "number" || typeof raw === "boolean") {
+        value = String(raw);
+      }
+    }
+    if (value === null || value.trim() === "") return null;
+    params.push(value);
+  }
+  return params;
+}
+
+/**
+ * Render pratinjau teks template dengan parameter terisi — disimpan
+ * sebagai content_text pesan keluar agar inbox menampilkan isi yang
+ * benar-benar terkirim. Cermin dari helper klien channel-whatsapp
+ * (core berada DI BAWAH paket channel, jadi tidak mengimpornya).
+ */
+function renderWhatsAppTemplatePreview(
+  bodyText: string,
+  bodyParams: string[],
+): string {
+  return bodyText.replace(TEMPLATE_PLACEHOLDER_RE, (_whole, raw: string) => {
+    const idx = Number(raw) - 1;
+    return idx >= 0 && idx < bodyParams.length ? bodyParams[idx] : "";
+  });
+}
+
 export type CreateBroadcastResult =
   | { kind: "created"; broadcast: BroadcastWithChannel }
   | { kind: "channel_not_found" }
-  | { kind: "channel_unsupported"; provider: string };
+  | { kind: "channel_unsupported"; provider: string }
+  | { kind: "template_required" }
+  | { kind: "template_not_found" }
+  | { kind: "template_not_approved"; status: string }
+  | { kind: "message_required" };
 
 export async function createBroadcast(
   db: Database,
@@ -665,7 +797,11 @@ export async function createBroadcast(
     userId: string;
     name: string;
     channelAccountId: string;
-    messageText: string;
+    /** Wajib untuk provider teks; untuk whatsapp diabaikan (template). */
+    messageText?: string;
+    /** Fase 10A: wajib (dan harus APPROVED) untuk channel whatsapp. */
+    whatsappTemplateId?: string | null;
+    templateVariableSources?: string[];
     filter?: BroadcastAudienceFilter;
   },
 ): Promise<CreateBroadcastResult> {
@@ -676,13 +812,36 @@ export async function createBroadcast(
       input.channelAccountId,
     );
     if (gate.kind !== "ok") return gate;
+    let messageText = input.messageText;
+    let whatsappTemplateId: string | null = null;
+    let templateVariableSources: string[] = [];
+    if (gate.provider === "whatsapp") {
+      const tGate = await gateWhatsAppTemplate(
+        tx,
+        input.tenantId,
+        input.channelAccountId,
+        input.whatsappTemplateId,
+      );
+      if (tGate.kind !== "ok") return tGate;
+      whatsappTemplateId = tGate.template.id;
+      templateVariableSources = normalizeTemplateVariableSources(
+        input.templateVariableSources,
+      );
+      // Teks broadcast WA = snapshot BODY template (pratinjau daftar);
+      // isi sesungguhnya dirender per penerima saat dispatch.
+      messageText = tGate.template.bodyText ?? tGate.template.name;
+    } else if (!messageText || messageText.trim() === "") {
+      return { kind: "message_required" as const };
+    }
     const [row] = await tx
       .insert(broadcasts)
       .values({
         tenantId: input.tenantId,
         channelAccountId: input.channelAccountId,
         name: input.name,
-        messageText: input.messageText,
+        messageText: messageText!,
+        whatsappTemplateId,
+        templateVariableSources,
         audienceFilter: normalizeFilter(input.filter),
         status: "draft",
         createdByUserId: input.userId,
@@ -697,6 +856,7 @@ export async function createBroadcast(
         broadcastId: row.id,
         channelAccountId: input.channelAccountId,
         provider: gate.provider,
+        ...(whatsappTemplateId ? { whatsappTemplateId } : {}),
       },
     });
     const broadcast = await selectBroadcastWithChannel(
@@ -713,7 +873,10 @@ export type UpdateBroadcastResult =
   | { kind: "not_found" }
   | { kind: "invalid_state"; status: BroadcastStatus }
   | { kind: "channel_not_found" }
-  | { kind: "channel_unsupported"; provider: string };
+  | { kind: "channel_unsupported"; provider: string }
+  | { kind: "template_required" }
+  | { kind: "template_not_found" }
+  | { kind: "template_not_approved"; status: string };
 
 export async function updateBroadcast(
   db: Database,
@@ -724,6 +887,9 @@ export async function updateBroadcast(
       name?: string;
       channelAccountId?: string;
       messageText?: string;
+      /** Fase 10A: ganti / lepas (null) template WhatsApp. */
+      whatsappTemplateId?: string | null;
+      templateVariableSources?: string[];
       filter?: BroadcastAudienceFilter;
     };
   },
@@ -738,16 +904,17 @@ export async function updateBroadcast(
     if (existing.status !== "draft") {
       return { kind: "invalid_state" as const, status: existing.status };
     }
-    if (
-      input.patch.channelAccountId &&
-      input.patch.channelAccountId !== existing.channelAccountId
-    ) {
+    const finalChannelId =
+      input.patch.channelAccountId ?? existing.channelAccountId;
+    let finalProvider = existing.provider;
+    if (finalChannelId !== existing.channelAccountId) {
       const gate = await gateChannelForBroadcast(
         tx,
         input.tenantId,
-        input.patch.channelAccountId,
+        finalChannelId,
       );
       if (gate.kind !== "ok") return gate;
+      finalProvider = gate.provider;
     }
     const patch: Partial<Broadcast> = { updatedAt: new Date() };
     if (input.patch.name !== undefined) patch.name = input.patch.name;
@@ -759,6 +926,34 @@ export async function updateBroadcast(
     }
     if (input.patch.filter !== undefined) {
       patch.audienceFilter = normalizeFilter(input.patch.filter);
+    }
+    // Fase 10A: keadaan akhir broadcast WhatsApp selalu lolos gerbang
+    // template (channel berganti ke WA tanpa template → ditolak);
+    // broadcast non-WA selalu membersihkan penunjukan template.
+    if (finalProvider === "whatsapp") {
+      const finalTemplateId =
+        input.patch.whatsappTemplateId !== undefined
+          ? input.patch.whatsappTemplateId
+          : existing.whatsappTemplateId;
+      const tGate = await gateWhatsAppTemplate(
+        tx,
+        input.tenantId,
+        finalChannelId,
+        finalTemplateId,
+      );
+      if (tGate.kind !== "ok") return tGate;
+      patch.whatsappTemplateId = tGate.template.id;
+      if (input.patch.templateVariableSources !== undefined) {
+        patch.templateVariableSources = normalizeTemplateVariableSources(
+          input.patch.templateVariableSources,
+        );
+      }
+      if (input.patch.messageText === undefined) {
+        patch.messageText = tGate.template.bodyText ?? tGate.template.name;
+      }
+    } else {
+      patch.whatsappTemplateId = null;
+      patch.templateVariableSources = [];
     }
     await tx
       .update(broadcasts)
@@ -813,7 +1008,9 @@ export type ScheduleBroadcastResult =
   | { kind: "not_found" }
   | { kind: "invalid_state"; status: BroadcastStatus }
   | { kind: "channel_disconnected" }
-  | { kind: "channel_unsupported"; provider: string };
+  | { kind: "channel_unsupported"; provider: string }
+  | { kind: "template_required" }
+  | { kind: "template_not_approved"; status: string };
 
 export async function scheduleBroadcast(
   db: Database,
@@ -857,6 +1054,22 @@ export async function scheduleBroadcast(
         kind: "channel_unsupported" as const,
         provider: account.provider,
       };
+    }
+    // Fase 10A: periksa ulang template SEBELUM menjadwalkan — status
+    // persetujuan di Meta bisa berubah sejak broadcast dibuat.
+    if (account.provider === "whatsapp") {
+      const tGate = await gateWhatsAppTemplate(
+        tx,
+        input.tenantId,
+        existing.channelAccountId,
+        existing.whatsappTemplateId,
+      );
+      if (tGate.kind === "template_not_approved") {
+        return { kind: "template_not_approved" as const, status: tGate.status };
+      }
+      if (tGate.kind !== "ok") {
+        return { kind: "template_required" as const };
+      }
     }
     const now = new Date();
     const dispatchAt =
@@ -1065,6 +1278,8 @@ export interface DispatchBroadcastResult {
     | "not_scheduled"
     | "channel_disconnected"
     | "channel_unsupported"
+    | "template_required"
+    | "template_not_approved"
     | "audience_empty"
     | "cancelled_mid_dispatch";
   /** Jumlah penerima yang dimaterialisasi pada pemanggilan ini. */
@@ -1137,6 +1352,28 @@ export async function dispatchBroadcast(
       await failBroadcast("CHANNEL_UNSUPPORTED");
       return { kind: "channel_unsupported" as const };
     }
+    // Fase 10A: pemeriksaan template TERAKHIR di gerbang dispatch —
+    // template yang dicabut persetujuannya di Meta sesudah jadwal
+    // menutup broadcast `failed` berkode kontrak yang sama, bukan
+    // mengirim diam-diam.
+    let waTemplate: WhatsAppTemplate | null = null;
+    if (account.provider === "whatsapp") {
+      const tGate = await gateWhatsAppTemplate(
+        tx,
+        tenantId,
+        broadcast.channelAccountId,
+        broadcast.whatsappTemplateId,
+      );
+      if (tGate.kind === "template_not_approved") {
+        await failBroadcast("BROADCAST_TEMPLATE_NOT_APPROVED");
+        return { kind: "template_not_approved" as const };
+      }
+      if (tGate.kind !== "ok") {
+        await failBroadcast("BROADCAST_TEMPLATE_REQUIRED");
+        return { kind: "template_required" as const };
+      }
+      waTemplate = tGate.template;
+    }
     if (broadcast.status === "scheduled") {
       const now = new Date();
       const [claimed] = await tx
@@ -1155,12 +1392,13 @@ export async function dispatchBroadcast(
       kind: "claimed" as const,
       broadcast,
       provider: account.provider as BroadcastProvider,
+      waTemplate,
     };
   });
   if (claim.kind !== "claimed") {
     return { dispatched: false, reason: claim.kind };
   }
-  const { broadcast, provider } = claim;
+  const { broadcast, provider, waTemplate } = claim;
   const isMeta = provider === "messenger" || provider === "instagram";
   const filter = normalizeFilter(
     broadcast.audienceFilter as BroadcastAudienceFilter,
@@ -1265,6 +1503,54 @@ export async function dispatchBroadcast(
           s += 1;
           continue;
         }
+        // Fase 10A: WhatsApp — petakan variabel template per penerima.
+        // Template TIDAK tunduk aturan 24 jam (isMeta hanya
+        // messenger/instagram); yang bisa menggagalkan penerima di
+        // sini hanya alamat kosong atau variabel tak terpetakan.
+        let templateBodyParams: string[] | null = null;
+        let templatePreview: string | null = null;
+        if (provider === "whatsapp") {
+          if (!waTemplate) {
+            // Tak tercapai: gerbang klaim menjamin template ada.
+            continue;
+          }
+          if (!candidate.externalUserId || candidate.externalUserId.trim() === "") {
+            await tx.insert(broadcastRecipients).values({
+              tenantId,
+              broadcastId,
+              contactId: candidate.contactId,
+              conversationId: candidate.conversationId,
+              status: "skipped",
+              skipReason: "missing_phone_number",
+            });
+            m += 1;
+            s += 1;
+            continue;
+          }
+          const params = resolveTemplateBodyParams(
+            waTemplate,
+            (broadcast.templateVariableSources as string[] | null) ?? [],
+            candidate,
+          );
+          if (!params) {
+            await tx.insert(broadcastRecipients).values({
+              tenantId,
+              broadcastId,
+              contactId: candidate.contactId,
+              conversationId: candidate.conversationId,
+              status: "skipped",
+              skipReason: "template_variable_missing",
+            });
+            m += 1;
+            s += 1;
+            continue;
+          }
+          templateBodyParams = params;
+          templatePreview = renderWhatsAppTemplatePreview(
+            waTemplate.bodyText ?? "",
+            params,
+          );
+        }
         // Percakapan 1:1 tujuan: pakai yang sudah ada, atau buat baru
         // (kontak beridentitas tetapi belum pernah membuka percakapan
         // yang tercatat — alamat balasan = id eksternal identitasnya,
@@ -1287,10 +1573,15 @@ export async function dispatchBroadcast(
         }
         // Render PER PENERIMA (Fase 9A): selain {name}, spintax diacak
         // ulang untuk setiap penerima agar variasinya menyebar ke
-        // seluruh audiens, bukan satu varian untuk semua.
-        const rendered = renderMessageText(broadcast.messageText, {
-          name: candidate.contactName,
-        });
+        // seluruh audiens, bukan satu varian untuk semua. Untuk
+        // WhatsApp isi pesan adalah pratinjau template berparameter
+        // (templatePayload membawa muatan kirim sesungguhnya).
+        const rendered =
+          provider === "whatsapp"
+            ? templatePreview!
+            : renderMessageText(broadcast.messageText, {
+                name: candidate.contactName,
+              });
         const [message] = await tx
           .insert(messages)
           .values({
@@ -1298,8 +1589,16 @@ export async function dispatchBroadcast(
             conversationId,
             direction: "outbound",
             senderType: "system",
-            type: "text",
+            type: provider === "whatsapp" ? "template" : "text",
             contentText: rendered,
+            templatePayload:
+              provider === "whatsapp"
+                ? {
+                    name: waTemplate!.name,
+                    languageCode: waTemplate!.language,
+                    bodyParams: templateBodyParams!,
+                  }
+                : undefined,
             status: "queued",
           })
           .returning();

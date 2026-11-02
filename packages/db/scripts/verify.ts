@@ -60,7 +60,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 3 tabel Fase 8A (flows, flow_runs, flow_run_steps)
 // + 1 tabel Fase 9A (saved_replies)
 // + 1 tabel Fase 9C (conversation_notes)
-assert.equal(Number(tablesRes.rows[0].count), 41);
+// + 1 tabel Fase 10A (whatsapp_templates)
+assert.equal(Number(tablesRes.rows[0].count), 42);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -147,7 +148,9 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada conversation_notes dan lengan baca
 //   `invitation_token_lookup` pada invitations (Fase 9C, migrasi
 //   0035) = 54.
-assert.equal(Number(policies.rows[0].count), 54);
+// + tenant_isolation pada whatsapp_templates (Fase 10A, migrasi
+//   0036) = 55.
+assert.equal(Number(policies.rows[0].count), 55);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -165,7 +168,8 @@ await db.exec(`
     broadcasts, broadcast_recipients,
     flows, flow_runs, flow_run_steps,
     saved_replies,
-    conversation_notes
+    conversation_notes,
+    whatsapp_templates
   TO app_user;
 `);
 
@@ -1830,6 +1834,81 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
   assert.equal(revokedCol.rows[0].n, "1");
   console.log(
     "[28] Fase 9C: conversation_notes terisolasi per tenant (insert silang ditolak, tanpa konteks 0 baris); lengan invitation_token_lookup membuka tepat baris pemilik hash & menolak hash lain; invitations.revoked_at ada: OK",
+  );
+}
+
+// ---------- 29. Fase 10A: whatsapp_templates + kolom template ----------
+{
+  const TPL_WA_CHAN = "10101010-1010-4101-8101-101010101010";
+  const TPL_ID = "10101010-1010-4101-8101-101010101011";
+  await db.query(
+    `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, parent_external_id, display_name, status)
+     VALUES ($1, $2, 'whatsapp', '628120000001', 'WABA-VERIFY-10A', 'WA Verify 10A', 'connected')`,
+    [TPL_WA_CHAN, TENANT_A],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    await tx.query(
+      `INSERT INTO whatsapp_templates (id, tenant_id, channel_account_id, meta_template_id, name, language, category, status, components, body_text, variable_count)
+       VALUES ($1, $2, $3, 'mtpl-1', 'promo_10a', 'id', 'MARKETING', 'APPROVED', '[]'::jsonb, 'Halo {{1}}, promo di {{2}}', 2)`,
+      [TPL_ID, TENANT_A, TPL_WA_CHAN],
+    );
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM whatsapp_templates WHERE id = $1`,
+      [TPL_ID],
+    );
+    // Insert silang (konteks A, baris ber-tenant B) ditolak RLS.
+    let crossInsertBlocked = false;
+    await tx.query(`SAVEPOINT sp_tpl1`);
+    try {
+      await tx.query(
+        `INSERT INTO whatsapp_templates (tenant_id, channel_account_id, name, language, category, status)
+         VALUES ($1, $2, 'silang_10a', 'id', 'UTILITY', 'PENDING')`,
+        [TENANT_B, TPL_WA_CHAN],
+      );
+    } catch {
+      crossInsertBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_tpl1`);
+    }
+    // Unik (akun, nama, bahasa) menolak ganda dalam tenant pemilik.
+    let uniqueBlocked = false;
+    await tx.query(`SAVEPOINT sp_tpl2`);
+    try {
+      await tx.query(
+        `INSERT INTO whatsapp_templates (tenant_id, channel_account_id, name, language, category, status)
+         VALUES ($1, $2, 'promo_10a', 'id', 'UTILITY', 'PENDING')`,
+        [TENANT_A, TPL_WA_CHAN],
+      );
+    } catch {
+      uniqueBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_tpl2`);
+    }
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM whatsapp_templates WHERE id = $1`,
+      [TPL_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const noCtx = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM whatsapp_templates`,
+    );
+    return { own, other, noCtx, crossInsertBlocked, uniqueBlocked };
+  });
+  assert.equal(views.own.rows[0].n, "1");
+  assert.equal(views.other.rows[0].n, "0");
+  assert.equal(views.noCtx.rows[0].n, "0");
+  assert.equal(views.crossInsertBlocked, true);
+  assert.equal(views.uniqueBlocked, true);
+  // Kolom Fase 10A pada broadcasts & messages ada.
+  const cols = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE (table_name = 'broadcasts' AND column_name IN ('whatsapp_template_id', 'template_variable_sources'))
+         OR (table_name = 'messages' AND column_name = 'template_payload')`,
+  );
+  assert.equal(cols.rows[0].n, "3");
+  console.log(
+    "[29] Fase 10A: whatsapp_templates terisolasi per tenant (insert silang ditolak, tanpa konteks 0 baris); unik (akun, nama, bahasa) menolak ganda; kolom broadcasts.whatsapp_template_id/template_variable_sources + messages.template_payload ada: OK",
   );
 }
 

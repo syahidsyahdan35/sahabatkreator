@@ -38,12 +38,21 @@ export const ErrorCodeSchema = z.enum([
   // Fase 7B.5: target kutipan balasan tidak sah (tak ada / tenant lain /
   // percakapan lain) → 422 pada endpoint balas dashboard & API publik v1.
   "MESSAGE_REPLY_TARGET_INVALID",
-  // Fase 7C: broadcast — channel tidak mendukung broadcast v1 (whatsapp
-  // menunggu template resmi; webchat tanpa semantik push) → 422; transisi
-  // status tidak sah (edit non-draft, jadwalkan non-draft, batalkan yang
-  // sudah terminal) → 409.
+  // Fase 7C: broadcast — channel tidak mendukung broadcast (webchat
+  // tanpa semantik push) → 422; transisi status tidak sah (edit
+  // non-draft, jadwalkan non-draft, batalkan yang sudah terminal) → 409.
+  // Fase 10A: WhatsApp terbuka LEWAT template — broadcast WA tanpa
+  // template → 422 BROADCAST_TEMPLATE_REQUIRED; template belum
+  // APPROVED → 422 BROADCAST_TEMPLATE_NOT_APPROVED.
   "BROADCAST_CHANNEL_UNSUPPORTED",
   "BROADCAST_INVALID_STATE",
+  "BROADCAST_TEMPLATE_REQUIRED",
+  "BROADCAST_TEMPLATE_NOT_APPROVED",
+  // Fase 10A: Meta menolak operasi template (buat/sinkron/hapus —
+  // nama ganda, bentuk tidak sah, contoh variabel kurang) → 422;
+  // akun WhatsApp tanpa WABA induk tercatat → 422.
+  "META_TEMPLATE_INVALID",
+  "META_WABA_MISSING",
   // Fase 8A: flow engine — graf tidak sah saat aktivasi (daftar masalah
   // terstruktur di `details.issues`) → 422; transisi status tidak sah
   // (edit flow aktif, aktifkan yang sudah aktif, dst.) → 409.
@@ -1846,6 +1855,7 @@ export const AuditCategorySchema = z.enum([
   "integration",
   "platform_settings",
   "broadcast",
+  "whatsapp_template",
   "flow",
 ]);
 export type AuditCategory = z.infer<typeof AuditCategorySchema>;
@@ -2012,6 +2022,10 @@ export const BroadcastSkipReasonSchema = z.enum([
   "opted_out",
   "outside_24h_window",
   "message_deleted",
+  // Fase 10A: variabel template WhatsApp penerima tidak terpetakan,
+  // atau identitas penerima tidak membawa alamat (nomor) tujuan.
+  "template_variable_missing",
+  "missing_phone_number",
 ]);
 export type BroadcastSkipReason = z.infer<typeof BroadcastSkipReasonSchema>;
 
@@ -2050,6 +2064,18 @@ export const BroadcastResponseSchema = z.object({
   channelDisplayName: z.string().nullable(),
   name: z.string(),
   messageText: z.string(),
+  /**
+   * Template WhatsApp untuk broadcast provider whatsapp (Fase 10A):
+   * id baris cermin lokal; null untuk provider lain (dan untuk
+   * broadcast WA yang templatenya sudah terhapus — wajib memilih
+   * ulang sebelum bisa dijadwalkan lagi).
+   */
+  whatsappTemplateId: z.string().uuid().nullable(),
+  /**
+   * Sumber nilai variabel BODY template per posisi (Fase 10A):
+   * "name" = nama kontak; nilai lain = kunci custom_fields kontak.
+   */
+  templateVariableSources: z.array(z.string()),
   audienceFilter: BroadcastAudienceFilterSchema,
   status: BroadcastStatusSchema,
   scheduledAt: z.string().datetime().nullable(),
@@ -2080,7 +2106,20 @@ export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
 export const CreateBroadcastRequestSchema = z.object({
   name: z.string().min(1).max(255),
   channelAccountId: z.string().uuid(),
-  messageText: z.string().min(1).max(4096),
+  /**
+   * Isi pesan teks — wajib untuk telegram/messenger/instagram.
+   * Untuk whatsapp kolom ini diabaikan (isi broadcast adalah template;
+   * server menyimpan teks BODY template sebagai snapshot) dan
+   * `whatsappTemplateId` yang wajib (422 BROADCAST_TEMPLATE_REQUIRED).
+   */
+  messageText: z.string().min(1).max(4096).optional(),
+  /** Template WhatsApp (Fase 10A) — wajib & harus APPROVED untuk channel whatsapp. */
+  whatsappTemplateId: z.string().uuid().optional(),
+  /** Sumber variabel template per posisi (Fase 10A): "name" atau kunci custom_fields. */
+  templateVariableSources: z
+    .array(z.string().min(1).max(64))
+    .max(25)
+    .optional(),
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
 });
 export type CreateBroadcastRequest = z.infer<
@@ -2092,6 +2131,11 @@ export const UpdateBroadcastRequestSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   channelAccountId: z.string().uuid().optional(),
   messageText: z.string().min(1).max(4096).optional(),
+  whatsappTemplateId: z.string().uuid().nullable().optional(),
+  templateVariableSources: z
+    .array(z.string().min(1).max(64))
+    .max(25)
+    .optional(),
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
 });
 export type UpdateBroadcastRequest = z.infer<
@@ -2169,6 +2213,130 @@ export const BroadcastRecipientListQuerySchema = z.object({
 });
 export type BroadcastRecipientListQuery = z.infer<
   typeof BroadcastRecipientListQuerySchema
+>;
+
+// ---------------------------------------------------------------------------
+// Fase 10A — Template WhatsApp (cermin lokal template resmi Meta)
+// ---------------------------------------------------------------------------
+
+/** Kategori template Meta. */
+export const WhatsAppTemplateCategorySchema = z.enum([
+  "UTILITY",
+  "MARKETING",
+  "AUTHENTICATION",
+]);
+export type WhatsAppTemplateCategory = z.infer<
+  typeof WhatsAppTemplateCategorySchema
+>;
+
+/**
+ * Status persetujuan Meta sebagaimana terakhir disinkronkan. Nilai di
+ * luar tiga status utama diteruskan apa adanya (varchar di cermin) —
+ * skema membatasi pada yang dikenal agar UI punya chip yang pasti;
+ * status asing dari Meta jatuh ke string mentahnya lewat validasi
+ * longgar di serializer (lihat routes).
+ */
+export const WhatsAppTemplateStatusSchema = z.enum([
+  "APPROVED",
+  "PENDING",
+  "REJECTED",
+]);
+export type WhatsAppTemplateStatus = z.infer<
+  typeof WhatsAppTemplateStatusSchema
+>;
+
+/** Satu tombol template sederhana (URL / QUICK_REPLY) untuk formulir buat. */
+export const WhatsAppTemplateButtonSchema = z.object({
+  type: z.enum(["URL", "QUICK_REPLY"]),
+  text: z.string().min(1).max(25),
+  /** Wajib untuk tombol URL (maks 2000 mengikuti batas Meta). */
+  url: z.string().url().max(2000).optional(),
+});
+export type WhatsAppTemplateButton = z.infer<
+  typeof WhatsAppTemplateButtonSchema
+>;
+
+/**
+ * Satu baris cermin template. `components` adalah komponen Meta apa
+ * adanya (array objek bebas) — bentuk tampilan diturunkan dari
+ * `bodyText` + `variableCount` yang dihitung server.
+ */
+export const WhatsAppTemplateResponseSchema = z.object({
+  id: z.string().uuid(),
+  channelAccountId: z.string().uuid(),
+  metaTemplateId: z.string().nullable(),
+  name: z.string(),
+  language: z.string(),
+  category: z.string(),
+  status: z.string(),
+  components: z.array(z.record(z.string(), z.unknown())),
+  bodyText: z.string().nullable(),
+  variableCount: z.number().int().nonnegative(),
+  syncedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type WhatsAppTemplateResponse = z.infer<
+  typeof WhatsAppTemplateResponseSchema
+>;
+
+export const WhatsAppTemplateListResponseSchema = z.object({
+  templates: z.array(WhatsAppTemplateResponseSchema),
+});
+export type WhatsAppTemplateListResponse = z.infer<
+  typeof WhatsAppTemplateListResponseSchema
+>;
+
+export const WhatsAppTemplateListQuerySchema = z.object({
+  channelAccountId: z.string().uuid(),
+});
+export type WhatsAppTemplateListQuery = z.infer<
+  typeof WhatsAppTemplateListQuerySchema
+>;
+
+/** Sinkronisasi cermin dari Meta untuk satu akun WhatsApp. */
+export const SyncWhatsAppTemplatesRequestSchema = z.object({
+  channelAccountId: z.string().uuid(),
+});
+export type SyncWhatsAppTemplatesRequest = z.infer<
+  typeof SyncWhatsAppTemplatesRequestSchema
+>;
+
+export const SyncWhatsAppTemplatesResponseSchema = z.object({
+  /** Jumlah template yang kini tercermin untuk akun (sesudah sinkron). */
+  synced: z.number().int().nonnegative(),
+  templates: z.array(WhatsAppTemplateResponseSchema),
+});
+export type SyncWhatsAppTemplatesResponse = z.infer<
+  typeof SyncWhatsAppTemplatesResponseSchema
+>;
+
+/**
+ * Buat template baru (diteruskan ke Meta `POST /{waba-id}/message_templates`).
+ * Bentuk formulir sederhana v1: HEADER teks polos opsional (tanpa
+ * variabel), BODY wajib (variabel {{n}} wajib disertai contoh di
+ * `bodyExamples` agar lolos tinjauan Meta), FOOTER opsional, tombol
+ * URL/QUICK_REPLY sederhana (maks 3). Nama mengikuti aturan Meta:
+ * huruf kecil, angka, garis bawah.
+ */
+export const CreateWhatsAppTemplateRequestSchema = z.object({
+  channelAccountId: z.string().uuid(),
+  name: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[a-z0-9_]+$/, "template name must be lowercase letters, digits and underscores"),
+  language: z.string().min(2).max(32),
+  category: WhatsAppTemplateCategorySchema,
+  headerText: z.string().min(1).max(60).optional(),
+  bodyText: z.string().min(1).max(1024),
+  /** Contoh nilai variabel BODY secara berurutan ({{1}}, {{2}}, …). */
+  bodyExamples: z.array(z.string().min(1).max(200)).max(25).optional(),
+  footerText: z.string().min(1).max(60).optional(),
+  buttons: z.array(WhatsAppTemplateButtonSchema).max(3).optional(),
+});
+export type CreateWhatsAppTemplateRequest = z.infer<
+  typeof CreateWhatsAppTemplateRequestSchema
 >;
 
 // ---------------------------------------------------------------------------

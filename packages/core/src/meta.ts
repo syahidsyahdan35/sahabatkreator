@@ -604,6 +604,16 @@ export interface MetaQueuedDelivery {
   conversationId: string;
   contentText: string | null;
   /**
+   * Muatan template WhatsApp (Fase 10A) untuk pesan bertipe template;
+   * poller mengirim `type: "template"` bila kolom ini terisi pada
+   * pesan provider whatsapp. Null untuk pesan teks biasa.
+   */
+  templatePayload: {
+    name: string;
+    languageCode: string;
+    bodyParams: string[];
+  } | null;
+  /**
    * Id baris pesan yang dikutip pesan ini (Fase 7B.5), atau null —
    * poller menurunkan wamid/mid targetnya dari baris itu dalam konteks
    * tenant (pola TelegramQueuedDelivery.replyToMessageId).
@@ -640,6 +650,7 @@ export async function listQueuedMetaDeliveries(
         messageId: messages.id,
         conversationId: messages.conversationId,
         contentText: messages.contentText,
+        templatePayload: messages.templatePayload,
         replyToMessageId: messages.replyToMessageId,
         channelAccountId: channelAccounts.id,
         provider: channelAccounts.provider,

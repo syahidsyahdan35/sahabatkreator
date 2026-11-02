@@ -255,6 +255,23 @@ export const messages = pgTable(
       authorLabel: string | null;
       contentPreview: string | null;
     }>(),
+    /**
+     * Muatan template WhatsApp (Fase 10A) untuk pesan keluar bertipe
+     * 'template': nama + bahasa template Meta dan parameter BODY yang
+     * SUDAH terisi untuk penerima pesan ini. Poller Meta membaca kolom
+     * ini untuk memutuskan mengirim `type: "template"` (Cloud API)
+     * alih-alih teks bebas; `content_text` baris yang sama menampung
+     * render pratinjau BODY dengan parameter terisi (yang dibaca
+     * manusia di inbox). NULL untuk semua pesan non-template. Sengaja
+     * disimpan di baris pesan (bukan diturunkan poller dari broadcast)
+     * agar scan pengiriman lintas tenant tetap satu tabel seperti pola
+     * replyToMessageId 7B.5.
+     */
+    templatePayload: jsonb("template_payload").$type<{
+      name: string;
+      languageCode: string;
+      bodyParams: string[];
+    }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

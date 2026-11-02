@@ -15,5 +15,6 @@ export * from "./products";
 export * from "./platform";
 export * from "./avatars";
 export * from "./broadcasts";
+export * from "./whatsapp-templates";
 export * from "./flows";
 export * from "./saved-replies";
