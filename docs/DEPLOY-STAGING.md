@@ -4443,3 +4443,94 @@ en+id penuh.
   ada data pemetaan id yang tersimpan dari era itu) — yang berubah
   hanya keterlihatannya; (3) bukti visual UI (render blok snapshot,
   tema gelap/terang) menunggu uji user sesuai pembagian kerja.
+
+## Fase 8B — Flow Builder UI (2026-11-02)
+
+- Commit fitur `50749bf` (kontrak position + core normalize +
+  i18n + web: daftar /flows, builder /flows/:flowId, penampil run).
+  Deploy: build di salinan `/tmp` (pola EPERM fase sebelumnya) →
+  rsync seluruh repo termasuk node_modules → restart api+worker+web
+  (kill MainPID; unit Restart=always). Publik: health ok, bundle
+  `index-u5pGGHsf.js`, /flows & /flows/:id 200. TANPA migrasi —
+  `position` hidup di jsonb graf yang sudah ada.
+- **Keputusan: posisi node di graf yang sama.** Kontrak diperluas
+  kompatibel ke belakang: `FlowNode.position {x, y}` opsional
+  (`FlowNodePositionSchema`); `normalizeFlowGraph` di core membawanya
+  apa adanya hanya bila bentuknya sah (dua angka finite) dan
+  eksekutor worker TIDAK pernah membacanya. Satu sumber kebenaran —
+  tidak ada tabel/kolom layout terpisah. Graf 8A tanpa position tetap
+  sah persis seperti sebelumnya (terbukti rantai S3); builder memberi
+  layout awal deterministik (kedalaman BFS dari trigger → kolom)
+  untuk node yang belum berposisi saat flow lama dibuka.
+- **Library canvas: `@xyflow/react` ^12** (React Flow — pola yang
+  sama dengan referensi ZernFlow yang diadopsi). Ditambahkan sah ke
+  apps/web; bundle web naik ke ±809 kB (gzip ±222 kB) — aplikasi
+  memang satu bundle sejak awal; code-splitting per halaman adalah
+  utang teknis terpisah, bukan bagian fase ini.
+- Permukaan: (1) Daftar `/flows` — chip status, ringkasan pemicu,
+  runCount dari API, filter status, aksi aktif/nonaktif/arsip/
+  keluar-arsip/hapus draf (konfirmasi dua langkah ala Broadcasts),
+  buat baru → langsung masuk builder. Item nav `flows` (ikon cabang
+  baru) sesudah Automations di registry tunggal — desktop + grup
+  More mobile; `/flows/:flowId` terpetakan lewat matchNavPath
+  (pola deep-link Inbox), dan <main> shell melebar ke 1440px hanya
+  saat builder terbuka. (2) Builder — palet 10 tipe node tambah
+  (klik ATAU drag; trigger tunggal dibuat otomatis, tidak bisa
+  ditambah/dihapus), node kustom dwibahasa + ringkasan config satu
+  baris, node condition dengan dua handle sumber berlabel Ya/Tidak
+  yang menghasilkan edge branch yes/no, satu edge keluar per
+  (node, cabang) — koneksi baru menggantikan yang lama, selaras
+  semantik eksekutor; panel konfigurasi per tipe persis kontrak
+  (tag & stage dari data kontak tenant lewat API kontak, sequence
+  dari daftar automations kind=sequence aktif; field_equals memakai
+  name|phone|email kontrak); hapus node/edge (Delete) dengan edge
+  yatim ikut dibersihkan; zoom/pan/Controls/MiniMap; chrome canvas
+  diwarnai token semantik (scope CSS `.sk-flow`) agar terbaca di
+  tema gelap & terang. (3) Simpan draf (PATCH; hanya draft), Validasi
+  kering, Aktifkan — aktivasi menyimpan dulu bila kotor; 422
+  FLOW_GRAPH_INVALID ditampilkan sebagai daftar issues yang sama
+  (diterjemahkan di klien dari kodenya, `flows.issue.*`; klik issue
+  memilih + memusatkan node-nya; node ber-issue berbingkai
+  danger/warning di canvas). ApiClientError kini membawa
+  `details` kontrak agar itu bisa dibaca. (4) Penampil run —
+  tab "Run" di builder: daftar run + timeline langkah per run
+  (tipe node, outcome & detail diterjemahkan, error mentah) dari
+  endpoint 8A; polling 5 dtk selama ada run berjalan/menunggu.
+- **Semantik read-only:** flow active/archived tampil read-only
+  penuh di canvas (seleksi tetap bisa untuk membaca konfigurasi)
+  dengan spanduk dwibahasa + tombol Nonaktifkan/Keluarkan-dari-arsip
+  untuk kembali mengedit — persis semantik API (edit hanya draft,
+  selain itu 409). Member non-owner/admin juga read-only.
+- **Builder desktop-first (keputusan sadar):** kanvas drag-and-drop
+  dioptimalkan untuk desktop; di layar kecil palet & panel menumpuk
+  di bawah/atas kanvas dan tetap bisa dibaca, tetapi pengeditan
+  serius memang pekerjaan desktop — tidak ada klaim optimasi mobile
+  untuk canvas.
+- Verifikasi (tanpa Playwright, sesuai keputusan user — UI diuji
+  user sendiri): typecheck SEMUA paket hijau; build api/worker/web
+  hijau; bundle publik memuat string dwibahasa flows + kode issue +
+  react-flow, mengembalikan 200 untuk /flows & builder. **Rantai
+  API bentuk-builder dari server 35/35 PASS dalam satu run bersih**
+  (mock Telegram 8410, tenant uji): payload graf PERSIS seperti
+  yang dikirim builder (position di semua node) → buat 201 →
+  position utuh di respons & GET round-trip semua node → PATCH
+  geser posisi tersimpan → validate kering valid nol issue →
+  aktivasi 200 → webhook mock memicu run: Ani (tag vip) menempuh
+  s1,c1,a1,s2, Budi menempuh s1,c1,st1,e1 (branch no + end), pesan
+  mock terkirim persis per cabang, tag/stage kontak berubah,
+  runCount ≥ 2 di daftar; member agent baca 200 / PATCH 403. Graf
+  rusak ala builder (condition tanpa branch no) → validate
+  valid=false dengan CONDITION_BRANCH_NO_MISSING pada node yang
+  benar, aktivasi 422 FLOW_GRAPH_INVALID + details.issues
+  terstruktur dan flow tetap draft. Regresi: graf 8A tanpa position
+  dibuat/diaktifkan/dijalankan utuh dan node-nya tetap tanpa
+  position di respons. Channel asli user (@botaramyid_bot) tetap
+  connected; `.env.staging` pulih byte-identik (sha256 `9c1ded2a…`
+  sebelum = sesudah), port mock tertutup.
+- Batas jujur: (1) bukti VISUAL (rendering canvas, keterbacaan node
+  di dua tema, rasa drag/zoom) menunggu uji user — yang terbukti di
+  sini adalah kontrak ujung-ke-ujung yang dipakai UI-nya; (2) tidak
+  ada auto-layout selain layout awal BFS untuk node tanpa posisi,
+  tidak ada undo/redo, tidak ada ekspor/impor graf — kandidat
+  lanjutan; (3) satu flow tetap satu trigger & bentuk graf v1 8A —
+  builder tidak menambah kemampuan engine apa pun.

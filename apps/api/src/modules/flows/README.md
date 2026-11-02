@@ -5,8 +5,11 @@ aktivasi dengan validasi graf menyeluruh, serta pembacaan run dan
 log per langkah. Implementasi di `routes.ts`; logika domain di
 `@sahabat-kreator/core` (`flows.ts`); eksekusi oleh worker (job
 BullMQ `flow.step` dari event outbox `flow.step_due`). Builder UI
-adalah Fase 8B — format graf di `@sahabat-kreator/contracts`
-(`FlowGraph`) adalah kontrak bersama keduanya.
+(Fase 8B) sudah hidup di apps/web (`/flows` + `/flows/:flowId`,
+@xyflow/react) — format graf di `@sahabat-kreator/contracts`
+(`FlowGraph`) adalah kontrak bersama keduanya, termasuk field
+`position` opsional per node yang hanya dipakai builder dan
+diabaikan eksekutor.
 
 Keputusan v1:
 - Format graf: `{nodes: [{id, type, config}], edges: [{from, to,
