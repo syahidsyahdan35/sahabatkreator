@@ -13,6 +13,10 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import {
+  LIVE_REFRESH_INTERVAL_MS,
+  usePolling,
+} from "../hooks/usePolling";
 import { useUnreadBadge } from "../inbox/UnreadBadgeProvider";
 import { formatListTime, formatTime } from "../utils/format";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
@@ -39,6 +43,10 @@ interface InboxPageProps {
  * - Layar kecil: daftar dan utas bergantian; tombol kembali muncul di utas.
  * - Setelah kirim: utas dimuat ulang dari server + daftar percakapan
  *   disegarkan (cuplikan & urutan ikut berubah), badge nav disinkronkan.
+ * - Penyegaran langsung (Hotfix Dashboard Realtime): daftar, utas yang
+ *   terbuka, dan badge disegarkan otomatis tiap ±5 dtk lewat polling
+ *   senyap (hooks/usePolling — jembatan menuju Fase 6G apps/realtime)
+ *   tanpa mengganggu draf ketikan maupun posisi scroll agen.
  */
 export function InboxPage({ t, locale }: InboxPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
@@ -63,6 +71,10 @@ export function InboxPage({ t, locale }: InboxPageProps) {
   selectedRef.current = selectedId;
   const conversationsRef = useRef<ConversationResponse[]>([]);
   conversationsRef.current = conversations;
+  // Agen dianggap "menempel di bawah" utas (pantas ikut turun saat pesan
+  // baru tiba) hanya bila posisi scroll-nya dekat dasar; begitu ia scroll
+  // ke atas membaca riwayat, penyegaran latar TIDAK boleh menyeretnya.
+  const stickToBottomRef = useRef(true);
 
   const loadConversations = useCallback(async () => {
     if (!tenantId) return;
@@ -132,11 +144,86 @@ export function InboxPage({ t, locale }: InboxPageProps) {
     if (selectedId) void loadMessages(selectedId);
   }, [selectedId, loadMessages]);
 
-  // Utas selalu dibuka dari pesan terbaru.
+  // --- Penyegaran latar (Hotfix Dashboard Realtime) ---------------------
+  // Versi SENYAP dari pemuatan awal: tidak menyalakan status memuat,
+  // tidak memasang error, tidak menyentuh draf balasan maupun pilihan
+  // percakapan. Kegagalan sesaat ditelan — siklus polling berikut
+  // mencoba lagi. Transport polling ini jembatan menuju Fase 6G
+  // (apps/realtime); nanti ia turun menjadi fallback (hooks/usePolling).
+
+  const refreshConversationsInBackground = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      const list = await api.conversations.list(tenantId);
+      const openId = selectedRef.current;
+      // Percakapan yang sedang dibuka sudah ditandai terbaca di server
+      // oleh GET messages — paksa unread lokalnya 0 agar chip daftar &
+      // badge tidak berkedip naik sesaat pada percakapan yang sedang
+      // dibaca agen sendiri.
+      const next =
+        openId === null
+          ? list
+          : list.map((c) => (c.id === openId ? { ...c, unreadCount: 0 } : c));
+      setConversations(next);
+      setFromConversations(next);
+    } catch {
+      /* senyap — kegagalan latar bukan urusan agen */
+    }
+  }, [tenantId, setFromConversations]);
+
+  const refreshMessagesInBackground = useCallback(async () => {
+    const conversationId = selectedRef.current;
+    if (!tenantId || !conversationId) return;
+    try {
+      const list = await api.conversations.listMessages(
+        tenantId,
+        conversationId,
+        { limit: MESSAGE_LIMIT },
+      );
+      if (selectedRef.current !== conversationId) return;
+      // Gabung per id pesan: salinan server menimpa versi lama (status
+      // queued→sent ikut segar), pesan baru menempel di akhir mengikuti
+      // urutan kronologis server — tanpa duplikat, tanpa mengganti
+      // seluruh daftar (tidak ada kedip), draf ketikan tidak disentuh.
+      setMessages((prev) => {
+        const byId = new Map(list.map((m) => [m.id, m]));
+        const merged = prev.map((m) => byId.get(m.id) ?? m);
+        const seen = new Set(prev.map((m) => m.id));
+        for (const m of list) {
+          if (!seen.has(m.id)) merged.push(m);
+        }
+        return merged;
+      });
+      setMessagesError(null);
+    } catch {
+      /* senyap — siklus berikutnya mencoba lagi */
+    }
+  }, [tenantId]);
+
+  const liveRefresh = useCallback(async () => {
+    await refreshConversationsInBackground();
+    await refreshMessagesInBackground();
+  }, [refreshConversationsInBackground, refreshMessagesInBackground]);
+  usePolling(liveRefresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
+
+  // Pindah percakapan → utas dibuka dari pesan terbaru (menempel di bawah).
+  useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [selectedId]);
+
+  // Ikut turun ke pesan terbaru HANYA bila agen sedang menempel di bawah;
+  // agen yang sedang scroll ke atas membaca riwayat tidak diseret turun.
   useEffect(() => {
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [messages, messagesLoading]);
+
+  const handleThreadScroll = () => {
+    const el = threadRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  };
 
   const handleSend = async (e: FormEvent) => {
     e.preventDefault();
@@ -150,6 +237,8 @@ export function InboxPage({ t, locale }: InboxPageProps) {
         selectedId,
         content,
       );
+      // Agen yang baru mengirim balasan selalu dibawa ke pesan terbaru.
+      stickToBottomRef.current = true;
       setDraft("");
       // Tampilkan langsung pesan returned (status queued), lalu segarkan
       // utas & daftar dari server agar konsisten dengan sumber kebenaran.
@@ -326,7 +415,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                   </div>
                 </div>
 
-                <div ref={threadRef} className="flex-1 space-y-3 overflow-y-auto bg-bg px-4 py-4">
+                <div
+                  ref={threadRef}
+                  onScroll={handleThreadScroll}
+                  className="flex-1 space-y-3 overflow-y-auto bg-bg px-4 py-4"
+                >
                   {messagesLoading ? (
                     <p className="text-sm text-muted">{t("common.loading")}</p>
                   ) : messagesError ? (

@@ -9,6 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "../api/client";
+import {
+  LIVE_REFRESH_INTERVAL_MS,
+  usePolling,
+} from "../hooks/usePolling";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
 /**
@@ -63,6 +67,12 @@ export function PendingApprovalsProvider({ children }: { children: ReactNode }) 
     setPendingCount(0);
     void refresh();
   }, [tenantId, refresh]);
+
+  // Segar tanpa refresh manual (Hotfix Dashboard Realtime): draf agent
+  // yang tiba saat pemilik sedang di halaman lain tetap menaikkan badge
+  // dalam hitungan detik. Pola sama dengan UnreadBadgeProvider; transport
+  // polling = jembatan menuju Fase 6G (lihat hooks/usePolling).
+  usePolling(refresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
 
   const value = useMemo<PendingApprovalsContextValue>(
     () => ({ pendingCount, refresh }),

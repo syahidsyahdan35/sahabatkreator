@@ -9,6 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "../api/client";
+import {
+  LIVE_REFRESH_INTERVAL_MS,
+  usePolling,
+} from "../hooks/usePolling";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
 /**
@@ -63,6 +67,12 @@ export function UnreadBadgeProvider({ children }: { children: ReactNode }) {
     setTotalUnread(0);
     void refresh();
   }, [tenantId, refresh]);
+
+  // Segar tanpa refresh manual (Hotfix Dashboard Realtime): total unread
+  // dicek ulang berkala selama ada workspace aktif — badge di Sidebar &
+  // MobileBottomBar sila hidup di halaman mana pun, bukan hanya Inbox.
+  // Transport polling = jembatan menuju Fase 6G (lihat hooks/usePolling).
+  usePolling(refresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
 
   const setFromConversations = useCallback(
     (conversations: Array<{ unreadCount: number }>) => {
