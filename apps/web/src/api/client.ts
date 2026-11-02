@@ -297,12 +297,14 @@ export const api = {
         pageId?: string;
         igUserId?: string;
         pageAccessToken?: string;
+        /** Fase 7D.3: jenis token connect manual Instagram. */
+        tokenType?: "page_access_token" | "system_user_token";
         wabaId?: string;
         phoneNumberId?: string;
         accessToken?: string;
       },
-    ): Promise<ChannelAccountResponse> {
-      return request<ChannelAccountResponse>(
+    ): Promise<ChannelAccountResponse & { warnings?: string[] }> {
+      return request<ChannelAccountResponse & { warnings?: string[] }>(
         `/api/tenants/${tenantId}/channels`,
         { method: "POST", body: JSON.stringify(input) },
       );

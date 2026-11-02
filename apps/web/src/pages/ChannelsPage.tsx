@@ -641,6 +641,11 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
   const [igPageId, setIgPageId] = useState("");
   const [igId, setIgId] = useState("");
   const [igToken, setIgToken] = useState("");
+  // Jenis token connect manual IG (Fase 7D.3): Page Access Token (7A)
+  // atau System User Token — varian SUAT tidak memakai Page ID.
+  const [igTokenType, setIgTokenType] = useState<
+    "page_access_token" | "system_user_token"
+  >("page_access_token");
   const [igCreating, setIgCreating] = useState(false);
   const [igError, setIgError] = useState<string | null>(null);
   // Form WhatsApp (Fase 7B): WABA ID + Phone Number ID + token System
@@ -923,18 +928,27 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
     if (!tenantId) return;
     setIgCreating(true);
     setIgError(null);
+    const suat = igTokenType === "system_user_token";
     try {
       const created = await api.channels.create(tenantId, {
         provider: "instagram",
         displayName: igName.trim() || undefined,
-        pageId: igPageId.trim(),
+        // Varian SUAT (Fase 7D.3): tanpa Page ID — server memvalidasi
+        // token langsung ke akun IG.
+        ...(suat ? {} : { pageId: igPageId.trim() }),
         igUserId: igId.trim(),
         pageAccessToken: igToken.trim(),
+        tokenType: igTokenType,
       });
       setIgToken("");
       setIgName("");
       setIgPageId("");
       setIgId("");
+      // Peringatan subscribe varian SUAT memakai banner yang sama
+      // seperti alur OAuth (koneksi berhasil, webhook belum tentu).
+      if (created.warnings?.includes("META_SUBSCRIBE_FAILED")) {
+        setOauthWarning(t("channels.oauthSubscribeWarning"));
+      }
       await load();
       finishConnect(created.id);
     } catch (err) {
@@ -1807,25 +1821,62 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       maxLength={64}
                       className={`${inputClassName} mt-1`}
                     />
-                    <label
-                      className="mt-3 block text-sm font-medium"
-                      htmlFor="instagram-page-id"
-                    >
-                      {t("channels.pageIdLabel")}
-                    </label>
-                    <input
-                      id="instagram-page-id"
-                      value={igPageId}
-                      onChange={(e) => setIgPageId(e.target.value)}
-                      placeholder={t("channels.pageIdPlaceholder")}
-                      maxLength={64}
-                      className={`${inputClassName} mt-1`}
-                    />
+                    <fieldset className="mt-3">
+                      <legend className="text-sm font-medium">
+                        {t("channels.igTokenTypeLabel")}
+                      </legend>
+                      <div className="mt-1 flex flex-wrap gap-4">
+                        <label className="inline-flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="instagram-token-type"
+                            value="page_access_token"
+                            checked={igTokenType === "page_access_token"}
+                            onChange={() =>
+                              setIgTokenType("page_access_token")
+                            }
+                          />
+                          {t("channels.igTokenTypePage")}
+                        </label>
+                        <label className="inline-flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="instagram-token-type"
+                            value="system_user_token"
+                            checked={igTokenType === "system_user_token"}
+                            onChange={() =>
+                              setIgTokenType("system_user_token")
+                            }
+                          />
+                          {t("channels.igTokenTypeSystemUser")}
+                        </label>
+                      </div>
+                    </fieldset>
+                    {igTokenType === "page_access_token" ? (
+                      <>
+                        <label
+                          className="mt-3 block text-sm font-medium"
+                          htmlFor="instagram-page-id"
+                        >
+                          {t("channels.pageIdLabel")}
+                        </label>
+                        <input
+                          id="instagram-page-id"
+                          value={igPageId}
+                          onChange={(e) => setIgPageId(e.target.value)}
+                          placeholder={t("channels.pageIdPlaceholder")}
+                          maxLength={64}
+                          className={`${inputClassName} mt-1`}
+                        />
+                      </>
+                    ) : null}
                     <label
                       className="mt-3 block text-sm font-medium"
                       htmlFor="instagram-token"
                     >
-                      {t("channels.pageTokenLabel")}
+                      {igTokenType === "system_user_token"
+                        ? t("channels.suatTokenLabel")
+                        : t("channels.pageTokenLabel")}
                     </label>
                     <PasswordInput
                       t={t}
@@ -1833,12 +1884,18 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       autoComplete="off"
                       value={igToken}
                       onChange={(e) => setIgToken(e.target.value)}
-                      placeholder={t("channels.pageTokenPlaceholder")}
+                      placeholder={
+                        igTokenType === "system_user_token"
+                          ? t("channels.suatTokenPlaceholder")
+                          : t("channels.pageTokenPlaceholder")
+                      }
                       maxLength={1024}
                       className={`${inputClassName} mt-1`}
                     />
                     <p className="mt-1 text-xs text-muted">
-                      {t("channels.metaTokenHint")}
+                      {igTokenType === "system_user_token"
+                        ? t("channels.suatTokenHint")
+                        : t("channels.metaTokenHint")}
                     </p>
                     {igError ? (
                       <div className="mt-2">
@@ -1850,7 +1907,8 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       disabled={
                         igCreating ||
                         !igId.trim() ||
-                        !igPageId.trim() ||
+                        (igTokenType === "page_access_token" &&
+                          !igPageId.trim()) ||
                         !igToken.trim()
                       }
                       className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
@@ -2013,7 +2071,17 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
             ) : null}
             {oauthSession && oauthSession.assets.length === 0 ? (
               <p className="mt-4 text-sm text-muted">
-                {t("channels.oauthPickerEmpty")}
+                {/* Fase 7D.3: petunjuk spesifik per penyebab kosong
+                    (jenis token / izin bisnis / belum dibagikan) —
+                    generik hanya bila server tak memberi petunjuk. */}
+                {oauthSession.emptyHint === "not_system_user"
+                  ? t("channels.oauthPickerEmptyNotSystemUser")
+                  : oauthSession.emptyHint === "no_accounts_shared"
+                    ? t("channels.oauthPickerEmptyNoAccounts")
+                    : oauthSession.emptyHint ===
+                        "business_permission_missing"
+                      ? t("channels.oauthPickerEmptyBusinessPermission")
+                      : t("channels.oauthPickerEmpty")}
               </p>
             ) : null}
             {oauthSession
