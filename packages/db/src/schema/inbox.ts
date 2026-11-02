@@ -272,6 +272,17 @@ export const messages = pgTable(
       languageCode: string;
       bodyParams: string[];
     }>(),
+    /**
+     * Id komentar Meta yang menjadi alamat kirim pesan ini (Fase 10B):
+     * DM privat balasan-atas-komentar (private reply) dikirim Send API
+     * dengan `recipient: { comment_id }`, BUKAN id pengguna — itulah
+     * satu-satunya cara mendahului percakapan dengan penulis komentar
+     * yang belum pernah DM. Poller Meta membaca kolom ini: terisi →
+     * kirim sebagai private reply; sesudah penulis membalas, percakapan
+     * berlanjut normal (identitas kontak sama, alamat provider_chat_id).
+     * NULL untuk semua pesan selain DM comment-to-DM pertama.
+     */
+    providerCommentId: varchar("provider_comment_id", { length: 255 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

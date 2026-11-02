@@ -53,11 +53,15 @@ import { contacts, conversations, messages } from "./inbox";
 
 export const automationTriggerTypeEnum = pgEnum("automation_trigger_type", [
   "keyword",
+  // Fase 10B: pemicu komentar publik IG/Messenger (aturan comment-to-DM).
+  "comment",
 ]);
 
 export const automationKindEnum = pgEnum("automation_kind", [
   "keyword",
   "sequence",
+  // Fase 10B: aturan komentar (trigger_type='comment'); tanpa langkah.
+  "comment",
 ]);
 
 export const sequenceEnrollmentStatusEnum = pgEnum(
@@ -78,10 +82,29 @@ export const automationRunStatusEnum = pgEnum("automation_run_status", [
 export interface AutomationTriggerConfig {
   keywords: string[];
   match: "exact" | "contains";
+  /**
+   * Fase 10B — hanya untuk trigger_type='comment': akun channel
+   * (uuid channel_accounts) tempat aturan ini berlaku. Aturan komentar
+   * selalu terikat SATU akun IG/Messenger; aturan pesan tidak
+   * mengisinya (undefined).
+   */
+  channelAccountId?: string;
 }
 
 export interface AutomationActionConfig {
   text: string;
+  /**
+   * Fase 10B — hanya untuk trigger_type='comment' (untuk aturan pesan
+   * semua field ini absen):
+   * - sendDm: kirim DM privat ke penulis komentar; teksnya `text`.
+   * - publicReplyText: teks balasan publik pada komentar; null = mati.
+   * - hideComment: sembunyikan komentar sesudah aksi lain berjalan.
+   * Mode moderasi murni = sendDm false + publicReplyText null +
+   * hideComment true.
+   */
+  sendDm?: boolean;
+  publicReplyText?: string | null;
+  hideComment?: boolean;
 }
 
 export const automations = pgTable(

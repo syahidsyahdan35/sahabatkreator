@@ -362,6 +362,18 @@ export {
 } from "./broadcasts";
 export { renderMessageText } from "./render-text";
 export {
+  recordMetaComment,
+  evaluateCommentForAutomations,
+  listComments,
+  getComment,
+  setCommentModerationStatus,
+  type RecordMetaCommentInput,
+  type RecordMetaCommentResult,
+  type CommentGraphActions,
+  type EvaluateCommentResult,
+  type CommentListItem,
+} from "./comments";
+export {
   listWhatsAppTemplates,
   getWhatsAppTemplateById,
   replaceSyncedWhatsAppTemplates,

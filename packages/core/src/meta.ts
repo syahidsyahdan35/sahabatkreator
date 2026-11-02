@@ -619,6 +619,12 @@ export interface MetaQueuedDelivery {
    * tenant (pola TelegramQueuedDelivery.replyToMessageId).
    */
   replyToMessageId: string | null;
+  /**
+   * Fase 10B: id komentar yang menjadi alamat kirim pesan ini (DM
+   * private reply comment-to-DM); poller meneruskannya ke sendMessage
+   * sebagai `recipient: { comment_id }`. Null untuk pesan biasa.
+   */
+  providerCommentId: string | null;
   channelAccountId: string;
   provider: MetaDeliveryProvider;
   /** external_id akun: Page ID (messenger) / ID akun IG (instagram) — segmen path endpoint kirim. */
@@ -651,6 +657,7 @@ export async function listQueuedMetaDeliveries(
         conversationId: messages.conversationId,
         contentText: messages.contentText,
         templatePayload: messages.templatePayload,
+        providerCommentId: messages.providerCommentId,
         replyToMessageId: messages.replyToMessageId,
         channelAccountId: channelAccounts.id,
         provider: channelAccounts.provider,

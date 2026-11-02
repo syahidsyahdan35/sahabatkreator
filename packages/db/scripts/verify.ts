@@ -61,7 +61,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 9A (saved_replies)
 // + 1 tabel Fase 9C (conversation_notes)
 // + 1 tabel Fase 10A (whatsapp_templates)
-assert.equal(Number(tablesRes.rows[0].count), 42);
+// + 1 tabel Fase 10B (comments)
+assert.equal(Number(tablesRes.rows[0].count), 43);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -150,7 +151,8 @@ const policies = await db.query<{ count: string }>(
 //   0035) = 54.
 // + tenant_isolation pada whatsapp_templates (Fase 10A, migrasi
 //   0036) = 55.
-assert.equal(Number(policies.rows[0].count), 55);
+// + tenant_isolation pada comments (Fase 10B, migrasi 0037) = 56.
+assert.equal(Number(policies.rows[0].count), 56);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -169,7 +171,8 @@ await db.exec(`
     flows, flow_runs, flow_run_steps,
     saved_replies,
     conversation_notes,
-    whatsapp_templates
+    whatsapp_templates,
+    comments
   TO app_user;
 `);
 
@@ -1909,6 +1912,105 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
   assert.equal(cols.rows[0].n, "3");
   console.log(
     "[29] Fase 10A: whatsapp_templates terisolasi per tenant (insert silang ditolak, tanpa konteks 0 baris); unik (akun, nama, bahasa) menolak ganda; kolom broadcasts.whatsapp_template_id/template_variable_sources + messages.template_payload ada: OK",
+  );
+}
+
+// ---------- 30. Fase 10B: comments + kolom provider_comment_id + enum comment ----------
+{
+  const CMT_IG_CHAN = "10101010-1010-4101-8101-1010101010b0";
+  const CMT_ID = "10101010-1010-4101-8101-1010101010b1";
+  await db.query(
+    `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, display_name, status, public_handle)
+     VALUES ($1, $2, 'instagram', '17841400008460057', 'IG Verify 10B', 'connected', '@verify10b')`,
+    [CMT_IG_CHAN, TENANT_A],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    await tx.query(
+      `INSERT INTO comments (id, tenant_id, channel_account_id, provider, provider_comment_id, media_id, author_external_id, author_username, text)
+       VALUES ($1, $2, $3, 'instagram', 'cmt-10b-1', 'media-10b-1', 'ig-user-10b', 'komentator10b', 'info harga dong')`,
+      [CMT_ID, TENANT_A, CMT_IG_CHAN],
+    );
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM comments WHERE id = $1`,
+      [CMT_ID],
+    );
+    const ownStatus = await tx.query<{ moderation_status: string }>(
+      `SELECT moderation_status FROM comments WHERE id = $1`,
+      [CMT_ID],
+    );
+    // Insert silang (konteks A, baris ber-tenant B) ditolak RLS.
+    let crossInsertBlocked = false;
+    await tx.query(`SAVEPOINT sp_cmt1`);
+    try {
+      await tx.query(
+        `INSERT INTO comments (tenant_id, channel_account_id, provider, provider_comment_id, author_external_id, text)
+         VALUES ($1, $2, 'instagram', 'cmt-10b-silang', 'ig-user-x', 'silang')`,
+        [TENANT_B, CMT_IG_CHAN],
+      );
+    } catch {
+      crossInsertBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_cmt1`);
+    }
+    // Unik (akun, provider_comment_id) menolak ganda — penjaga dedup webhook.
+    let uniqueBlocked = false;
+    await tx.query(`SAVEPOINT sp_cmt2`);
+    try {
+      await tx.query(
+        `INSERT INTO comments (tenant_id, channel_account_id, provider, provider_comment_id, author_external_id, text)
+         VALUES ($1, $2, 'instagram', 'cmt-10b-1', 'ig-user-10b', 'duplikat')`,
+        [TENANT_A, CMT_IG_CHAN],
+      );
+    } catch {
+      uniqueBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_cmt2`);
+    }
+    // Enum automation menerima nilai 'comment' (trigger + kind).
+    await tx.query(
+      `INSERT INTO automations (tenant_id, name, trigger_type, kind, trigger_config, action_type, action_config)
+       VALUES ($1, 'Aturan Komentar 10B', 'comment', 'comment',
+               '{"keywords":["harga"],"match":"contains","channelAccountId":"x"}'::jsonb, 'send_message',
+               '{"text":"Halo!","sendDm":true,"publicReplyText":null,"hideComment":false}'::jsonb)`,
+      [TENANT_A],
+    );
+    const rule = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM automations WHERE trigger_type = 'comment' AND kind = 'comment'`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM comments WHERE id = $1`,
+      [CMT_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const noCtx = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM comments`,
+    );
+    return {
+      own,
+      other,
+      noCtx,
+      ownStatus,
+      rule,
+      crossInsertBlocked,
+      uniqueBlocked,
+    };
+  });
+  assert.equal(views.own.rows[0].n, "1");
+  assert.equal(views.ownStatus.rows[0].moderation_status, "visible");
+  assert.equal(views.other.rows[0].n, "0");
+  assert.equal(views.noCtx.rows[0].n, "0");
+  assert.equal(views.crossInsertBlocked, true);
+  assert.equal(views.uniqueBlocked, true);
+  assert.equal(views.rule.rows[0].n, "1");
+  // Kolom Fase 10B pada messages ada.
+  const col = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_name = 'messages' AND column_name = 'provider_comment_id'`,
+  );
+  assert.equal(col.rows[0].n, "1");
+  console.log(
+    "[30] Fase 10B: comments terisolasi per tenant (insert silang ditolak, tanpa konteks 0 baris); unik (akun, provider_comment_id) menolak ganda; enum automation menerima 'comment'; messages.provider_comment_id ada: OK",
   );
 }
 

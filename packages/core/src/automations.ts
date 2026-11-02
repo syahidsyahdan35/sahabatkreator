@@ -71,11 +71,23 @@ export interface CreateAutomationInput {
   keywords: string[];
   match: "exact" | "contains";
   /** Default 'keyword' (kompatibilitas request Fase 2A/2B tanpa field ini). */
-  kind?: "keyword" | "sequence";
+  kind?: "keyword" | "sequence" | "comment";
   /** Wajib untuk kind='keyword': isi balasan langsung. */
   text?: string;
   /** Wajib untuk kind='sequence': 1–10 langkah rangkaian. */
   steps?: AutomationStepInput[];
+  /**
+   * Fase 10B — wajib untuk kind='comment': akun IG/Messenger tempat
+   * aturan berlaku (uuid channel_accounts milik tenant; lapisan API
+   * memvalidasi kepemilikan + provider sebelum memanggil ini).
+   */
+  channelAccountId?: string;
+  /** Fase 10B (kind='comment'): kirim DM privat; teksnya `text`. */
+  sendDm?: boolean;
+  /** Fase 10B (kind='comment'): teks balasan publik; null = mati. */
+  publicReplyText?: string | null;
+  /** Fase 10B (kind='comment'): sembunyikan komentar yang cocok. */
+  hideComment?: boolean;
 }
 
 export interface UpdateAutomationInput {
@@ -84,6 +96,10 @@ export interface UpdateAutomationInput {
   match?: "exact" | "contains";
   text?: string;
   isActive?: boolean;
+  /** Fase 10B — hanya bermakna untuk aturan kind='comment'. */
+  sendDm?: boolean;
+  publicReplyText?: string | null;
+  hideComment?: boolean;
 }
 
 export type AutomationWithRunCount = Automation & {
@@ -102,16 +118,33 @@ export async function createAutomation(
   if (kind === "sequence" && (!input.steps || input.steps.length === 0)) {
     throw new Error("Sequence automation requires at least one step");
   }
+  if (kind === "comment" && !input.channelAccountId) {
+    throw new Error("Comment automation requires a channel account");
+  }
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [row] = await tx
       .insert(automations)
       .values({
         tenantId: ctx.tenantId,
         name: input.name,
-        triggerType: "keyword",
-        triggerConfig: { keywords: input.keywords, match: input.match },
+        triggerType: kind === "comment" ? "comment" : "keyword",
+        triggerConfig: {
+          keywords: input.keywords,
+          match: input.match,
+          ...(kind === "comment"
+            ? { channelAccountId: input.channelAccountId }
+            : {}),
+        },
         actionType: "send_message",
-        actionConfig: { text: kind === "keyword" ? (input.text ?? "") : "" },
+        actionConfig:
+          kind === "comment"
+            ? {
+                text: input.sendDm ? (input.text ?? "") : "",
+                sendDm: input.sendDm ?? false,
+                publicReplyText: input.publicReplyText ?? null,
+                hideComment: input.hideComment ?? false,
+              }
+            : { text: kind === "keyword" ? (input.text ?? "") : "" },
         kind,
         isActive: true,
       })
@@ -236,10 +269,34 @@ export async function updateAutomation(
       patch.triggerConfig = {
         keywords: input.keywords ?? existing.triggerConfig.keywords,
         match: input.match ?? existing.triggerConfig.match,
+        // Fase 10B: ikatan akun aturan komentar tidak berubah lewat
+        // patch — dipertahankan apa adanya dari baris yang ada.
+        ...(existing.triggerConfig.channelAccountId
+          ? { channelAccountId: existing.triggerConfig.channelAccountId }
+          : {}),
       };
     }
-    if (input.text !== undefined) {
-      patch.actionConfig = { text: input.text };
+    if (
+      input.text !== undefined ||
+      input.sendDm !== undefined ||
+      input.publicReplyText !== undefined ||
+      input.hideComment !== undefined
+    ) {
+      patch.actionConfig =
+        existing.kind === "comment"
+          ? {
+              text: input.text ?? existing.actionConfig.text,
+              sendDm: input.sendDm ?? existing.actionConfig.sendDm ?? false,
+              publicReplyText:
+                input.publicReplyText !== undefined
+                  ? input.publicReplyText
+                  : (existing.actionConfig.publicReplyText ?? null),
+              hideComment:
+                input.hideComment ??
+                existing.actionConfig.hideComment ??
+                false,
+            }
+          : { text: input.text ?? existing.actionConfig.text };
     }
 
     const [row] = await tx

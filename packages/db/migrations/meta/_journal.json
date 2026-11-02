@@ -260,6 +260,13 @@
       "when": 1793598514817,
       "tag": "0036_whatsapp_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793631286601,
+      "tag": "0037_comments",
+      "breakpoints": true
     }
   ]
 }

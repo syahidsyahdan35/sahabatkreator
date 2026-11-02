@@ -50,6 +50,7 @@ export const AGENT_RESPOND_JOB = "agent.respond";
 export const SEQUENCE_STEP_JOB = "sequence.step";
 export const BROADCAST_DISPATCH_JOB = "broadcast.dispatch";
 export const FLOW_STEP_JOB = "flow.step";
+export const COMMENT_EVALUATE_JOB = "comment.evaluate";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -122,6 +123,20 @@ export interface FlowStepJobData {
   stepSeq: number;
 }
 
+/**
+ * Job Fase 10B: evaluasi SATU komentar terhadap aturan komentar aktif
+ * akunnya (comment-to-DM + moderasi). Di-enqueue oleh relay outbox
+ * dari event `comment.received` (hanya ditulis core untuk komentar
+ * yang benar-benar baru). jobId deterministik dari id event outbox;
+ * core sendiri idempoten (actions.evaluatedAt + penanda DM terantre),
+ * jadi eksekusi ulang/replay tidak menembak dua kali.
+ */
+export interface CommentEvaluateJobData {
+  tenantId: string;
+  commentId: string;
+  outboxEventId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -150,6 +165,11 @@ export function flowStepJobId(runId: string, stepSeq: number): string {
   return `flow-${runId}-${stepSeq}`;
 }
 
+/** jobId deterministik evaluasi komentar dari id event outbox. */
+export function commentEvaluateJobId(outboxEventId: string): string {
+  return `comment-evaluate-${outboxEventId}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -165,7 +185,8 @@ export type MainJobData =
   | AgentRespondJobData
   | SequenceStepJobData
   | BroadcastDispatchJobData
-  | FlowStepJobData;
+  | FlowStepJobData
+  | CommentEvaluateJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -293,6 +314,27 @@ export async function enqueueFlowStep(
     ...options,
   });
   return job.id ?? flowStepJobId(data.runId, data.stepSeq);
+}
+
+/**
+ * Meng-enqueue evaluasi aturan komentar untuk satu event
+ * `comment.received`. Aman dipanggil berulang: jobId diturunkan dari
+ * id event outbox, BullMQ mengembalikan job yang sudah ada.
+ */
+export async function enqueueCommentEvaluate(
+  queue: MainQueue,
+  data: CommentEvaluateJobData,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(COMMENT_EVALUATE_JOB, data, {
+    jobId: commentEvaluateJobId(data.outboxEventId),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? commentEvaluateJobId(data.outboxEventId);
 }
 
 export {
