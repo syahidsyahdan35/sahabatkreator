@@ -2665,10 +2665,13 @@ wiring live menunggu artefak Meta App user).
 
 - `META_WEBHOOK_VERIFY_TOKEN` — dibangkitkan acak di server, permanen
   di `.env.staging` (600). Inilah nilai yang ditempel user ke Meta App.
-- `META_APP_SECRET` — saat ini **PLACEHOLDER acak staging**.
-  **WAJIB diganti secret Meta App asli user sebelum trafik live** —
-  selama placeholder, tanda tangan webhook Meta sungguhan tidak akan
-  pernah cocok (401) dan itu disengaja (fail-closed).
+- `META_APP_SECRET` — saat ini **PLACEHOLDER acak staging**, dan sejak
+  Fase 7A.1 hanya berperan sebagai **fallback env**: sumber utama App
+  Secret kini kunci panel `meta_app_secret` di Panel Admin (lihat
+  bagian 7A.1 di bawah). **App Secret Meta App asli user WAJIB diisi
+  (di panel) sebelum trafik live** — selama yang efektif masih
+  placeholder, tanda tangan webhook Meta sungguhan tidak akan pernah
+  cocok (401) dan itu disengaja (fail-closed).
 
 ### Langkah wiring LIVE untuk user (di luar fase ini)
 
@@ -2678,8 +2681,11 @@ wiring live menunggu artefak Meta App user).
    Verify Token = nilai dari panel "Webhook Meta" di halaman Channels
    (atau minta operator platform), lalu subscribe field **`messages`**
    untuk objek Page dan Instagram.
-3. Ganti `META_APP_SECRET` di `.env.staging` server dengan App Secret
-   asli (lewat jalur aman, BUKAN chat) + restart API.
+3. Isi **App Secret** asli di **Panel Admin** (`https://botara.my.id/admin`
+   → grup "Meta (Instagram & Messenger)" → App secret Meta → Simpan).
+   Sejak Fase 7A.1 nilai panel menang atas env dan berlaku tanpa
+   restart (≤ ±60 detik); env `.env.staging` TIDAK perlu diubah lagi
+   untuk langkah ini (placeholder-nya tetap sebagai fallback).
 4. Hubungkan Page/IG dari halaman Channels: Page ID (+ ID akun IG)
    dan Page Access Token Page tersebut.
 5. Catatan mode pengembangan Meta: sebelum App Review lolos, hanya
@@ -2732,3 +2738,80 @@ wiring live menunggu artefak Meta App user).
 - Instagram: pengiriman memakai endpoint messages akun IG dengan token
   Page terhubung (keputusan desain fase ini); Page ID tidak disimpan.
 - Grup/threads bersama & komentar IG belum dicakup — v1 hanya DM 1:1.
+
+---
+
+## Update Fase 7A.1 — Meta App Secret dikelola Panel Admin (2026-11-02)
+
+### Perubahan
+
+- Kunci platform kelima **`meta_app_secret`** bergabung dengan Panel
+  Admin Fase 6C: ditambahkan ke `PLATFORM_SETTING_KEYS` (core) +
+  `PlatformSettingKeySchema` (contracts), grup baru **"Meta (Instagram
+  & Messenger)"** di halaman `/admin` (label dwibahasa en/id, input
+  password, chip sumber Panel/Env/Belum diatur + jejak ubah — pola
+  persis kunci yang ada). Status API tetap hanya
+  `{isSet, source, updatedAt, updatedBy}`; nilai tidak pernah muncul
+  di respons/log/audit.
+- **Verifikasi tanda tangan webhook Meta kini memakai resolver panel
+  → env yang sama**: handler `POST /meta/webhook` menyelesaikan secret
+  efektif per request lewat `getProviderSecret(db, "meta_app_secret",
+  platform)` (cache ±60 dtk per proses; set/clear dari panel di proses
+  yang sama membuang cache-nya seketika — TANPA restart API). Panel
+  kosong → fallback env `META_APP_SECRET` (placeholder staging, tidak
+  diubah nilainya); keduanya kosong → tetap **503 META_NOT_CONFIGURED**
+  fail-closed. Satu objek `PlatformSettingsOptions` kini dipakai
+  bersama modul admin, meta, dan penanda channels di `apps/api`
+  (cache resolver ter-bucket per identitas objek).
+- Panel info webhook Meta di halaman Channels
+  (`meta-webhook-info.appSecretConfigured`) kini juga menyelesaikan
+  nilai efektif panel → env (resolver async), bukan env semata — panel
+  tidak lagi menuduh "secret belum diset" setelah pemilik mengisi
+  Panel Admin.
+- **Sengaja TANPA tombol "Uji"** untuk kunci ini (mengikuti kejujuran
+  Fase 6C): Meta tidak menyediakan panggilan yang memvalidasi app
+  secret secara berdiri sendiri (`debug_token` membutuhkan access
+  token), jadi tombol uji apa pun di sini hanya akan jadi uji palsu.
+  Endpoint `POST /admin/settings/meta_app_secret/test` menjawab 400
+  seperti kunci tak-teruji lain; kebenaran nilai terbukti dari tanda
+  tangan webhook yang lolos/gagal — persis pemakaiannya. UI grup Meta
+  hanya Simpan / Hapus + status.
+
+### Deploy & verifikasi (TANPA Playwright)
+
+- Tanpa migrasi DB (skema `platform_settings` generik per kunci).
+  Typecheck SEMUA proyek hijau; build api+web → commit `275ed4b` →
+  rsync → restart api/web (bunuh PID milik `ubuntu`, `Restart=always`
+  mengangkat ulang). Bundle publik **`index-Dl8hmmbU.js`** identik
+  dengan build lokal; health publik ok.
+- **Rantai dari server terhadap URL publik: 14/14 PASS** (skrip Bun di
+  server membaca placeholder env secara lokal — nilai tidak pernah
+  dicetak; jendela uji: email admin uji `fase7a1-admin@sk.test`
+  ditambahkan SEMENTARA ke `PLATFORM_ADMIN_EMAILS`, sesudahnya
+  `.env.staging` dipulihkan byte-identik dari cadangan + API restart):
+  - Panel awal: `GET /admin/settings` memuat 5 kunci,
+    `meta_app_secret` `source=env` (placeholder). Non-admin → 404
+    (GET & PUT).
+  - Baseline: webhook HMAC(placeholder env) → **200** lolos gerbang
+    (muatan objek tak dikenal yang diabaikan parser); HMAC(salah) →
+    **401 `META_SIGNATURE_INVALID`**.
+  - Simpan dummy via panel → status `source=panel`; webhook
+    HMAC(dummy) → **200**; webhook HMAC(placeholder env) → **401**
+    (panel menang atas env, tanpa restart di tengah rantai);
+    `POST .../test` → **400** (tanpa uji palsu).
+  - Hapus kunci panel → status kembali `source=env`; webhook
+    HMAC(placeholder env) → **200 lagi**; HMAC(dummy) → **401**
+    (fallback env terbukti dua arah).
+  - Keadaan akhir: panel bersih untuk kunci ini (dummy dibersihkan di
+    dalam rantai), tenant asli user tidak disentuh, keempat service
+    active.
+
+### Batas jujur
+
+- Bukti visual grup Meta di `/admin` menunggu uji user sesuai
+  pembagian kerja — yang terbukti: API panel, resolusi tanda tangan
+  tiga keadaan, dan bundle tersaji.
+- Placeholder env tetap terpasang sebagai fallback: bila pemilik
+  menghapus nilai panel setelah mengisi yang asli, secret efektif
+  kembali ke placeholder dan webhook live Meta akan 401 sampai panel
+  diisi lagi — perilaku fail-closed yang memang dirancang begitu.
