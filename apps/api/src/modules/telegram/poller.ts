@@ -8,6 +8,7 @@ import {
   TelegramApiError,
   TelegramBotApiClient,
 } from "@sahabat-kreator/channel-telegram";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 
 /**
@@ -38,6 +39,8 @@ export interface TelegramPollerOptions {
   channelTokenSecret: string | undefined;
   /** Base URL Bot API (env TELEGRAM_API_BASE; default api.telegram.org). */
   telegramApiBase: string | undefined;
+  /** Penerbit nudge realtime (Fase 6G): status sent/failed menyegar dashboard seketika. */
+  publisher?: RealtimePublisher | null;
 }
 
 export interface TelegramDeliveryPoller {
@@ -69,6 +72,17 @@ export function startTelegramDeliveryPoller(
       }
       for (const delivery of deliveries) {
         const ctx = { tenantId: delivery.tenantId };
+        // Fase 6G: setiap perubahan status final diterbitkan sebagai
+        // nudge agar dashboard menyegar tanpa menunggu polling.
+        const nudgeStatus = async (kind: "message.sent" | "message.failed") => {
+          if (opts.publisher) {
+            await opts.publisher.publishNudge({
+              kind,
+              tenantId: delivery.tenantId,
+              conversationId: delivery.conversationId,
+            });
+          }
+        };
         if (!delivery.contentText) {
           await markOutboundMessageFailed(
             bundle.db,
@@ -77,6 +91,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_empty_text",
           );
+          await nudgeStatus("message.failed");
           continue;
         }
         if (!delivery.encryptedBotToken) {
@@ -87,6 +102,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_missing_credentials",
           );
+          await nudgeStatus("message.failed");
           continue;
         }
         const token = decryptChannelSecret(
@@ -101,6 +117,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_token_undecryptable",
           );
+          await nudgeStatus("message.failed");
           continue;
         }
         const client = new TelegramBotApiClient({
@@ -139,6 +156,7 @@ export function startTelegramDeliveryPoller(
               "telegram-poller",
             );
           }
+          await nudgeStatus("message.sent");
         } catch (err) {
           const code =
             err instanceof TelegramApiError
@@ -156,6 +174,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             code,
           );
+          await nudgeStatus("message.failed");
         }
       }
     } catch (err) {

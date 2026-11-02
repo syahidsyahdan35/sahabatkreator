@@ -24,14 +24,13 @@ import { createProductsRoutes } from "./modules/products/routes";
 import { createPayRoutes } from "./modules/pay/routes";
 import { createApiKeysRoutes } from "./modules/api-keys/routes";
 import { createPublicV1Routes } from "./modules/public-v1/routes";
-import { WebchatHub } from "./modules/webchat/hub";
-import { startWebchatDeliveryPoller } from "./modules/webchat/poller";
-import {
-  createWebchatRoutes,
-  createWebchatUpgradeHandler,
-} from "./modules/webchat/routes";
+import { createWebchatRoutes } from "./modules/webchat/routes";
 import { createTelegramRoutes } from "./modules/telegram/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
+import {
+  createRealtimePublisher,
+  type RealtimePublisher,
+} from "@sahabat-kreator/queue";
 
 const env = loadEnv();
 const startedAt = Date.now();
@@ -71,16 +70,20 @@ routes.get("/version", (c) => {
   return c.json(body);
 });
 
-// Hub WebSocket webchat (Fase 1F) — satu instance dipakai route balasan
-// inbox (mendorong realtime) dan handler upgrade WS (menerima koneksi).
-const webchatHub = new WebchatHub();
-const webchatOpts = { secret: env.WEBCHAT_SECRET, hub: webchatHub };
+// Penerbit nudge realtime (Fase 6G) — satu instance per proses; route &
+// poller menerbitkan event kecil ke Redis pub/sub SETELAH commit, dan
+// apps/realtime meneruskannya ke socket dashboard/widget. Fail-soft:
+// tanpa REDIS_URL penerbit null dan klien menutupi lewat polling.
+const realtimePublisher: RealtimePublisher | null = env.REDIS_URL
+  ? createRealtimePublisher(env.REDIS_URL)
+  : null;
+const webchatOpts = { secret: env.WEBCHAT_SECRET, publisher: realtimePublisher };
 
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...
 routes.route("/", createContactsRoutes(authBundle));
-routes.route("/", createInboxRoutes(authBundle, webchatHub));
+routes.route("/", createInboxRoutes(authBundle, realtimePublisher));
 // Modul channels (Fase 1F, telegram 6A) — manajemen channel workspace
 // /tenants/:tenantId/channels. Opsi telegram: kunci enkripsi kredensial +
 // base URL Bot API + URL publik untuk mendaftarkan webhook.
@@ -93,11 +96,11 @@ routes.route(
   }),
 );
 // Modul telegram publik (Fase 6A) — webhook Bot API /telegram/webhook/:id.
-routes.route("/", createTelegramRoutes(authBundle));
+routes.route("/", createTelegramRoutes(authBundle, realtimePublisher));
 // Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
 routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
-routes.route("/", createAgentsRoutes(authBundle));
+routes.route("/", createAgentsRoutes(authBundle, realtimePublisher));
 routes.route("/", createKnowledgeRoutes(authBundle));
 // Modul products (Fase 4A) — katalog produk & tautan bayar /tenants/:tenantId/products|payment-links.
 routes.route(
@@ -109,7 +112,7 @@ routes.route("/", createPayRoutes(authBundle));
 // Modul api-keys (Fase 5A) — manajemen kunci workspace /tenants/:tenantId/api-keys (sesi + owner/admin).
 routes.route("/", createApiKeysRoutes(authBundle));
 // Modul API publik /v1 (Fase 5A) — auth API key per tenant, tenant dari kunci (bukan URL).
-routes.route("/", createPublicV1Routes(authBundle, webchatHub));
+routes.route("/", createPublicV1Routes(authBundle, realtimePublisher));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 
@@ -128,28 +131,20 @@ if (authBundle) {
 // sebagai sub-app Hono per modul — lihat src/modules/.
 
 if (process.env.NODE_ENV !== "test") {
-  const server = serve({ fetch: app.fetch, port: env.API_PORT }, (info) => {
+  serve({ fetch: app.fetch, port: env.API_PORT }, (info) => {
     console.log(`[api] Sahabat Kreator API listening on http://localhost:${info.port}`);
   });
-  // WebSocket webchat (Fase 1F): upgrade HTTP di path /webchat/ws dan
-  // /api/webchat/ws ditangani hub webchat; path lain bukan urusan kita.
-  const handleWebchatUpgrade = createWebchatUpgradeHandler(authBundle, webchatOpts);
-  server.on("upgrade", (req, socket, head) => {
-    if (!handleWebchatUpgrade(req, socket, head)) {
-      socket.destroy();
-    }
-  });
-  // Poller pengiriman webchat (Fase 2A): mendorong pesan outbound `queued`
-  // yang dibuat proses lain (worker automation) ke pengunjung yang sedang
-  // terhubung lewat hub. Jembatan lintas proses — lihat modules/webchat/poller.ts.
+  // WebSocket TIDAK lagi dilayani proses ini (Fase 6G): hub webchat &
+  // poller pengiriman webchat pensiun — socket dashboard & pengunjung
+  // kini milik apps/realtime, dijangkau publik lewat proxy `/realtime`.
   if (authBundle) {
-    startWebchatDeliveryPoller(authBundle, webchatHub);
     // Poller pengiriman Telegram (Fase 6A): mengirim pesan outbound
     // `queued` percakapan telegram via Bot API (token terdekripsi sesaat
-    // di memori dari CHANNEL_TOKEN_SECRET).
+    // di memori dari CHANNEL_TOKEN_SECRET) + nudge status (Fase 6G).
     startTelegramDeliveryPoller(authBundle, {
       channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
       telegramApiBase: env.TELEGRAM_API_BASE,
+      publisher: realtimePublisher,
     });
   }
 }

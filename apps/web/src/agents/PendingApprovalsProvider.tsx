@@ -13,6 +13,7 @@ import {
   LIVE_REFRESH_INTERVAL_MS,
   usePolling,
 } from "../hooks/usePolling";
+import { useNudgeSubscription } from "../hooks/useRealtime";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
 /**
@@ -70,9 +71,15 @@ export function PendingApprovalsProvider({ children }: { children: ReactNode }) 
 
   // Segar tanpa refresh manual (Hotfix Dashboard Realtime): draf agent
   // yang tiba saat pemilik sedang di halaman lain tetap menaikkan badge
-  // dalam hitungan detik. Pola sama dengan UnreadBadgeProvider; transport
-  // polling = jembatan menuju Fase 6G (lihat hooks/usePolling).
+  // dalam hitungan detik. Pola sama dengan UnreadBadgeProvider.
   usePolling(refresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
+
+  // Fase 6G: nudge `agent.suggestion` dari worker (dan nudge lain tenant
+  // ini) memicu refresh yang sama — badge naik seketika, polling menjadi
+  // fallback saat socket putus.
+  useNudgeSubscription(() => {
+    void refresh();
+  });
 
   const value = useMemo<PendingApprovalsContextValue>(
     () => ({ pendingCount, refresh }),

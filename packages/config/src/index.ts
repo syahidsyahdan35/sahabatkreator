@@ -19,6 +19,12 @@ export const META_GRAPH_API_VERSION_BY_CHANNEL = {
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_PORT: z.coerce.number().int().positive().default(3001),
+  /**
+   * Port apps/realtime (Fase 6G) — gateway WebSocket mandiri. Bind
+   * 127.0.0.1 di server; publik menjangkaunya lewat proxy `/realtime`
+   * pada web preview (staging) / reverse-proxy (produksi).
+   */
+  REALTIME_PORT: z.coerce.number().int().positive().default(3103),
   DATABASE_URL: z.string().url().optional(),
   /** Better Auth (Fase 1B): secret penandatanganan sesi & URL publik aplikasi. */
   BETTER_AUTH_SECRET: z.string().min(16).optional(),

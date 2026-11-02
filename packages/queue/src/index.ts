@@ -29,17 +29,17 @@ import { Redis } from "ioredis";
  * relay yang crash di tengah jalan dan memproses event yang sama lagi
  * tidak menghasilkan job ganda — BullMQ mengembalikan job yang sudah ada.
  *
- * JEMBATAN PENGIRIMAN LINTAS PROSES (penting, Fase 2A):
- * Worker TIDAK mengirim pesan ke channel secara langsung untuk webchat,
- * karena hub WebSocket pengunjung hidup di proses API. Alurnya:
- *   worker membuat pesan outbound berstatus `queued` di DB
- *   → poller ringan di proses API (±2 dtk) mengambil pesan `queued` untuk
- *     percakapan webchat yang pengunjungnya sedang terhubung
- *   → mendorongnya lewat hub WebSocket dan menandainya `sent`.
+ * JEMBATAN PENGIRIMAN LINTAS PROSES (penting, Fase 2A → digantikan 6G):
+ * Worker TIDAK mengirim pesan ke channel secara langsung untuk webchat.
+ * Alur sejak Fase 6G (pub/sub Redis — lihat `./realtime.ts`):
+ *   worker/api membuat pesan outbound berstatus `queued` di DB
+ *   → penerbit menerbitkan nudge `message.queued` ke Redis setelah commit
+ *   → apps/realtime (pemilik socket pengunjung sekarang) mem-flush pesan
+ *     `queued` percakapan itu menjadi `sent` dan mendorong nudge ke
+ *     widget; widget memuat ulang lewat REST.
  * Pesan untuk pengunjung yang offline tetap `queued` dan ter-flush saat
- * pengunjung reconnect (mekanisme Fase 1F). Jembatan polling DB ini
- * disengaja sederhana dan akan digantikan pub/sub Redis pada fase scale
- * berikutnya, tanpa mengubah kontrak job di paket ini.
+ * pengunjung reconnect. (Di Fase 2A–6A.2 langkah tengah ini adalah poller
+ * DB di proses API + hub WebSocket in-memory; keduanya pensiun di 6G.)
  */
 
 export const MAIN_QUEUE_NAME = "sahabat-kreator";
@@ -196,3 +196,11 @@ export async function enqueueSequenceStep(
   });
   return job.id ?? sequenceStepJobId(data.enrollmentId, data.stepPosition);
 }
+
+export {
+  createRealtimePublisher,
+  realtimeTenantChannel,
+  REALTIME_TENANT_CHANNEL_PATTERN,
+  REALTIME_TENANT_CHANNEL_PREFIX,
+  type RealtimePublisher,
+} from "./realtime";

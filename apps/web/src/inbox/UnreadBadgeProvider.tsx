@@ -13,6 +13,10 @@ import {
   LIVE_REFRESH_INTERVAL_MS,
   usePolling,
 } from "../hooks/usePolling";
+import {
+  useNudgeSubscription,
+  useRealtimeConnection,
+} from "../hooks/useRealtime";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
 /**
@@ -71,8 +75,16 @@ export function UnreadBadgeProvider({ children }: { children: ReactNode }) {
   // Segar tanpa refresh manual (Hotfix Dashboard Realtime): total unread
   // dicek ulang berkala selama ada workspace aktif — badge di Sidebar &
   // MobileBottomBar sila hidup di halaman mana pun, bukan hanya Inbox.
-  // Transport polling = jembatan menuju Fase 6G (lihat hooks/usePolling).
   usePolling(refresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
+
+  // Fase 6G: transport utama kini PUSH — provider ini (selalu terpasang
+  // di shell) menjaga koneksi bus realtime menunjuk workspace aktif, dan
+  // setiap nudge memicu refresh yang sama seperti siklus polling.
+  // Polling di atas tetap berjalan sebagai fallback saat socket putus.
+  useRealtimeConnection(tenantId);
+  useNudgeSubscription(() => {
+    void refresh();
+  });
 
   const setFromConversations = useCallback(
     (conversations: Array<{ unreadCount: number }>) => {

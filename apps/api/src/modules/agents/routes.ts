@@ -20,6 +20,7 @@ import {
   updateAgent,
 } from "@sahabat-kreator/core";
 import type { Agent, AgentSuggestion } from "@sahabat-kreator/db";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppContext, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
@@ -67,7 +68,10 @@ function serializeSuggestion(row: AgentSuggestion): AgentSuggestionResponse {
  * pola Fase 1B/1D). Runtime agent berjalan di worker (job `agent.respond`),
  * bukan di proses API ini.
  */
-export function createAgentsRoutes(bundle: AuthBundle | null) {
+export function createAgentsRoutes(
+  bundle: AuthBundle | null,
+  publisher?: RealtimePublisher | null,
+) {
   const app = new Hono<{ Variables: AppVariables }>();
   const agentsBase = "/tenants/:tenantId/agents";
   const suggestionsBase = "/tenants/:tenantId/suggestions";
@@ -201,6 +205,15 @@ export function createAgentsRoutes(bundle: AuthBundle | null) {
         "VALIDATION_ERROR",
         "Suggestion is not pending",
       );
+    }
+    // Fase 6G: approve mengirim pesan outbound sungguhan — nudge agar
+    // realtime mem-flush ke pengunjung webchat & dashboard menyegar.
+    if (publisher) {
+      await publisher.publishNudge({
+        kind: "message.queued",
+        tenantId: tenant.id,
+        conversationId: outcome.suggestion.conversationId,
+      });
     }
     return c.json(serializeSuggestion(outcome.suggestion));
   });

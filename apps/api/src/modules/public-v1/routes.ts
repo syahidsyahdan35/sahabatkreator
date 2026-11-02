@@ -13,26 +13,24 @@ import {
 } from "@sahabat-kreator/contracts";
 import {
   createContact,
-  getConversationDeliveryTarget,
   getTenantNameById,
   hashApiKey,
   listContacts,
   listConversations,
   listMessages,
   listProducts,
-  markOutboundMessageSent,
   queueOutboundMessageForApiKey,
   resolveApiKeyByHash,
   touchApiKeyLastUsed,
   API_KEY_DISPLAY_PREFIX,
 } from "@sahabat-kreator/core";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type ApiKeyAuthContext, type AppVariables } from "../../http";
 import { serializeContact } from "../contacts/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeMessage } from "../messages-serialize";
 import { serializeProduct } from "../products/routes";
-import type { WebchatHub } from "../webchat/hub";
 
 const ListContactsQuerySchema = z.object({
   search: z.string().max(255).optional(),
@@ -78,7 +76,7 @@ function extractPresentedKey(headers: Headers): string | null {
  */
 export function createPublicV1Routes(
   bundle: AuthBundle | null,
-  webchatHub?: WebchatHub,
+  publisher?: RealtimePublisher | null,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -230,30 +228,18 @@ export function createPublicV1Routes(
     );
     if (!queued) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
 
-    // Jalur pengiriman sama persis dengan balasan dashboard (Fase 1F):
-    // percakapan webchat dengan pengunjung terhubung didorong lewat hub
-    // saat itu juga; selain itu pesan tetap `queued` untuk poller/flush.
-    let message = queued;
-    if (webchatHub) {
-      const target = await getConversationDeliveryTarget(
-        bundle.db,
-        { tenantId: auth.tenantId },
-        id,
-      );
-      if (target?.provider === "webchat") {
-        const delivered = webchatHub.deliverMessage(id, serializeMessage(queued));
-        if (delivered > 0) {
-          const sent = await markOutboundMessageSent(
-            bundle.db,
-            { tenantId: auth.tenantId },
-            queued.id,
-            "webchat-hub",
-          );
-          if (sent) message = sent;
-        }
-      }
+    // Jalur pengiriman sama persis dengan balasan dashboard: Fase 6G
+    // menerbitkan nudge `message.queued` — apps/realtime mem-flush ke
+    // pengunjung webchat yang terhubung (→ `sent`); selain itu pesan
+    // tetap `queued` sampai pengunjung reconnect / poller Telegram.
+    if (publisher) {
+      await publisher.publishNudge({
+        kind: "message.queued",
+        tenantId: auth.tenantId,
+        conversationId: id,
+      });
     }
-    return c.json(serializeMessage(message), 201);
+    return c.json(serializeMessage(queued), 201);
   });
 
   app.get("/v1/products", async (c) => {

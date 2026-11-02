@@ -3,11 +3,13 @@ import { useEffect, useRef } from "react";
 /**
  * Interval penyegaran latar dashboard (Hotfix Dashboard Realtime).
  *
- * Ini JEMBATAN sampai Fase 6G (apps/realtime — gateway WebSocket + Redis
- * pub/sub) live: saat itu transport utama menjadi push dan polling ini
- * turun pangkat menjadi fallback otomatis ketika WS terputus. Karena itu
- * semua penyegaran berkala dashboard WAJIB lewat hook ini + konstanta ini,
- * bukan setInterval liar per halaman — satu tempat untuk diganti nanti.
+ * Sejak Fase 6G (apps/realtime — gateway WebSocket + Redis pub/sub)
+ * transport utama dashboard adalah PUSH: nudge socket memicu penyegaran
+ * senyap yang sama lewat hooks/useRealtime. Polling ini adalah FALLBACK
+ * otomatisnya — ia tetap berjalan selalu, dan menjadi satu-satunya
+ * penyegar saat socket terputus / apps/realtime mati. Karena itu semua
+ * penyegaran berkala dashboard WAJIB lewat hook ini + konstanta ini,
+ * bukan setInterval liar per halaman.
  */
 export const LIVE_REFRESH_INTERVAL_MS = 5_000;
 

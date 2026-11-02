@@ -14,6 +14,7 @@ import {
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
   createAutomationQueue,
+  createRealtimePublisher,
   createRedisConnection,
   enqueueAgentRespond,
   enqueueAutomationEvaluate,
@@ -58,10 +59,14 @@ import {
  *    langkah berikut (atau selesaikan). Pesan pemicu sequence dihitung
  *    sebagai tembakan automation — tidak diteruskan ke agent.
  *
- * Worker TIDAK mengirim pesan ke pengunjung: hub WebSocket webchat hidup
- * di proses API. Balasan automation berhenti sebagai pesan `queued`;
- * poller di API yang mendorongnya lewat hub (lihat README
- * @sahabat-kreator/queue soal jembatan lintas proses ini).
+ * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
+ * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
+ * sequence berhenti sebagai pesan `queued`; worker menerbitkan nudge
+ * `message.queued` ke Redis pub/sub setelah job selesai, dan
+ * apps/realtime mem-flush-nya ke pengunjung webchat yang terhubung
+ * (→ `sent`) + mendorong nudge ke dashboard (lihat @sahabat-kreator/queue
+ * soal jembatan pub/sub ini). Nudge bersifat fail-soft — Redis mati
+ * hanya menurunkan kesegaran ke polling fallback klien.
  */
 
 const RELAY_INTERVAL_MS = 2_000;
@@ -78,6 +83,9 @@ const { db, pool } = createDb(env.DATABASE_URL);
 const queueConnection = createRedisConnection(env.REDIS_URL);
 const workerConnection = createRedisConnection(env.REDIS_URL);
 const queue = createAutomationQueue(queueConnection);
+// Penerbit nudge realtime (Fase 6G) — koneksi Redis khusus publish,
+// terpisah dari koneksi BullMQ (lihat @sahabat-kreator/queue/realtime).
+const realtimePublisher = createRealtimePublisher(env.REDIS_URL);
 
 // Provider LLM agent (Fase 3A): LLM_PROVIDER=mock (default, deterministik)
 // atau openrouter (wajib OPENROUTER_API_KEY — fail-fast di createLlmProvider).
@@ -102,6 +110,16 @@ const bullWorker = new Worker<MainJobData>(
         console.log(
           `[worker] automation.evaluate event=${data.outboxEventId} fired=${result.fired.length} duplicates=${result.skippedDuplicates}`,
         );
+      }
+      // Fase 6G: automation yang menembak membuat pesan outbound
+      // `queued` — nudge agar apps/realtime mem-flush ke pengunjung
+      // webchat & dashboard menyegar (terbit SETELAH core commit).
+      if (result.fired.length > 0) {
+        await realtimePublisher.publishNudge({
+          kind: "message.queued",
+          tenantId: data.tenantId,
+          conversationId: data.conversationId,
+        });
       }
       // Fase 3A — urutan pasti keyword → AI: hanya bila evaluasi berjalan
       // dan TIDAK ada automation yang menembak (dan bukan duplikat dari
@@ -132,6 +150,14 @@ const bullWorker = new Worker<MainJobData>(
         enrollmentId: data.enrollmentId,
         stepPosition: data.stepPosition,
       });
+      // Fase 6G: langkah tereksekusi = pesan `queued` baru → nudge.
+      if (result.executed && result.conversationId) {
+        await realtimePublisher.publishNudge({
+          kind: "message.queued",
+          tenantId: data.tenantId,
+          conversationId: result.conversationId,
+        });
+      }
       console.log(
         `[worker] sequence.step enrollment=${data.enrollmentId} position=${data.stepPosition} executed=${result.executed}` +
           (result.reason ? ` reason=${result.reason}` : "") +
@@ -157,6 +183,22 @@ const bullWorker = new Worker<MainJobData>(
             (result.reason ? ` reason=${result.reason}` : "") +
             (result.mode ? ` mode=${result.mode}` : ""),
         );
+      }
+      // Fase 6G: balasan agent (mode auto) = pesan `queued` baru → nudge
+      // pengiriman; draf saran (mode suggest) → nudge khusus agar badge
+      // persetujuan dashboard menyegar seketika.
+      if (result.responded && result.outboundMessageId) {
+        await realtimePublisher.publishNudge({
+          kind: "message.queued",
+          tenantId: data.tenantId,
+          conversationId: data.conversationId,
+        });
+      } else if (result.suggestionId) {
+        await realtimePublisher.publishNudge({
+          kind: "agent.suggestion",
+          tenantId: data.tenantId,
+          conversationId: data.conversationId,
+        });
       }
       return result;
     }
@@ -260,6 +302,7 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(relayTimer);
   await bullWorker.close();
   await queue.close();
+  realtimePublisher.close();
   queueConnection.disconnect();
   workerConnection.disconnect();
   await pool.end();

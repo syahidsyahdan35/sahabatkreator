@@ -6,10 +6,16 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    // Dev lokal: teruskan /api ke API lokal (termasuk WebSocket webchat).
+    // Dev lokal: teruskan /api ke API lokal dan /realtime ke gateway
+    // WebSocket apps/realtime lokal (Fase 6G).
     proxy: {
       "/api": {
         target: "http://127.0.0.1:3101",
+        changeOrigin: true,
+        ws: true,
+      },
+      "/realtime": {
+        target: "http://127.0.0.1:3103",
         changeOrigin: true,
         ws: true,
       },
@@ -40,9 +46,16 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:3101",
         changeOrigin: true,
-        // Fase 1F: WebSocket widget webchat (/api/webchat/ws) WAJIB
-        // diteruskan sebagai upgrade ke API — tanpa ws:true koneksi
-        // realtime pengunjung putus di Vite preview.
+        ws: true,
+      },
+      // Fase 6G: satu-satunya jalur WebSocket publik kini /realtime/*
+      // menuju apps/realtime (gateway mandiri, port 3103) — socket
+      // dashboard (/realtime/dashboard) & widget (/realtime/webchat).
+      // (Jalur lama /api/webchat/ws pensiun bersama hub di apps/api.)
+      // Di produksi jalur ini pindah ke edge/reverse-proxy, bukan Vite.
+      "/realtime": {
+        target: "http://127.0.0.1:3103",
+        changeOrigin: true,
         ws: true,
       },
     },

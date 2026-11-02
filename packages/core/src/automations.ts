@@ -815,6 +815,8 @@ export interface ExecuteSequenceStepResult {
     | "step_not_found"
     | "contact_opted_out";
   outboundMessageId?: string;
+  /** Percakapan tujuan langkah (Fase 6G: untuk nudge realtime worker). */
+  conversationId?: string;
   /** Posisi langkah berikutnya yang dijadwalkan; null bila rangkaian selesai. */
   nextStepPosition?: number | null;
 }
@@ -1010,6 +1012,7 @@ export async function executeSequenceStep(
       return {
         executed: true,
         outboundMessageId: outbound.id,
+        conversationId: enrollment.conversationId,
         nextStepPosition: nextStep.position,
       };
     }
@@ -1038,6 +1041,7 @@ export async function executeSequenceStep(
     return {
       executed: true,
       outboundMessageId: outbound.id,
+      conversationId: enrollment.conversationId,
       nextStepPosition: null,
     };
   });

@@ -19,7 +19,9 @@
  *   aktif lagi / browser online lagi, dan pesan yang gagal terkirim
  *   berlabel tap-to-retry. Widget tidak pernah gagal diam-diam.
  * - Pesan keluar masuk lewat REST; balasan masuk secara realtime lewat
- *   WebSocket, dengan polling cadangan bila WS gagal.
+ *   WebSocket apps/realtime (Fase 6G — socket menerima "nudge", lalu
+ *   widget memuat ulang lewat REST), dengan polling cadangan bila WS
+ *   gagal.
  * - Semua teks pesan dirender dengan textContent (tidak ada innerHTML dari
  *   data pengguna) — aman dari injeksi HTML.
  */
@@ -411,6 +413,11 @@ interface SessionResponse {
   let ws: WebSocket | null = null;
   let pollTimer: number | null = null;
   let opened = false;
+  // Reconnect WS dengan backoff yang sama seperti retry sesi: selama
+  // panel terbuka, socket yang putus dicoba sambung ulang bertahap dan
+  // polling menutupi jedanya — widget tidak bergantung pada reload.
+  let wsRetryStep = 0;
+  let wsRetryTimer: number | null = null;
 
   function startPolling(): void {
     if (pollTimer !== null) return;
@@ -422,6 +429,22 @@ interface SessionResponse {
       pollTimer = null;
     }
   }
+  function clearWsRetryTimer(): void {
+    if (wsRetryTimer !== null) {
+      clearTimeout(wsRetryTimer);
+      wsRetryTimer = null;
+    }
+  }
+  function scheduleWsReconnect(): void {
+    if (!opened || wsRetryTimer !== null) return;
+    const delay =
+      RETRY_DELAYS_MS[Math.min(wsRetryStep, RETRY_DELAYS_MS.length - 1)];
+    wsRetryStep += 1;
+    wsRetryTimer = window.setTimeout(() => {
+      wsRetryTimer = null;
+      if (opened) connectWs();
+    }, delay);
+  }
   function connectWs(): void {
     if (!token) return;
     try {
@@ -429,7 +452,11 @@ interface SessionResponse {
     } catch {
       /* abaikan */
     }
-    const wsUrl = `${apiBase.replace(/^http/, "ws")}/api/webchat/ws?token=${encodeURIComponent(token)}`;
+    // Fase 6G: socket kini ke apps/realtime (dulu hub di apps/api).
+    // Frame dari gateway berupa nudge ("ada perubahan") — muatan pesan
+    // selalu dimuat ulang lewat REST agar status & isi bersumber dari
+    // satu kebenaran yang sama seperti jalur polling.
+    const wsUrl = `${apiBase.replace(/^http/, "ws")}/realtime/webchat?token=${encodeURIComponent(token)}`;
     let socket: WebSocket;
     try {
       socket = new WebSocket(wsUrl);
@@ -444,16 +471,26 @@ interface SessionResponse {
           type?: string;
           message?: ChatMessage;
         };
-        if (data.type === "message" && data.message) {
+        if (data.type === "nudge" || data.type === "ready") {
+          void syncMessages();
+        } else if (data.type === "message" && data.message) {
+          // Kompatibilitas mundur (gateway lama) — tidak lagi dikirim.
           appendMessage(data.message);
         }
       } catch {
         /* abaikan frame tidak dikenal */
       }
     };
-    socket.onopen = () => stopPolling();
+    socket.onopen = () => {
+      wsRetryStep = 0;
+      clearWsRetryTimer();
+      stopPolling();
+    };
     socket.onclose = () => {
-      if (opened) startPolling();
+      if (opened) {
+        startPolling();
+        scheduleWsReconnect();
+      }
     };
     socket.onerror = () => startPolling();
   }
@@ -478,6 +515,8 @@ interface SessionResponse {
     opened = false;
     panel.style.display = "none";
     stopPolling();
+    clearWsRetryTimer();
+    wsRetryStep = 0;
     try {
       ws?.close();
     } catch {

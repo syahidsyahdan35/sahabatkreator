@@ -12,6 +12,7 @@ import {
   parseTelegramUpdate,
   type TelegramUpdate,
 } from "@sahabat-kreator/channel-telegram";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 
@@ -35,7 +36,10 @@ import { apiError, type AppVariables } from "../../http";
  * Update `channel_post` (Fase 6A.2) punya jalur sendiri ke linimasa
  * channel dan SENGAJA tidak menghasilkan event outbox itu.
  */
-export function createTelegramRoutes(bundle: AuthBundle | null) {
+export function createTelegramRoutes(
+  bundle: AuthBundle | null,
+  publisher?: RealtimePublisher | null,
+) {
   const app = new Hono<{ Variables: AppVariables }>();
 
   app.post("/telegram/webhook/:channelAccountId", async (c) => {
@@ -102,13 +106,23 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
     if ((payload as TelegramUpdate).channel_post) {
       const post = parseTelegramChannelPost(payload);
       if (post) {
-        await recordTelegramChannelPost(bundle.db, account, {
+        const recorded = await recordTelegramChannelPost(bundle.db, account, {
           chatExternalId: post.chatExternalId,
           chatTitle: post.chatTitle,
           // Sematkan id bot seperti jalur pesan: index unik global.
           providerMessageId: `telegram:${account.externalId}:${post.providerMessageId}`,
           text: post.text,
         });
+        // Fase 6G: linimasa channel berubah — nudge dashboard (postingan
+        // pantulan milik tenant lain mengembalikan null di core dan
+        // tidak menghasilkan nudge di sini).
+        if (recorded && publisher) {
+          await publisher.publishNudge({
+            kind: "message.received",
+            tenantId: account.tenantId,
+            conversationId: recorded.conversationId,
+          });
+        }
       }
       return c.json({ ok: true });
     }
@@ -126,7 +140,7 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
         if (event.type !== "message.received" || !event.message?.text) {
           continue;
         }
-        await recordTelegramInboundMessage(bundle.db, account, {
+        const recorded = await recordTelegramInboundMessage(bundle.db, account, {
           senderExternalId: event.message.senderExternalId,
           senderName,
           senderUsername: from?.username,
@@ -140,6 +154,15 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
           providerMessageId: `telegram:${account.externalId}:${event.message.providerMessageId ?? event.providerEventId ?? ""}`,
           text: event.message.text,
         });
+        // Fase 6G: nudge dashboard setelah commit (null = kembaran milik
+        // tenant lain / duplikat webhook — tidak ada perubahan lokal).
+        if (recorded && publisher) {
+          await publisher.publishNudge({
+            kind: "message.received",
+            tenantId: account.tenantId,
+            conversationId: recorded.conversationId,
+          });
+        }
       }
     }
     return c.json({ ok: true });

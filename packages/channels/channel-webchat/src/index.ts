@@ -19,11 +19,13 @@ import type {
  * - Paket ini memiliki FORMAT token sesi pengunjung (HMAC) + normalisasi
  *   payload pesan masuk ke StandardEvent (fungsi murni, bisa dites).
  * - Logika sesi/pesan/DB hidup di @sahabat-kreator/core (`webchat.ts`).
- * - Pengiriman realtime dilakukan hub WebSocket di apps/api (ia mendorong
- *   baris pesan DB yang sudah tersimpan — bukan teks mentah — agar status
- *   pesan selalu bersumber dari DB). Adapter `ChannelAdapter` di paket ini
- *   adalah pintu bagi worker/pengirim berbasis antrean di fase berikutnya:
- *   mereka mendaftarkan fungsi pengirimnya lewat `registerWebchatSender`.
+ * - Pengiriman realtime dilakukan apps/realtime (Fase 6G — gateway
+ *   WebSocket mandiri bertulang-punggung Redis pub/sub; sebelumnya hub
+ *   in-memory di apps/api). Ia mem-flush baris pesan DB yang sudah
+ *   tersimpan (bukan teks mentah) agar status pesan selalu bersumber
+ *   dari DB. Adapter `ChannelAdapter` di paket ini adalah pintu bagi
+ *   worker/pengirim berbasis antrean di fase berikutnya: mereka
+ *   mendaftarkan fungsi pengirimnya lewat `registerWebchatSender`.
  *   Tanpa pengirim terdaftar, `sendMessage` melempar error dengan jujur.
  */
 

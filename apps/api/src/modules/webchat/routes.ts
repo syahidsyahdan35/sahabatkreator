@@ -1,7 +1,4 @@
-import type { IncomingMessage } from "node:http";
-import type { Duplex } from "node:stream";
 import { Hono } from "hono";
-import { WebSocketServer, type WebSocket } from "ws";
 import {
   MessageListResponseSchema,
   WebchatSendMessageRequestSchema,
@@ -9,7 +6,6 @@ import {
   WebchatSessionResponseSchema,
 } from "@sahabat-kreator/contracts";
 import {
-  flushQueuedWebchatMessages,
   listMessages,
   openWebchatSession,
   recordWebchatInboundMessage,
@@ -20,10 +16,10 @@ import {
   verifyWebchatVisitorToken,
   type WebchatVisitorTokenPayload,
 } from "@sahabat-kreator/channel-webchat";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { serializeMessage } from "../messages-serialize";
-import type { WebchatHub } from "./hub";
 
 /**
  * Modul webchat publik (Fase 1F) — API widget untuk PENGUNJUNG situs tenant.
@@ -35,14 +31,19 @@ import type { WebchatHub } from "./hub";
  *   POST /webchat/:siteKey/session   buka/temukan sesi → {token, ...pesan}
  *   GET  /webchat/messages           pesan percakapan (Bearer; sinkronisasi)
  *   POST /webchat/messages           kirim pesan inbound (Bearer)
- *   GET  /webchat/ws?token=...       WebSocket realtime (upgrade handler
- *                                    terpisah — lihat createWebchatUpgradeHandler)
+ *
+ * WebSocket pengunjung BUKAN lagi di proses ini (Fase 6G): socket widget
+ * kini terhubung ke apps/realtime (`/realtime/webchat?token=...`). Modul
+ * ini hanya menerbitkan nudge `message.received` ke Redis setelah pesan
+ * inbound ter-commit, agar dashboard agen menyegar seketika; widget
+ * sendiri tetap membaca lewat REST (polling + nudge dari realtime).
  */
 
 export interface WebchatModuleOptions {
   /** Secret HMAC token pengunjung (env WEBCHAT_SECRET). */
   secret: string | undefined;
-  hub: WebchatHub;
+  /** Penerbit nudge realtime (Fase 6G); null bila Redis tidak diatur. */
+  publisher: RealtimePublisher | null;
 }
 
 function bearerToken(header: string | undefined): string | null {
@@ -171,66 +172,18 @@ export function createWebchatRoutes(
       parsed.data,
     );
     if (!message) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    // Fase 6G: pesan sudah ter-commit — terbitkan nudge agar dashboard
+    // agen menyegar seketika (fail-soft; polling dashboard menutupi
+    // kegagalan Redis).
+    if (opts.publisher) {
+      await opts.publisher.publishNudge({
+        kind: "message.received",
+        tenantId: payload.tid,
+        conversationId: payload.cv,
+      });
+    }
     return c.json(serializeMessage(message), 201);
   });
 
   return app;
-}
-
-/**
- * Membuat handler `upgrade` HTTP untuk WS webchat. Mengembalikan true bila
- * path adalah endpoint WS webchat (ditangani — termasuk bila ditolak),
- * false bila bukan urusannya (pemanggil boleh menghancurkan socket).
- *
- * Saat connect: koneksi didaftarkan ke hub, lalu pesan outbound yang masih
- * `queued` untuk percakapan ini ditandai `sent` dan didorong (jalur
- * offline→online: balasan dashboard yang menunggu akhirnya terkirim).
- */
-export function createWebchatUpgradeHandler(
-  bundle: AuthBundle | null,
-  opts: WebchatModuleOptions,
-): (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean {
-  const wss = new WebSocketServer({ noServer: true });
-
-  return (req, socket, head) => {
-    let url: URL;
-    try {
-      url = new URL(req.url ?? "", "http://localhost");
-    } catch {
-      return false;
-    }
-    if (url.pathname !== "/webchat/ws" && url.pathname !== "/api/webchat/ws") {
-      return false;
-    }
-    const reject = (statusLine: string) => {
-      socket.write(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\n\r\n`);
-      socket.destroy();
-      return true;
-    };
-    if (!bundle || !opts.secret) return reject("503 Service Unavailable");
-    const token = url.searchParams.get("token");
-    const payload = token
-      ? verifyWebchatVisitorToken(opts.secret, token)
-      : null;
-    if (!payload) return reject("401 Unauthorized");
-
-    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-      opts.hub.register(payload.cv, ws, payload.tid);
-      ws.send(JSON.stringify({ type: "ready", conversationId: payload.cv }));
-      void (async () => {
-        try {
-          const flushed = await flushQueuedWebchatMessages(bundle.db, {
-            tenantId: payload.tid,
-            conversationId: payload.cv,
-          });
-          for (const message of flushed) {
-            opts.hub.deliverMessage(payload.cv, serializeMessage(message));
-          }
-        } catch (err) {
-          console.error("[webchat] flush queued messages failed", err);
-        }
-      })();
-    });
-    return true;
-  };
 }

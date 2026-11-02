@@ -9,19 +9,17 @@ import {
   type ConversationResponse,
 } from "@sahabat-kreator/contracts";
 import {
-  getConversationDeliveryTarget,
   listConversations,
   listMessages,
   markConversationRead,
-  markOutboundMessageSent,
   queueOutboundMessage,
   type ConversationWithSummary,
 } from "@sahabat-kreator/core";
+import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { serializeMessage } from "../messages-serialize";
-import type { WebchatHub } from "../webchat/hub";
 import { resolveTenantForUser } from "../tenants/guard";
 
 export function serializeConversation(row: ConversationWithSummary): ConversationResponse {
@@ -60,14 +58,17 @@ const ListMessagesQuerySchema = z.object({
  *   GET  /tenants/:tenantId/conversations/:id/messages    pesan kronologis (?limit=)
  *   POST /tenants/:tenantId/conversations/:id/messages    balasan manual → pesan outbound status `queued`
  * POST adalah fondasi inbox manual: pesan diantrekan + diaudit
- * (message.queued). Sejak Fase 1F, untuk percakapan WEBCHAT API langsung
- * mencoba mengirim lewat hub WebSocket: pengunjung yang sedang terhubung
- * menerima saat itu juga dan status menjadi `sent`; pengunjung offline
- * tetap `queued` dan terkirim saat ia connect berikutnya. Channel lain
- * tetap `queued` sampai adapter channel-nya tiba.
+ * (message.queued). Pengiriman sungguhannya: Telegram lewat poller Bot
+ * API; webchat sejak Fase 6G lewat apps/realtime — route ini cukup
+ * menerbitkan nudge `message.queued` setelah pesan ter-commit, dan
+ * realtime mem-flush (→ `sent`) + mendorong nudge ke pengunjung yang
+ * sedang terhubung. Pengunjung offline tetap `queued` sampai reconnect.
  * Wajib sesi + membership (pola Fase 1B/1D).
  */
-export function createInboxRoutes(bundle: AuthBundle | null, webchatHub?: WebchatHub) {
+export function createInboxRoutes(
+  bundle: AuthBundle | null,
+  publisher?: RealtimePublisher | null,
+) {
   const app = new Hono<{ Variables: AppVariables }>();
   const base = "/tenants/:tenantId/conversations";
 
@@ -145,28 +146,19 @@ export function createInboxRoutes(bundle: AuthBundle | null, webchatHub?: Webcha
     );
     if (!queued) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
 
-    // Fase 1F: coba kirim sungguhan untuk channel webchat lewat hub WS.
-    let message = queued;
-    if (webchatHub) {
-      const target = await getConversationDeliveryTarget(
-        bundle.db,
-        { tenantId: tenant.id },
-        id,
-      );
-      if (target?.provider === "webchat") {
-        const delivered = webchatHub.deliverMessage(id, serializeMessage(queued));
-        if (delivered > 0) {
-          const sent = await markOutboundMessageSent(
-            bundle.db,
-            { tenantId: tenant.id },
-            queued.id,
-            "webchat-hub",
-          );
-          if (sent) message = sent;
-        }
-      }
+    // Fase 6G: nudge setelah commit — apps/realtime mem-flush pesan ini
+    // ke pengunjung webchat yang terhubung (→ `sent`) dan dashboard
+    // lain di tenant yang sama menyegar. Respons tetap membawa baris
+    // `queued` apa adanya; status final dibaca dari GET berikutnya
+    // (sumber kebenaran REST, seperti jalur automation/agent).
+    if (publisher) {
+      await publisher.publishNudge({
+        kind: "message.queued",
+        tenantId: tenant.id,
+        conversationId: id,
+      });
     }
-    return c.json(serializeMessage(message), 201);
+    return c.json(serializeMessage(queued), 201);
   });
 
   return app;

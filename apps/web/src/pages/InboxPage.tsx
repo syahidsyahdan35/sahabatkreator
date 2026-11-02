@@ -17,6 +17,7 @@ import {
   LIVE_REFRESH_INTERVAL_MS,
   usePolling,
 } from "../hooks/usePolling";
+import { useNudgeSubscription } from "../hooks/useRealtime";
 import { useUnreadBadge } from "../inbox/UnreadBadgeProvider";
 import { formatListTime, formatTime } from "../utils/format";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
@@ -43,10 +44,11 @@ interface InboxPageProps {
  * - Layar kecil: daftar dan utas bergantian; tombol kembali muncul di utas.
  * - Setelah kirim: utas dimuat ulang dari server + daftar percakapan
  *   disegarkan (cuplikan & urutan ikut berubah), badge nav disinkronkan.
- * - Penyegaran langsung (Hotfix Dashboard Realtime): daftar, utas yang
- *   terbuka, dan badge disegarkan otomatis tiap ±5 dtk lewat polling
- *   senyap (hooks/usePolling — jembatan menuju Fase 6G apps/realtime)
- *   tanpa mengganggu draf ketikan maupun posisi scroll agen.
+ * - Penyegaran langsung: sejak Hotfix Dashboard Realtime daftar, utas
+ *   yang terbuka, dan badge disegarkan otomatis; sejak Fase 6G transport
+ *   utamanya PUSH (nudge WebSocket apps/realtime memicu penyegaran
+ *   senyap yang sama) dan polling ±5 dtk turun menjadi fallback —
+ *   keduanya tanpa mengganggu draf ketikan maupun posisi scroll agen.
  */
 export function InboxPage({ t, locale }: InboxPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
@@ -144,12 +146,12 @@ export function InboxPage({ t, locale }: InboxPageProps) {
     if (selectedId) void loadMessages(selectedId);
   }, [selectedId, loadMessages]);
 
-  // --- Penyegaran latar (Hotfix Dashboard Realtime) ---------------------
+  // --- Penyegaran latar (Hotfix Dashboard Realtime → Fase 6G) ----------
   // Versi SENYAP dari pemuatan awal: tidak menyalakan status memuat,
   // tidak memasang error, tidak menyentuh draf balasan maupun pilihan
-  // percakapan. Kegagalan sesaat ditelan — siklus polling berikut
-  // mencoba lagi. Transport polling ini jembatan menuju Fase 6G
-  // (apps/realtime); nanti ia turun menjadi fallback (hooks/usePolling).
+  // percakapan. Kegagalan sesaat ditelan — siklus berikutnya mencoba
+  // lagi. Dipicu DUA transport: nudge push apps/realtime (utama sejak
+  // 6G) dan polling hooks/usePolling (fallback saat socket terputus).
 
   const refreshConversationsInBackground = useCallback(async () => {
     if (!tenantId) return;
@@ -205,6 +207,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
     await refreshMessagesInBackground();
   }, [refreshConversationsInBackground, refreshMessagesInBackground]);
   usePolling(liveRefresh, LIVE_REFRESH_INTERVAL_MS, tenantId !== null);
+  // Fase 6G: nudge realtime memicu penyegaran senyap yang sama, seketika
+  // — polling di atas kini hanya fallback saat socket terputus.
+  useNudgeSubscription(() => {
+    void liveRefresh();
+  });
 
   // Pindah percakapan → utas dibuka dari pesan terbaru (menempel di bawah).
   useEffect(() => {
