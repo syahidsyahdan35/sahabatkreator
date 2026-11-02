@@ -4098,3 +4098,164 @@ native ke provider bila salurannya mendukung.
   (rendering blok kutipan, tema) menunggu uji user sesuai pembagian
   kerja; yang terbukti di sini adalah kontrak ujung-ke-ujung, bentuk
   parameter persis di mock, typecheck/build, dan bundle tersaji.
+
+## Update Fase 7C — Broadcasts v1 (2026-11-02)
+
+Broadcast = satu pesan teks (variabel `{name}` per penerima, pola
+placeholder automation) ke audiens kontak pada SATU channel, sekarang
+atau terjadwal, dieksekusi worker, dengan statistik per penerima.
+Commit fitur `ccfe9e8`, dua perbaikan temuan rantai `2628de0`
+(validasi ulang poller) + `b2a6a07` (resolusi akun Meta
+connected-first) — keduanya dijelaskan di bawah.
+
+### Model data (migrasi 0030)
+
+- `broadcasts`: tenant, channel_account_id, name, message_text
+  (varchar 4096), audience_filter jsonb (`{tags?: string[],
+  stages?: string[]}` — OR di dalam kelompok, AND antar kelompok;
+  kosong = semua kontak beridentitas di channel itu), status
+  `draft|scheduled|sending|completed|partially_failed|failed|cancelled`,
+  scheduled_at/started_at/completed_at, error_code (penyebab gagal
+  tingkat dispatch), created_by_user_id (FK users SET NULL).
+- `broadcast_recipients`: broadcast, contact, conversation (SET
+  NULL), message (FK messages SET NULL), status
+  `queued|sent|delivered|read|failed|skipped|cancelled`, skip_reason,
+  error_code; unik (broadcast_id, contact_id).
+- RLS: tenant_isolation kedua tabel + lengan sempit
+  `system_broadcast_scan` (SELECT saja, flag transaction-local
+  `app.system_broadcast='reconcile'`) untuk penyapu worker.
+  Staging: 36 tabel / 48 policy. PGlite verify seksi [23] membuktikan
+  isolasi, lengan scan hanya-SELECT (UPDATE memengaruhi 0 baris),
+  keunikan (broadcast, kontak), dan message terhapus → SET NULL.
+
+### Alur eksekusi
+
+API schedule → outbox `broadcast.dispatch_due` → relay worker →
+job BullMQ `broadcast.dispatch` tertunda sampai scheduled_at
+(jobId `broadcast-<id>`, kirim-sekarang = tanpa delay) → core
+`dispatchBroadcast` mengklaim atomik scheduled→sending, lalu
+mematerialisasi penerima + pesan `queued` (sender_type `system`,
+teks `{name}` tersubstitusi) dalam potongan transaksi 200 baris.
+Pesan diarahkan ke percakapan privat yang ada atau dibuat
+(find-or-create; providerChatId = externalUserId identitas).
+Pengiriman NYATA tetap oleh poller telegram/meta di API — tidak ada
+pengirim paralel. Pesan keluar broadcast tidak memicu
+automation/agent (memang tidak ada jalur keluar→pemicu).
+- Statistik SUMBER KEBENARAN = baris recipients. Penyapu worker
+  `reconcileBroadcasts` (tiap 10 dtk, flag scan) menyinkron status
+  recipient ← status pesannya (termasuk error_code kegagalan Graph),
+  penerima yatim (message_id NULL masih queued) → skipped/
+  message_deleted, lalu memfinalisasi broadcast:
+  completed (tak ada failed) / partially_failed (ada failed) /
+  failed (semua gagal atau nol terkirim dengan kegagalan). Broadcast
+  `sending` yang di-resume (job ganda/retry) melewati penerima yang
+  sudah terbaris.
+- Dispatch error tingkat broadcast: channel terputus saat waktunya
+  → failed/CHANNEL_DISCONNECTED; audiens kosong saat dispatch →
+  failed/AUDIENCE_EMPTY.
+
+### Keputusan lingkup v1
+
+- Channel: telegram, messenger, instagram. **WhatsApp dikecualikan**:
+  broadcast di luar jendela 24 jam wajib template resmi Meta —
+  manajemen template adalah FASE LANJUTAN TERSENDIRI sesudah ini.
+  **Webchat dikecualikan**: tidak ada semantik push ke pengunjung
+  anonim. Keduanya ditolak API `422 BROADCAST_CHANNEL_UNSUPPORTED`
+  dan tampil NONAKTIF beralasan dwibahasa di pemilih channel UI
+  (tidak disembunyikan).
+- **Jendela 24 jam Meta** (messenger/instagram): penerima yang pesan
+  masuk terakhirnya (lintas semua percakapan privat kontak itu di
+  channel ini) lebih tua dari 24 jam → `skipped` beralasan
+  `outside_24h_window` SAAT dispatch — tidak dicoba kirim, tidak
+  dihitung gagal, tampil jujur di statistik/detail. Telegram tanpa
+  aturan ini.
+- Opt-out: sinyal yang dihormati adalah
+  `contacts.opt_in_status='opted_out'` (preseden sequence 2C).
+  Kontak opt-out yang cocok filter TETAP mendapat baris recipient
+  `skipped/opted_out` (jejak jujur), tidak pernah dikirimi pesan.
+  Estimasi audiens memisahkan matched/optedOut/totalWithIdentity.
+- Akses: mutasi (buat/edit/hapus/jadwalkan/batalkan) = owner/admin
+  (broadcast = pengiriman massal keluar, setara mengelola channel);
+  baca (daftar/detail/recipient/estimasi) = semua member workspace.
+- **Cancel**: scheduled → batal total, tidak ada pesan dibuat.
+  sending → pesan recipients yang masih `queued` DIHAPUS (bukan
+  ditandai — tidak ada pesan hantu) + recipient `cancelled`; yang
+  sudah sent/failed tidak berubah; status akhir broadcast
+  `cancelled` (ditetapkan langsung, bukan oleh penyapu).
+- Audit: `broadcast.created/scheduled/dispatched/completed/failed/
+  cancelled/deleted` + kategori `broadcast`, target `broadcast`, dan
+  label dwibahasa di viewer audit 7B.4.
+
+### Dua perbaikan temuan rantai (di luar berkas 7C murni)
+
+1. `2628de0` — **Balapan cancel vs poller.** Rantai run pertama
+   membuktikan poller telegram/meta bekerja dari snapshot batch
+   (≤25 baris, dikirim sekuensial): cancel menghapus pesan queued,
+   tetapi poller tetap mengirim sisa snapshot-nya (mock mencatat 25
+   kiriman vs 9 tercatat sent saat cancel). Perbaikan: kedua poller
+   kini memanggil helper core `isOutboundMessageQueued` tepat
+   sebelum menangani SETIAP pesan dan melewati baris yang sudah
+   hilang/berubah status. Sisa balapan yang jujur & tak
+   terhindarkan: tepat SATU permintaan provider yang sudah terlanjur
+   terbang saat cancel tiba tidak bisa ditarik dari jaringan.
+2. `b2a6a07` — **Resolusi akun webhook Meta/WhatsApp.** Bila
+   external_id yang sama hidup sebagai baris `disconnected` di satu
+   tenant dan `connected` di tenant lain (sah menurut penjaga 0020),
+   resolver lama mengambil `limit(1)` tanpa urutan dan bisa memungut
+   baris disconnected → webhook koneksi aktif ter-abaikan
+   (`ignored_disconnected`). Kedua resolver kini mengurutkan
+   connected-first lalu terbaru — deterministik karena maks. satu
+   baris connected boleh ada.
+
+### UI
+
+Halaman `/broadcasts` nyata (route/nav sudah ada sejak 6E): daftar
+dengan chip status semantik + ringkasan statistik, formulir buat/
+edit draf (pemilih channel connected dengan WA/webchat nonaktif
+beralasan, filter tag/stage, estimasi audiens live, editor pesan +
+petunjuk `{name}`, kirim sekarang vs jadwal datetime), panel detail
+(grid statistik 8 sel + daftar penerima berpaginasi + alasan
+skip/error dwibahasa), tombol batal dua-langkah untuk
+scheduled/sending, polling 5 dtk saat ada yang `sending`. i18n
+en+id penuh.
+
+### Verifikasi (tanpa Playwright)
+
+- Lokal: typecheck seluruh workspace hijau; build semua paket
+  hijau; PGlite verify lulus [1]–[23]. Bundle web `index-CRB5kuUd.js`.
+  (Artefak `widget.js` yang tertinggal dari sumber embed 7B.5
+  dibangun ulang di commit terpisah `439bd38` agar yang tersaji
+  sama dengan sumber.)
+- Rantai mock dari server (`/tmp/sk7c/`, mock gabungan Telegram
+  :8410 + Graph :8411, jendela env singkat lalu pulih): **78/78
+  PASS** pada run bersih final —
+  (S1) Telegram filter tag: estimasi matched 3/optedOut 1/total 5;
+  tepat 3 kiriman mock dengan `{name}` benar (Ani/Budi/Eka —
+  percakapan Eka dibuat dispatch), Citra tanpa tag tersisih, Dodi
+  opt-out `skipped/opted_out`, broadcast completed, audit
+  broadcast.* lengkap; (S2) terjadwal +2 menit: nol kiriman sebelum
+  waktunya, 4 terkirim sesudahnya, completed; (S3a) cancel scheduled
+  → nol pesan, recipients kosong; (S3b) cancel saat sending (mock
+  lambat 300 ms/kirim, 30 penerima): mayoritas ≥20 cancelled,
+  kiriman mock == sent atau sent+1 (satu in-flight), tidak ada
+  kiriman baru sesudah settle, nol pesan queued yatim di DB;
+  (S4) Messenger: 8801 dalam jendela terkirim, 8802 (inbound 25 jam)
+  `skipped/outside_24h_window` tanpa dicoba Graph, 8803 gagal Graph
+  → failed + errorCode → broadcast partially_failed (sent 1/failed
+  1/skipped 1); (S5) isolasi tenant (daftar kosong, baca silang 404,
+  channel silang 404), member agent baca 200 tetapi buat/jadwalkan/
+  batalkan 403, channel disconnected → schedule 409
+  CHANNEL_DISCONNECTED, webchat & whatsapp → 422
+  BROADCAST_CHANNEL_UNSUPPORTED, audit broadcast.cancelled tercatat,
+  bot asli user tetap connected.
+- Sesudah jendela mock: `.env.staging` pulih **byte-identik**
+  (sha256 `9c1ded2a…` sebelum = sesudah), API direstart dengan env
+  asli, port mock tertutup. Publik: `/api/health` ok, bundle
+  `index-CRB5kuUd.js` tersaji, `/broadcasts` 200.
+- Batas jujur: (1) template WhatsApp = fase lanjutan terpisah —
+  broadcast WA belum bisa sama sekali di v1; (2) status
+  delivered/read recipient mengikuti laporan platform ke pesan kita
+  (Meta melaporkannya; Telegram tidak — tidak ada angka baca yang
+  dikarang); (3) satu pesan in-flight saat cancel dapat tetap
+  terkirim (lihat perbaikan 1); (4) bukti visual UI menunggu uji
+  user sesuai pembagian kerja.
