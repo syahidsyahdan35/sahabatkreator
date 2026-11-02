@@ -12,6 +12,7 @@
     "dev:web": "pnpm --filter @sahabat-kreator/web dev",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "lint": "echo \"lint: TODO eslint + i18n no-literal-string (RANCANGAN \u00a711.1)\""
+    "lint": "echo \"lint: TODO eslint + i18n no-literal-string (RANCANGAN \u00a711.1)\"",
+    "check:drift": "pnpm --filter @sahabat-kreator/sdk run check:drift"
   }
 }
