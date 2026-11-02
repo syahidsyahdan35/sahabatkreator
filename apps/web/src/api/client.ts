@@ -29,6 +29,10 @@ import type {
   CreateAutomationRequest,
   CreateContactRequest,
   CreateFlowRequest,
+  CreateSavedReplyRequest,
+  SavedReplyListResponse,
+  SavedReplyResponse,
+  UpdateSavedReplyRequest,
   FlowGraph,
   FlowGraphIssue,
   FlowListResponse,
@@ -1175,6 +1179,43 @@ export const api = {
       return request<FailedMessageRetryResponse>(
         `/api/tenants/${tenantId}/failed-messages/${messageId}/retry`,
         { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  savedReplies: {
+    /** GET /api/tenants/:tenantId/saved-replies → pustaka macro workspace (Fase 9A). */
+    list(tenantId: string): Promise<SavedReplyListResponse> {
+      return request<SavedReplyListResponse>(
+        `/api/tenants/${tenantId}/saved-replies`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/saved-replies → 201 macro baru (semua member). */
+    create(
+      tenantId: string,
+      input: CreateSavedReplyRequest,
+    ): Promise<SavedReplyResponse> {
+      return request<SavedReplyResponse>(
+        `/api/tenants/${tenantId}/saved-replies`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/saved-replies/:id → edit (pembuat/owner/admin). */
+    update(
+      tenantId: string,
+      replyId: string,
+      input: UpdateSavedReplyRequest,
+    ): Promise<SavedReplyResponse> {
+      return request<SavedReplyResponse>(
+        `/api/tenants/${tenantId}/saved-replies/${replyId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/saved-replies/:id → hapus (pembuat/owner/admin). */
+    async remove(tenantId: string, replyId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/saved-replies/${replyId}`,
+        { method: "DELETE" },
       );
     },
   },

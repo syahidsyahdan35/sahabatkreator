@@ -17,6 +17,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { PasswordInput } from "../components/PasswordInput";
 import {
   ChannelAvatar,
   ProviderGlyph,
@@ -1636,9 +1637,9 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     >
                       {t("channels.tokenLabel")}
                     </label>
-                    <input
+                    <PasswordInput
+                      t={t}
                       id="telegram-token"
-                      type="password"
                       autoComplete="off"
                       value={tgToken}
                       onChange={(e) => setTgToken(e.target.value)}
@@ -1723,9 +1724,9 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     >
                       {t("channels.pageTokenLabel")}
                     </label>
-                    <input
+                    <PasswordInput
+                      t={t}
                       id="messenger-token"
-                      type="password"
                       autoComplete="off"
                       value={msToken}
                       onChange={(e) => setMsToken(e.target.value)}
@@ -1826,9 +1827,9 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     >
                       {t("channels.pageTokenLabel")}
                     </label>
-                    <input
+                    <PasswordInput
+                      t={t}
                       id="instagram-token"
-                      type="password"
                       autoComplete="off"
                       value={igToken}
                       onChange={(e) => setIgToken(e.target.value)}
@@ -1934,9 +1935,9 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     >
                       {t("channels.waTokenLabel")}
                     </label>
-                    <input
+                    <PasswordInput
+                      t={t}
                       id="whatsapp-token"
-                      type="password"
                       autoComplete="off"
                       value={waToken}
                       onChange={(e) => setWaToken(e.target.value)}

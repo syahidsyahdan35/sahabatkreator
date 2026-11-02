@@ -16,3 +16,4 @@ export * from "./platform";
 export * from "./avatars";
 export * from "./broadcasts";
 export * from "./flows";
+export * from "./saved-replies";

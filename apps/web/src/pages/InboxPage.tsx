@@ -9,9 +9,11 @@ import type {
   ConversationResponse,
   MessageReplyTo,
   MessageResponse,
+  SavedReplyResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
+import { useAuth } from "../auth/AuthProvider";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
 import { Avatar } from "../components/Avatar";
@@ -72,6 +74,7 @@ interface InboxPageProps {
  *   percakapan itu, id tak valid jatuh lembut kembali ke /inbox.
  */
 export function InboxPage({ t, locale, conversationId, onConversationChange }: InboxPageProps) {
+  const { user } = useAuth();
   const { status, tenants, active, reload } = useWorkspace();
   const { setFromConversations } = useUnreadBadge();
   const tenantId = active?.id ?? null;
@@ -89,6 +92,22 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Fase 9A — saved replies (macro `/`): pustaka workspace untuk
+  // composer; pemilih muncul saat draf diawali "/", panel kelola
+  // dibuka dari tombol di atas composer.
+  const [savedReplies, setSavedReplies] = useState<SavedReplyResponse[]>([]);
+  const [savedRepliesError, setSavedRepliesError] = useState<string | null>(null);
+  const [srPanelOpen, setSrPanelOpen] = useState(false);
+  const [pickerIndex, setPickerIndex] = useState(0);
+  const [pickerDismissed, setPickerDismissed] = useState(false);
+  const [srForm, setSrForm] = useState<{ id: string | null; title: string; body: string }>({
+    id: null,
+    title: "",
+    body: "",
+  });
+  const [srSaving, setSrSaving] = useState(false);
+  const [srDeleteConfirmId, setSrDeleteConfirmId] = useState<string | null>(null);
 
   // Fase 7B.5 — balas dengan kutipan: target yang sedang dikutip
   // (chip di atas composer) + id pesan yang sedang disorot sesaat
@@ -275,6 +294,91 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
     setQuoteTarget(null);
     setHighlightedId(null);
   }, [selectedId]);
+
+  // Fase 9A — pustaka saved replies dimuat per workspace aktif.
+  const loadSavedReplies = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      const res = await api.savedReplies.list(tenantId);
+      setSavedReplies(res.replies);
+      setSavedRepliesError(null);
+    } catch {
+      setSavedRepliesError(t("inbox.savedReplies.loadError"));
+    }
+  }, [tenantId, t]);
+  useEffect(() => {
+    setSavedReplies([]);
+    setSrPanelOpen(false);
+    setSrForm({ id: null, title: "", body: "" });
+    setSrDeleteConfirmId(null);
+    void loadSavedReplies();
+  }, [loadSavedReplies]);
+
+  // Pemilih `/`: aktif hanya saat draf DIAWALI "/" — teks sesudahnya
+  // adalah kata kunci filter (judul/isi, tak peka huruf).
+  const pickerQuery = draft.startsWith("/") ? draft.slice(1) : null;
+  const pickerMatches =
+    pickerQuery === null
+      ? []
+      : savedReplies.filter((r) => {
+          const q = pickerQuery.trim().toLowerCase();
+          return (
+            q === "" ||
+            r.title.toLowerCase().includes(q) ||
+            r.body.toLowerCase().includes(q)
+          );
+        });
+  const pickerOpen =
+    pickerQuery !== null && !pickerDismissed && !srPanelOpen && !!selectedId;
+
+  const canManageReply = (r: SavedReplyResponse): boolean =>
+    r.createdByUserId === user?.id ||
+    active?.role === "owner" ||
+    active?.role === "admin";
+
+  /** Sisipkan macro: SELURUH draf diganti isi macro dengan {name}
+   *  terganti nama kontak percakapan ini — WYSIWYG, agen melihat &
+   *  bisa mengedit teks final sebelum mengirim. */
+  const insertSavedReply = (reply: SavedReplyResponse) => {
+    const conv = conversations.find((c) => c.id === selectedId);
+    const name = conv?.contactName ?? conv?.title ?? "";
+    setDraft(reply.body.replaceAll("{name}", name));
+    setPickerDismissed(true);
+  };
+
+  const handleSrSave = async () => {
+    if (!tenantId || srSaving) return;
+    const title = srForm.title.trim();
+    const body = srForm.body.trim();
+    if (!title || !body) return;
+    setSrSaving(true);
+    setSavedRepliesError(null);
+    try {
+      if (srForm.id) {
+        await api.savedReplies.update(tenantId, srForm.id, { title, body });
+      } else {
+        await api.savedReplies.create(tenantId, { title, body });
+      }
+      setSrForm({ id: null, title: "", body: "" });
+      await loadSavedReplies();
+    } catch {
+      setSavedRepliesError(t("inbox.savedReplies.saveError"));
+    } finally {
+      setSrSaving(false);
+    }
+  };
+
+  const handleSrDelete = async (reply: SavedReplyResponse) => {
+    if (!tenantId) return;
+    try {
+      await api.savedReplies.remove(tenantId, reply.id);
+      setSrDeleteConfirmId(null);
+      if (srForm.id === reply.id) setSrForm({ id: null, title: "", body: "" });
+      await loadSavedReplies();
+    } catch {
+      setSavedRepliesError(t("inbox.savedReplies.saveError"));
+    }
+  };
 
   // Ikut turun ke pesan terbaru HANYA bila agen sedang menempel di bawah;
   // agen yang sedang scroll ke atas membaca riwayat tidak diseret turun.
@@ -689,6 +793,154 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                   onSubmit={handleSend}
                   className="border-t border-line bg-surface px-4 py-3"
                 >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-[11px] text-muted">
+                      {t("inbox.savedReplies.hint")}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSrPanelOpen((o) => !o)}
+                      className="shrink-0 rounded-lg bg-elevated px-2.5 py-1 text-[11px] font-medium text-ink"
+                    >
+                      {t("inbox.savedReplies.manageButton")}
+                    </button>
+                  </div>
+                  {srPanelOpen ? (
+                    <div className="mb-3 rounded-xl border border-line bg-elevated/40 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-ink">
+                          {t("inbox.savedReplies.title")}
+                        </h3>
+                        <button
+                          type="button"
+                          aria-label={t("inbox.savedReplies.closeButton")}
+                          onClick={() => setSrPanelOpen(false)}
+                          className="rounded px-1 text-sm leading-none text-muted hover:text-ink"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {savedRepliesError ? (
+                        <p className="mt-2 text-xs text-danger">{savedRepliesError}</p>
+                      ) : null}
+                      {savedReplies.length === 0 ? (
+                        <p className="mt-2 text-sm text-muted">
+                          {t("inbox.savedReplies.empty")}
+                        </p>
+                      ) : (
+                        <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto">
+                          {savedReplies.map((r) => (
+                            <li
+                              key={r.id}
+                              className="rounded-lg border border-line bg-surface px-3 py-2"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => insertSavedReply(r)}
+                                  className="min-w-0 flex-1 text-left"
+                                  title={r.body}
+                                >
+                                  <span className="block truncate text-sm font-medium text-ink">
+                                    {r.title}
+                                  </span>
+                                  <span className="block truncate text-xs text-muted">
+                                    {r.body}
+                                  </span>
+                                </button>
+                                {canManageReply(r) ? (
+                                  <span className="flex shrink-0 gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setSrForm({ id: r.id, title: r.title, body: r.body })
+                                      }
+                                      className="rounded bg-elevated px-2 py-0.5 text-[11px] font-medium text-ink"
+                                    >
+                                      {t("inbox.savedReplies.editButton")}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        srDeleteConfirmId === r.id
+                                          ? void handleSrDelete(r)
+                                          : setSrDeleteConfirmId(r.id)
+                                      }
+                                      className="rounded bg-elevated px-2 py-0.5 text-[11px] font-medium text-danger"
+                                    >
+                                      {srDeleteConfirmId === r.id
+                                        ? t("inbox.savedReplies.deleteConfirm")
+                                        : t("inbox.savedReplies.deleteButton")}
+                                    </button>
+                                  </span>
+                                ) : null}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="mt-3 border-t border-line pt-3">
+                        <p className="text-sm font-medium text-ink">
+                          {srForm.id
+                            ? t("inbox.savedReplies.editTitle")
+                            : t("inbox.savedReplies.newTitle")}
+                        </p>
+                        <input
+                          value={srForm.title}
+                          onChange={(e) =>
+                            setSrForm((f) => ({ ...f, title: e.target.value }))
+                          }
+                          onKeyDown={(e) => {
+                            // Enter di judul TIDAK boleh mengirim balasan chat.
+                            if (e.key === "Enter") e.preventDefault();
+                          }}
+                          placeholder={t("inbox.savedReplies.titlePlaceholder")}
+                          maxLength={255}
+                          className={`${inputClassName} mt-2`}
+                          aria-label={t("inbox.savedReplies.titleLabel")}
+                        />
+                        <textarea
+                          value={srForm.body}
+                          onChange={(e) =>
+                            setSrForm((f) => ({ ...f, body: e.target.value }))
+                          }
+                          placeholder={t("inbox.savedReplies.bodyPlaceholder")}
+                          rows={3}
+                          maxLength={4096}
+                          className={`${inputClassName} mt-2 resize-none`}
+                          aria-label={t("inbox.savedReplies.bodyLabel")}
+                        />
+                        <p className="mt-1 text-[11px] text-muted">
+                          {t("inbox.savedReplies.bodyHint")}
+                        </p>
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            disabled={
+                              srSaving || !srForm.title.trim() || !srForm.body.trim()
+                            }
+                            onClick={() => void handleSrSave()}
+                            className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                          >
+                            {srForm.id
+                              ? t("inbox.savedReplies.saveButton")
+                              : t("inbox.savedReplies.createButton")}
+                          </button>
+                          {srForm.id ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSrForm({ id: null, title: "", body: "" })
+                              }
+                              className="rounded-lg bg-elevated px-3 py-1.5 text-xs font-medium text-ink"
+                            >
+                              {t("inbox.savedReplies.cancelButton")}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                   {quoteTarget ? (
                     <div className="mb-2 flex items-start gap-2 rounded-lg border-l-2 border-accent bg-elevated px-3 py-2">
                       <div className="min-w-0 flex-1">
@@ -710,11 +962,87 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                       </button>
                     </div>
                   ) : null}
+                  <div className="relative">
+                    {pickerOpen ? (
+                      <div className="absolute bottom-full left-0 z-10 mb-2 max-h-64 w-full max-w-md overflow-y-auto rounded-xl border border-line bg-surface shadow-lg">
+                        {pickerMatches.length === 0 ? (
+                          <p className="px-3 py-2 text-sm text-muted">
+                            {t("inbox.savedReplies.pickerEmpty")}
+                          </p>
+                        ) : (
+                          pickerMatches.map((r, i) => (
+                            <button
+                              key={r.id}
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                insertSavedReply(r);
+                              }}
+                              className={`block w-full px-3 py-2 text-left ${
+                                i === pickerIndex ? "bg-elevated" : ""
+                              }`}
+                            >
+                              <span className="block truncate text-sm font-medium text-ink">
+                                {r.title}
+                              </span>
+                              <span className="block truncate text-xs text-muted">
+                                {r.body}
+                              </span>
+                            </button>
+                          ))
+                        )}
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setSrPanelOpen(true);
+                            setPickerDismissed(true);
+                          }}
+                          className="block w-full border-t border-line px-3 py-2 text-left text-xs font-medium text-accent"
+                        >
+                          {t("inbox.savedReplies.pickerManage")}
+                        </button>
+                      </div>
+                    ) : null}
                   <div className="flex items-end gap-2">
                     <textarea
                       value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
+                      onChange={(e) => {
+                        setDraft(e.target.value);
+                        setPickerIndex(0);
+                        setPickerDismissed(false);
+                      }}
                       onKeyDown={(e) => {
+                        // Pemilih `/` (Fase 9A) didahulukan: panah
+                        // menavigasi, Enter memilih (bukan mengirim),
+                        // Esc menutup pemilih.
+                        if (pickerOpen && pickerMatches.length > 0) {
+                          if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            setPickerIndex((i) =>
+                              Math.min(i + 1, pickerMatches.length - 1),
+                            );
+                            return;
+                          }
+                          if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setPickerIndex((i) => Math.max(i - 1, 0));
+                            return;
+                          }
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            const pick =
+                              pickerMatches[pickerIndex] ?? pickerMatches[0];
+                            if (pick) {
+                              e.preventDefault();
+                              insertSavedReply(pick);
+                              return;
+                            }
+                          }
+                        }
+                        if (e.key === "Escape" && pickerOpen) {
+                          setPickerDismissed(true);
+                          return;
+                        }
                         if (e.key === "Escape" && quoteTarget) {
                           // Esc membatalkan kutipan yang sedang disusun.
                           setQuoteTarget(null);
@@ -745,6 +1073,7 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                           ? t("inbox.postButton")
                           : t("inbox.sendButton")}
                     </button>
+                  </div>
                   </div>
                   <FieldError message={sendError} />
                   <p className="mt-2 text-[11px] text-muted">

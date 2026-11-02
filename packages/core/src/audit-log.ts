@@ -129,6 +129,7 @@ const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
   // created/updated/activated/deactivated hanya membawa flowId).
   ["flowRunId", "flow_run"],
   ["flowId", "flow"],
+  ["savedReplyId", "saved_reply"],
   // broadcastId didahulukan dari channelAccountId: meta broadcast.*
   // membawa keduanya, dan target utamanya adalah broadcast-nya.
   ["broadcastId", "broadcast"],

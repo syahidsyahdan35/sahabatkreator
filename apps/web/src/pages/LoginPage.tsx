@@ -11,6 +11,7 @@ import {
   primaryButtonClassName,
 } from "../components/AuthLayout";
 import { LegalLinks } from "../components/LegalLinks";
+import { PasswordInput } from "../components/PasswordInput";
 
 type Translate = (
   key: TranslationKey,
@@ -83,9 +84,9 @@ export function LoginPage({ t, controls, onNavigate }: LoginPageProps) {
           <label htmlFor="login-password" className="mb-1 block text-sm font-medium text-ink">
             {t("auth.passwordLabel")}
           </label>
-          <input
+          <PasswordInput
+            t={t}
             id="login-password"
-            type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={t("auth.passwordPlaceholder")}

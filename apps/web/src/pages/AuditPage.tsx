@@ -47,6 +47,7 @@ const CATEGORY_VALUES = [
   "platform_settings",
   "broadcast",
   "flow",
+  "saved_reply",
 ] as const;
 type CategoryValue = (typeof CATEGORY_VALUES)[number];
 
@@ -66,6 +67,7 @@ const CATEGORY_LABEL_KEYS: Record<CategoryValue, TranslationKey> = {
   platform_settings: "audit.categoryPlatformSettings",
   broadcast: "audit.categoryBroadcast",
   flow: "audit.categoryFlow",
+  saved_reply: "audit.categorySavedReply",
 };
 
 /**
@@ -127,6 +129,10 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "flow.run_completed": "audit.actionFlowRunCompleted",
   "flow.run_failed": "audit.actionFlowRunFailed",
   "flow.run_cancelled": "audit.actionFlowRunCancelled",
+  "saved_reply.created": "audit.actionSavedReplyCreated",
+  "saved_reply.updated": "audit.actionSavedReplyUpdated",
+  "saved_reply.deleted": "audit.actionSavedReplyDeleted",
+  "agent.batched": "audit.actionAgentBatched",
 };
 
 const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
@@ -146,6 +152,7 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   broadcast: "audit.targetBroadcast",
   flow: "audit.targetFlow",
   flow_run: "audit.targetFlowRun",
+  saved_reply: "audit.targetSavedReply",
 };
 
 /** Warna chip actor mengikuti token semantik (pola chip Logs). */

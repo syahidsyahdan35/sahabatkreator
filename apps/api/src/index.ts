@@ -38,6 +38,7 @@ import { createLogsRoutes } from "./modules/logs/routes";
 import { createAuditRoutes } from "./modules/audit/routes";
 import { createBroadcastsRoutes } from "./modules/broadcasts/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
+import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -150,6 +151,8 @@ routes.route("/", createBroadcastsRoutes(authBundle));
 // Modul flows (Fase 8A) — definisi flow graf /tenants/:tenantId/flows +
 // run & langkah; eksekusi oleh worker (job flow.step dari event outbox).
 routes.route("/", createFlowsRoutes(authBundle));
+// Modul saved-replies (Fase 9A) — macro balasan /tenants/:tenantId/saved-replies.
+routes.route("/", createSavedRepliesRoutes(authBundle));
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...

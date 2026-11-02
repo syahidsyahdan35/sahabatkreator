@@ -58,7 +58,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 7B.1 (integration_log)
 // + 2 tabel Fase 7C (broadcasts, broadcast_recipients)
 // + 3 tabel Fase 8A (flows, flow_runs, flow_run_steps)
-assert.equal(Number(tablesRes.rows[0].count), 39);
+// + 1 tabel Fase 9A (saved_replies)
+assert.equal(Number(tablesRes.rows[0].count), 40);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -141,7 +142,8 @@ const policies = await db.query<{ count: string }>(
 //   0030) = 48.
 // + tenant_isolation pada flows, flow_runs, flow_run_steps (Fase 8A,
 //   migrasi 0031) = 51.
-assert.equal(Number(policies.rows[0].count), 51);
+// + tenant_isolation pada saved_replies (Fase 9A, migrasi 0033) = 52.
+assert.equal(Number(policies.rows[0].count), 52);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -157,7 +159,8 @@ await db.exec(`
     automation_steps, sequence_enrollments,
     platform_settings, profile_photos, integration_log,
     broadcasts, broadcast_recipients,
-    flows, flow_runs, flow_run_steps
+    flows, flow_runs, flow_run_steps,
+    saved_replies
   TO app_user;
 `);
 
@@ -1622,6 +1625,55 @@ const SNAPSHOT_MSG_ID = "62626262-6262-4262-8262-626262626262";
   assert.equal(snapshotViews.other.rows[0].n, "0");
   console.log(
     "[25] Hotfix 7B.6: kolom messages.reply_to_snapshot ada; snapshot jsonb tersimpan & terbaca utuh dalam konteks tenant pemilik lewat policy yang ada; tenant lain melihat 0 baris: OK",
+  );
+}
+
+// ---------- 26. Fase 9A: saved_replies ----------
+// Tabel macro balasan tersimpan (migrasi 0033): (a) baris terbaca dalam
+// konteks tenant pemilik; (b) konteks tenant LAIN melihat 0 baris;
+// (c) insert lintas tenant ditolak WITH CHECK; (d) tanpa konteks: 0 baris.
+const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
+{
+  await db.query(
+    `INSERT INTO saved_replies (id, tenant_id, title, body, created_by_user_id)
+     VALUES ($1, $2, 'Sapaan', 'Halo {name}, terima kasih sudah menghubungi kami!', $3)`,
+    [SAVED_REPLY_ID, TENANT_A, USER_A],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM saved_replies WHERE id = $1`,
+      [SAVED_REPLY_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM saved_replies WHERE id = $1`,
+      [SAVED_REPLY_ID],
+    );
+    let crossBlocked = false;
+    await tx.query(`SAVEPOINT sp_sr1`);
+    try {
+      await tx.query(
+        `INSERT INTO saved_replies (tenant_id, title, body) VALUES ($1, 'Silang', 'x')`,
+        [TENANT_A],
+      );
+    } catch {
+      crossBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_sr1`);
+    }
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const bare = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM saved_replies`,
+    );
+    return { own, other, crossBlocked, bare };
+  });
+  assert.equal(views.own.rows[0].n, "1");
+  assert.equal(views.other.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+  assert.equal(views.bare.rows[0].n, "0");
+  console.log(
+    "[26] Fase 9A: saved_replies — terbaca oleh tenant pemilik; tenant lain 0 baris; insert silang ditolak; tanpa konteks 0 baris: OK",
   );
 }
 

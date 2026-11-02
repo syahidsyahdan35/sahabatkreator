@@ -10,6 +10,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { PasswordInput } from "../components/PasswordInput";
 import { LEGAL_PATHS } from "../components/LegalLinks";
 import { formatDateTime } from "../utils/format";
 
@@ -448,18 +449,29 @@ function SettingRow({
         <span className="mb-1 block text-xs font-medium text-muted">
           {t("admin.newValueLabel")}
         </span>
-        <input
-          type={secret ? "password" : "text"}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={
-            settingKey === "openrouter_model"
-              ? t("admin.openrouterModelPlaceholder")
-              : t("admin.newValuePlaceholder")
-          }
-          autoComplete="off"
-          className={inputClassName}
-        />
+        {secret ? (
+          <PasswordInput
+            t={t}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={t("admin.newValuePlaceholder")}
+            autoComplete="off"
+            className={inputClassName}
+          />
+        ) : (
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={
+              settingKey === "openrouter_model"
+                ? t("admin.openrouterModelPlaceholder")
+                : t("admin.newValuePlaceholder")
+            }
+            autoComplete="off"
+            className={inputClassName}
+          />
+        )}
       </label>
       <FieldError message={rowError} />
 
