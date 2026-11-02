@@ -10,7 +10,7 @@ import type {
   MessageResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
-import { api } from "../api/client";
+import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
 import {
@@ -32,6 +32,22 @@ const MESSAGE_LIMIT = 100;
 interface InboxPageProps {
   t: Translate;
   locale: Locale;
+  /**
+   * Percakapan terpilih MENURUT URL (Fase 6E): segmen id pada
+   * /inbox/:conversationId, atau null pada /inbox polos. Pilihan TIDAK
+   * lagi state lokal — URL adalah sumber kebenarannya, agar deep-link,
+   * refresh, dan Back/Forward berperilaku seperti halaman web biasa.
+   */
+  conversationId: string | null;
+  /**
+   * Minta perubahan pilihan lewat URL. `replace: true` membersihkan id
+   * basi (pindah workspace / id tidak valid) tanpa entri riwayat baru,
+   * supaya Back tidak mengembalikan pengguna ke id yang sudah gugur.
+   */
+  onConversationChange: (
+    id: string | null,
+    opts?: { replace?: boolean },
+  ) => void;
 }
 
 /**
@@ -49,8 +65,11 @@ interface InboxPageProps {
  *   utamanya PUSH (nudge WebSocket apps/realtime memicu penyegaran
  *   senyap yang sama) dan polling ±5 dtk turun menjadi fallback —
  *   keduanya tanpa mengganggu draf ketikan maupun posisi scroll agen.
+ * - Pilihan percakapan hidup di URL (Fase 6E): /inbox/:conversationId —
+ *   klik daftar menavigasi (push), membuka URL langsung memilih
+ *   percakapan itu, id tak valid jatuh lembut kembali ke /inbox.
  */
-export function InboxPage({ t, locale }: InboxPageProps) {
+export function InboxPage({ t, locale, conversationId, onConversationChange }: InboxPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
   const { setFromConversations } = useUnreadBadge();
   const tenantId = active?.id ?? null;
@@ -58,7 +77,8 @@ export function InboxPage({ t, locale }: InboxPageProps) {
   const [conversations, setConversations] = useState<ConversationResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Pilihan = prop dari URL; TIDAK ada state pilihan lokal lagi.
+  const selectedId = conversationId;
 
   const [messages, setMessages] = useState<MessageResponse[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -71,6 +91,9 @@ export function InboxPage({ t, locale }: InboxPageProps) {
   const threadRef = useRef<HTMLDivElement | null>(null);
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
+  const onConversationChangeRef = useRef(onConversationChange);
+  onConversationChangeRef.current = onConversationChange;
+  const tenantIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ConversationResponse[]>([]);
   conversationsRef.current = conversations;
   // Agen dianggap "menempel di bawah" utas (pantas ikut turun saat pesan
@@ -94,13 +117,26 @@ export function InboxPage({ t, locale }: InboxPageProps) {
     }
   }, [tenantId, t, setFromConversations]);
 
-  // Ganti workspace → daftar & pilihan direset, data workspace baru dimuat.
+  // Ganti workspace → daftar direset, data workspace baru dimuat. Pilihan
+  // di URL dibersihkan (replace) HANYA pada perpindahan workspace
+  // sungguhan — muat awal (tenant null → tenant pertama) TIDAK
+  // membersihkan, karena deep-link /inbox/:id memang harus membuka
+  // percakapan pada workspace awal itu.
   useEffect(() => {
-    setSelectedId(null);
+    const prevTenantId = tenantIdRef.current;
+    tenantIdRef.current = tenantId;
+    if (
+      prevTenantId !== null &&
+      tenantId !== null &&
+      prevTenantId !== tenantId &&
+      selectedRef.current
+    ) {
+      onConversationChangeRef.current(null, { replace: true });
+    }
     setMessages([]);
     setDraft("");
     void loadConversations();
-  }, [loadConversations]);
+  }, [loadConversations, tenantId]);
 
   const loadMessages = useCallback(
     async (conversationId: string) => {
@@ -133,6 +169,16 @@ export function InboxPage({ t, locale }: InboxPageProps) {
         }
       } catch (err) {
         if (selectedRef.current !== conversationId) return;
+        if (err instanceof ApiClientError && err.status === 404) {
+          // Deep-link ke percakapan yang tidak ada / bukan milik
+          // workspace aktif (API menjawab 404 untuk keduanya): jatuh
+          // lembut ke daftar — URL dibersihkan dengan replace, TANPA
+          // pesan error (Fase 6E).
+          setMessages([]);
+          setMessagesError(null);
+          onConversationChangeRef.current(null, { replace: true });
+          return;
+        }
         setMessagesError(translateApiError(t, err));
         setMessages([]);
       } finally {
@@ -342,7 +388,7 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                   <li key={conv.id}>
                     <button
                       type="button"
-                      onClick={() => setSelectedId(conv.id)}
+                      onClick={() => onConversationChange(conv.id)}
                       className={`flex w-full items-start gap-3 px-4 py-3 text-left ${
                         isActive ? "bg-accent/10" : "hover:bg-elevated"
                       }`}
@@ -406,7 +452,7 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                 <div className="flex items-center gap-3 border-b border-line px-4 py-3">
                   <button
                     type="button"
-                    onClick={() => setSelectedId(null)}
+                    onClick={() => onConversationChange(null)}
                     className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-ink md:hidden"
                   >
                     ← {t("common.back")}

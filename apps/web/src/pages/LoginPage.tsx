@@ -3,6 +3,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { useAuth } from "../auth/AuthProvider";
+import { takeReturnTo } from "../navigation/returnTo";
 import {
   AuthLayout,
   FieldError,
@@ -44,7 +45,9 @@ export function LoginPage({ t, controls, onNavigate }: LoginPageProps) {
     try {
       await api.auth.signIn(trimmedEmail, password);
       await refresh();
-      onNavigate("/");
+      // Deep-link yang dibuka sebelum login (Fase 6E) membawa penggunanya
+      // kembali ke tujuan awal; tanpa tujuan tersimpan → Dashboard.
+      onNavigate(takeReturnTo() ?? "/");
     } catch (err) {
       setError(translateApiError(t, err));
     } finally {

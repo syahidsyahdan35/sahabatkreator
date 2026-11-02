@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createTranslator,
   type Locale,
 } from "@sahabat-kreator/i18n";
-import { NAV_REGISTRY, type NavItem } from "./navigation/registry";
+import { matchNavPath, type NavItem } from "./navigation/registry";
+import { saveReturnTo } from "./navigation/returnTo";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { WorkspaceProvider } from "./workspace/WorkspaceProvider";
 import { Sidebar } from "./components/Sidebar";
@@ -42,10 +43,14 @@ import { useTheme, type ThemeMode } from "./theme";
 // menggantikan angka demo Fase 0).
 
 /**
- * Router path sederhana (Fase 1C): hanya tiga permukaan —
- * /login & /register (berdiri sendiri, tanpa shell) dan shell dashboard
- * untuk semua path lain. Navigasi antar-menu DI DALAM shell tetap berbasis
- * state activeId seperti Fase 0 (registry navigasi tidak berubah).
+ * Router URL asli (Fase 6E; memperluas router tangan Fase 1C tanpa
+ * library baru): permukaan berdiri sendiri /login, /register,
+ * /pay/:code, /webchat-demo tidak berubah; di DALAM shell, URL kini
+ * menjadi sumber kebenaran navigasi — setiap item NAV_REGISTRY punya
+ * path (field `route`), item aktif diturunkan dari URL lewat
+ * `matchNavPath`, klik menu = history push, Back/Forward (popstate)
+ * mengikuti URL, dan Inbox mendukung deep-link /inbox/:conversationId.
+ * Konteks workspace SENGAJA tetap state, bukan bagian URL (non-goal 6E).
  */
 function usePathRoute() {
   const [path, setPath] = useState(() =>
@@ -62,7 +67,14 @@ function usePathRoute() {
     }
     setPath(next);
   }, []);
-  return { path, navigateTo };
+  /** Ganti URL TANPA entri riwayat baru (pengalihan & pembersihan id basi). */
+  const replaceTo = useCallback((next: string) => {
+    if (window.location.pathname !== next) {
+      window.history.replaceState({}, "", next);
+    }
+    setPath(next);
+  }, []);
+  return { path, navigateTo, replaceTo };
 }
 
 type Translator = ReturnType<typeof createTranslator>;
@@ -71,16 +83,29 @@ interface ShellProps {
   t: Translator;
   locale: Locale;
   controls: React.ReactNode;
+  /** Path URL saat ini — sumber kebenaran halaman aktif di dalam shell. */
+  path: string;
   onNavigateTo: (path: string) => void;
+  onReplaceTo: (path: string) => void;
 }
 
 /** Shell dashboard TERPROTEKSI: wajib sesi; belum login → dialihkan ke /login. */
-function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
+function Shell({ t, locale, controls, path, onNavigateTo, onReplaceTo }: ShellProps) {
   const { status } = useAuth();
+  // Membedakan "tamu membuka deep-link" (simpan tujuan, kembalikan ke
+  // sana setelah login) dari "pengguna baru saja keluar" (jangan simpan —
+  // keluar adalah keputusan eksplisit, bukan tujuan kembali).
+  const wasAuthenticatedRef = useRef(false);
+  useEffect(() => {
+    if (status === "authenticated") wasAuthenticatedRef.current = true;
+  }, [status]);
 
   useEffect(() => {
-    if (status === "anonymous") onNavigateTo("/login");
-  }, [status, onNavigateTo]);
+    if (status === "anonymous") {
+      if (!wasAuthenticatedRef.current && path !== "/") saveReturnTo(path);
+      onReplaceTo("/login");
+    }
+  }, [status, path, onReplaceTo]);
 
   if (status === "loading") {
     return (
@@ -99,7 +124,9 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
             t={t}
             locale={locale}
             controls={controls}
+            path={path}
             onNavigateTo={onNavigateTo}
+            onReplaceTo={onReplaceTo}
           />
         </PendingApprovalsProvider>
       </UnreadBadgeProvider>
@@ -108,24 +135,37 @@ function Shell({ t, locale, controls, onNavigateTo }: ShellProps) {
 }
 
 /** Isi shell (sidebar + konten + bottom bar) — berjalan di dalam provider workspace & badge. */
-function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
+function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: ShellProps) {
   const { user, signOut } = useAuth();
   const { totalUnread } = useUnreadBadge();
   const { pendingCount } = usePendingApprovals();
-  const [activeId, setActiveId] = useState("dashboard");
   const [moreOpen, setMoreOpen] = useState(false);
+
+  // Halaman aktif SELALU diturunkan dari URL (Fase 6E) — tidak ada state
+  // halaman terpisah. `match.segment` untuk Inbox adalah id percakapan
+  // deep-link; untuk item lain tidak dipakai.
+  const match = matchNavPath(path);
+  const activeItem = match.item;
+  const activeId = activeItem.id;
 
   if (!user) return null;
 
   const badges = { pendingApprovals: pendingCount, unreadInbox: totalUnread };
-
-  const activeItem: NavItem =
-    NAV_REGISTRY.find((i) => i.id === activeId) ?? NAV_REGISTRY[0]!;
   const moreActive = activeItem.mobile.slot === "more";
 
   const navigate = (item: NavItem) => {
-    setActiveId(item.id);
     setMoreOpen(false);
+    onNavigateTo(item.route);
+  };
+
+  /** Pilihan percakapan inbox hidup di URL: /inbox/:conversationId. */
+  const handleConversationChange = (
+    id: string | null,
+    opts?: { replace?: boolean },
+  ) => {
+    const next = id ? `/inbox/${encodeURIComponent(id)}` : "/inbox";
+    if (opts?.replace) onReplaceTo(next);
+    else onNavigateTo(next);
   };
 
   const handleSignOut = async () => {
@@ -159,7 +199,12 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
         ) : activeId === "contacts" ? (
           <ContactsPage t={t} locale={locale} />
         ) : activeId === "inbox" ? (
-          <InboxPage t={t} locale={locale} />
+          <InboxPage
+            t={t}
+            locale={locale}
+            conversationId={match.segment}
+            onConversationChange={handleConversationChange}
+          />
         ) : activeId === "agents" ? (
           <AgentsPage t={t} locale={locale} />
         ) : activeId === "knowledge" ? (
@@ -207,7 +252,7 @@ export default function App() {
     }
   });
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
-  const { path, navigateTo } = usePathRoute();
+  const { path, navigateTo, replaceTo } = usePathRoute();
 
   const t = useMemo(() => createTranslator(locale), [locale]);
 
@@ -292,7 +337,14 @@ export default function App() {
       ) : path === "/register" ? (
         <RegisterPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
       ) : (
-        <Shell t={t} locale={locale} controls={controls} onNavigateTo={navigateTo} />
+        <Shell
+          t={t}
+          locale={locale}
+          controls={controls}
+          path={path}
+          onNavigateTo={navigateTo}
+          onReplaceTo={replaceTo}
+        />
       )}
     </AuthProvider>
   );

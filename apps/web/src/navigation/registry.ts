@@ -4,7 +4,10 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
  * REGISTRY NAVIGASI TUNGGAL (RANCANGAN §10.1) — satu-satunya sumber kebenaran.
  * Sidebar desktop dan bottom bar mobile me-render array yang SAMA ini.
  * Mengubah menu = mengubah array ini saja. labelKey adalah kunci i18n,
- * BUKAN teks langsung.
+ * BUKAN teks langsung. Field `route` adalah PATH URL asli item itu
+ * (Fase 6E): klik menu menavigasi ke path ini, dan item aktif selalu
+ * diturunkan DARI URL saat ini lewat `matchNavPath` — tidak ada state
+ * "halaman aktif" terpisah di komponen mana pun.
  */
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
@@ -51,3 +54,43 @@ export const mobileTabItems: NavItem[] = NAV_REGISTRY.filter(
 export const moreItems: NavItem[] = NAV_REGISTRY.filter(
   (i) => i.mobile.slot === "more",
 ).sort((a, b) => a.order.more - b.order.more);
+
+/** Hasil pencocokan path URL terhadap registry (Fase 6E). */
+export interface NavPathMatch {
+  item: NavItem;
+  /**
+   * Segmen pertama setelah route item — untuk Inbox ini adalah id
+   * percakapan pada deep-link `/inbox/:conversationId`. Null bila URL
+   * persis sama dengan route item.
+   */
+  segment: string | null;
+}
+
+/**
+ * Turunkan item navigasi aktif dari pathname URL. Kecocokan persis
+ * didahulukan; selain itu awalan `route + "/"` (route terpanjang menang)
+ * menangkap sub-path seperti /inbox/:id. Path tak dikenal jatuh ke item
+ * pertama (Dashboard) — perilaku shell yang sama seperti sebelum 6E,
+ * agar URL sampah tidak pernah menghasilkan layar kosong.
+ */
+export function matchNavPath(pathname: string): NavPathMatch {
+  for (const item of NAV_REGISTRY) {
+    if (pathname === item.route) return { item, segment: null };
+  }
+  const prefixed = NAV_REGISTRY.filter((i) => i.route !== "/").sort(
+    (a, b) => b.route.length - a.route.length,
+  );
+  for (const item of prefixed) {
+    if (pathname.startsWith(`${item.route}/`)) {
+      const raw = pathname.slice(item.route.length + 1).split("/")[0] ?? "";
+      let segment = raw;
+      try {
+        segment = decodeURIComponent(raw);
+      } catch {
+        /* segmen tidak valid — pakai apa adanya */
+      }
+      return { item, segment: segment === "" ? null : segment };
+    }
+  }
+  return { item: NAV_REGISTRY[0]!, segment: null };
+}
