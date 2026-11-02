@@ -84,6 +84,9 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 | Template WhatsApp — daftar cermin per akun | Ada | Ada | **Ada (baru 15A)** — `GET /v1/whatsapp-templates?channelAccountId=` (`whatsapp_templates:read`) | `listWhatsAppTemplates()` | `list_whatsapp_templates` (baca) | `sk whatsapp-templates list` | Gerbang akun sama seperti dashboard (milik tenant, bukan Sampah, provider WhatsApp). |
 | Template WhatsApp — sinkron/buat/hapus di Meta | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Operasi berdampak ke Meta (aset WABA pemilik) dibatasi sesi dashboard owner/admin. |
 | Saved replies | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Affordance composer inbox (`/`-picker) untuk tim manusia; nilai integrasi API rendah. |
+| Growth links — daftar & detail + statistik | Ada | Ada | **Ada (baru 13B)** — `GET /v1/growth-links`, `GET /v1/growth-links/:id` (`growth_links:read`) | `listGrowthLinks()` / `getGrowthLink()` | `list_growth_links` / `get_growth_link` (baca) | `sk growth-links list` / `sk growth-links get` | Statistik (klik / tampilan picker / konversi) DITURUNKAN dari `growth_link_events`, bukan penghitung tersimpan. Serializer sama persis dengan dashboard. |
+| Growth links — buat/edit/nonaktif/hapus | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Slug publik + branding adalah artefak kurasi UI (keputusan Fase 13B): URL-nya tersebar di bio/iklan/cetakan, jadi perubahannya dibatasi sesi dashboard owner/admin. |
+| Tautan publik `/go/:slug` & landing picker | Ada | — (publik) | Permukaan publik non-v1 | — | — | — | Pola yang sama seperti `/pay/:code`: tanpa kunci, slug publik adalah alamatnya. Mencatat `click`/`picker_view` lalu 302 ke platform (wa.me / t.me / m.me / ig.me / halaman webchat). Atribusi kontak terjadi di jalur inbound (Telegram `/start`, referral Meta, sesi webchat `src`) — WhatsApp memang tidak punya payload kedatangan, jadi untuk WA hanya klik yang tercatat (dinyatakan jujur di UI). |
 | Tim & undangan | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Administrasi keanggotaan terikat identitas sesi + email undangan; bukan bentuk permukaan API key. |
 | Analitik & pemakaian AI | Ada | Ada | Dashboard-only (sengaja) | — | — | `sk usage report` (kandidat) | Agregat pelaporan berbentuk dashboard; ledger usage adalah catatan internal (kejujuran biaya 9B). Eksposur publik menunggu desain API billing. |
 | API keys — kelola | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Kunci tidak boleh mengelola kunci (eskalasi privilese menurut konstruksi). |
@@ -111,3 +114,13 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 - Penjaga: `pnpm check:drift` (statik, tanpa server) — dibuktikan
   lulus pada tree selaras dan gagal pada pemetaan yang sengaja
   dirusak dua arah (registry dirusak; implementasi dirusak).
+
+## Pembaruan Fase 13B (2026-11-03) — Growth Tools
+
+- **28 rute** API publik v1 (bertambah 2: growth links baca).
+- **15 scope** API key: 3 tulis + 12 baca — scope baru
+  `growth_links:read` ikut menjadi bawaan kunci baru (preseden yang
+  sama seperti scope baca 15A).
+- **28 metode** publik SDK dan **28 tool** MCP: 23 baca / 5 tulis
+  (tool tulis tidak berubah; growth links baca saja).
+- `pnpm check:drift` lulus pada permukaan yang diperluas.

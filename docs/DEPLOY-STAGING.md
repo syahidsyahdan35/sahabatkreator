@@ -5853,3 +5853,106 @@ Dokumen lengkap: `docs/DB-MIGRATION-BASELINE-11A1.md`. Ringkasan:
   (DNS), lalu mengisi kunci lewat Panel Admin. Email reset password
   BELUM diwire ke Resend — kandidat lanjutan (perlu hook pengiriman
   Better Auth), tidak dikerjakan diam-diam di fase ini.
+
+---
+
+## Fase 13B — Growth Tools: reflink per channel, QR, landing picker, analitik (2026-11-03)
+
+- **Model**: dua tabel baru lewat migrasi `0002_growth_links.sql`
+  HASIL `pnpm db:generate` (jurnal lineage baseline kini 3 entri) +
+  blok kustom `[K-13B]` (RLS): `growth_links` (kind `single|picker`;
+  slug unik GLOBAL; CHECK kind⇔konfigurasi channel; kolom wajib
+  NOT NULL sesuai instruksi user 2026-11-03 — yang nullable hanya
+  yang memang kondisional: `channel_account_id` pada picker,
+  `auto_tag`/`prefill_text` opsional, `contact_id` pada event klik
+  anonim) dan `growth_link_events` (`click|picker_view|conversion`;
+  index unik parsial menjamin konversi tepat sekali per kontak per
+  tautan). Kolom `contacts.source` (varchar, nullable = belum
+  teratribusi) ditambahkan pada migrasi yang sama. Analitik selalu
+  DITURUNKAN dari event — tidak ada penghitung tersimpan.
+- **Rute publik `/go/:slug`** (API, tanpa auth; proxy `/go` ditambah
+  di vite server+preview agar URL kanonis `https://botara.my.id/go/…`
+  menjawab 302 asli): WA `wa.me/<digit nomor tampil>?text=<prefill>`;
+  Telegram `t.me/<bot>?start=<slug>`; Messenger `m.me/<username|PageID>?ref=<slug>`;
+  Instagram `ig.me/m/<username>?ref=<slug>`; Webchat →
+  `/webchat-demo?key=<siteKey>&src=<slug>`. Picker me-render landing
+  dwibahasa server-side (nama workspace + tombol per channel →
+  `/go/:slug/c/:channelAccountId`, divalidasi anggota himpunan).
+  Slug tak dikenal/nonaktif → 404 dwibahasa. Resolusi slug publik
+  lewat lengan RLS sempit baru `growth_link_public_lookup`
+  (`app.growth_slug`, SELECT-only, pola webchat).
+- **Atribusi (conversion)** — satu helper core
+  `attributeContactToGrowthLink` (atribusi PERTAMA menang; auto_tag
+  ditempel; event conversion sekali): Telegram `/start <slug>` di
+  prosesor inbound (pesan TETAP diproses normal — tercatat + outbox
+  `message.received`; keyword/flow/agent melihat teks apa adanya);
+  Meta `messaging_referrals` (parser baru `parseMetaReferralEvents`
+  untuk `referral` + `postback.referral`, objek page & instagram;
+  core `recordMetaReferralContact` find-or-create kontak+percakapan
+  TANPA pesan); Webchat sesi membawa `src` (kontrak sesi + field
+  opsional; widget embed meneruskan `data-src`; halaman demo
+  meneruskan `?src=`). **WhatsApp: TIDAK ada jalur payload — hanya
+  klik yang tercatat; dinyatakan jujur di UI + matriks.**
+- **Validasi jujur saat buat/edit**: akun harus milik tenant +
+  `connected` + bukan Sampah (422 `GROWTH_LINK_CHANNEL_INVALID`);
+  URL tujuan tak bisa disusun (WA tanpa nomor tampil, IG tanpa
+  username) → 422 `GROWTH_LINK_TARGET_UNAVAILABLE`; slug tabrakan →
+  409 `GROWTH_LINK_SLUG_TAKEN`. Prefill hanya bermakna untuk WA;
+  payload start Telegram adalah slug itu sendiri.
+- **UI `/growth`**: entri NAV_REGISTRY baru (ikon `growth`, desktop 8
+  / more 4 — celah peninggalan Knowledge), halaman lazy (chunk
+  terpisah); daftar + statistik, form buat/edit (kind dikunci saat
+  edit), salin URL, **QR digenerate di klien** (library `qrcode`
+  di-import malas hanya saat modal QR dibuka — chunk terpisah
+  `browser-*.js`; tanpa layanan QR pihak ketiga), pratinjau landing,
+  panel kontak teratribusi terakhir, catatan kejujuran WA tampil
+  permanen. i18n `growth.*` en+id lengkap; label scope Settings +
+  kategori/aksi audit `growth_link`.
+- **Sinkronisasi kontrak (penuh)**: kontrak (skema + 3 kode error +
+  scope baru `growth_links:read`; bawaan kunci kini 12 scope baca,
+  total 15 — `CreateApiKeyRequest.max` 14→15; union scope core
+  diselaras) + `GET /v1/growth-links` + `GET /v1/growth-links/:id`
+  (serializer dashboard yang sama) + SDK `listGrowthLinks`/
+  `getGrowthLink` + MCP `list_growth_links`/`get_growth_link` (tier
+  BACA) + registry `PUBLIC_V1_SURFACE` (28 rute) + matriks diperbarui.
+  Tulis tetap dashboard-only (slug publik + branding = artefak kurasi
+  UI — alasan tertulis di matriks). `pnpm check:drift` lulus.
+- **Verifikasi**: typecheck monorepo hijau; PGlite verify SEMUA LULUS
+  (36 seksi — [36] baru: slug global, CHECK kind, konversi unik,
+  lengan lookup publik, isolasi); build semua dist + grep bundle lokal
+  & server (api `growth-links`, web chunk `GrowthPage-*` +
+  `nav.growth`, widget.js memuat `dataset.src` — 10.554 byte).
+  **Rantai terisolasi di server** (DB buangan `sk_chain13b` + role app
+  sendiri + API :3213 + Redis DB 10): **46 PASS / 0 FAIL** — redirect
+  persis per platform (5 provider) + click tercatat; picker 200 +
+  tombol + click + non-anggota 404; slug tabrakan se-tenant & lintas
+  tenant 409; validasi 422×3; isolasi tenant; atribusi Telegram
+  (single + picker, tak ganda, pesan tak ditelan), Meta referral
+  Messenger + IG (replay tak ganda, regresi pesan biasa), webchat src
+  (berulang tak ganda); analitik API = event mentah; v1 + scope 403;
+  nonaktif → /go 404 + atribusi mati. **verify-sdk SEMUA LULUS**
+  (growth: list + get konsisten) dan **verify-mcp SEMUA LULUS** (28
+  tool; 2 tool growth baca `readOnlyHint=true`). Deploy staging:
+  migrasi teraplikasi (jurnal 3, 46 tabel), 4 service restart via
+  MainPID, health publik ok, `/go/<asing>` publik 404, `/growth` 200.
+  Rantai dibersihkan total (DB + role di-drop, Redis DB 10 di-flush,
+  berkas rantai dihapus). `.env.staging` byte-identik (`9c1ded2a…`);
+  data user utuh (tenants=1, channel connected=2 sebelum & sesudah).
+- **Batas jujur**: (1) Bukti LIVE provider belum ada — rantai memakai
+  akun ter-seed + webhook mock bertanda tangan sah; klik/atribusi
+  nyata pertama akan terlihat saat user membagikan tautan sungguhan.
+  (2) Parameter `ref` pada ig.me disertakan seperti Messenger; bila
+  Instagram mengabaikannya di sebagian permukaan, klik tetap tercatat
+  tetapi atribusi IG dari jalur itu bisa hilang — referral webhook
+  adalah satu-satunya bukti, dan ia baru terbukti bentuknya lewat
+  mock terdokumentasi. (3) QR adalah gambar data-URL lokal — tidak
+  ada unduhan SVG/PNG bermerek di v1. (4) Kind tautan tidak bisa
+  diubah saat edit (single tetap single) — ganti jenis = buat tautan
+  baru, agar slug yang sudah tersebar tidak berubah arti.
+- **Catatan lingkungan**: `pnpm add` sempat gagal EPERM `chown` —
+  sandbox VM melarang chown ke gid 65534 (nogroup) yang dipertahankan
+  pnpm saat menulis file atomik; perbaikan lokal: `chgrp 0` pada
+  `pnpm-lock.yaml`, `node_modules/.modules.yaml`, `node_modules/.pnpm`
+  (rekursif) dan `package.json` terkait sebelum `pnpm add qrcode
+  @types/qrcode`. Kepemilikan file bukan bagian dari git — tanpa
+  dampak repo/server.
