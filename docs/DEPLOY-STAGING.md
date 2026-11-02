@@ -3146,3 +3146,56 @@ systemd milik ubuntu) → health ok; bundle publik
   sama di setiap baris event (dibatasi per baris) — sederhana dan
   cukup untuk debugging; normalisasi per event menyusul bila volume
   menuntut (retensi 30 hari membatasi pertumbuhan).
+
+## Update Redesain Connect Channels — Modal dua langkah (2026-11-02)
+
+Permintaan user: tombol connect di kanan atas membuka modal/popover —
+rekomendasi yang disetujui: **modal**. Perubahan PRESENTASI murni di
+`apps/web` (endpoint, payload, validasi, semantik connect/revive TIDAK
+berubah); commit fitur `5019db9`.
+
+- **Header halaman**: judul + subjudul kiri; kanan atas berisi tombol
+  sekunder "Webhook Meta" (hanya tampil bila info webhook bisa dibaca —
+  owner/admin, pola yang sama seperti panel lama) dan tombol primer
+  "+ Hubungkan Channel" (pola header yang sama seperti halaman
+  Automations).
+- **Modal dua langkah** (pola dialog yang sudah ada di halaman ini:
+  overlay `bg-black/50`, sheet bawah di mobile / dialog tengah di
+  `sm:` ke atas, `max-w-lg`, tutup via tombol — halaman ini memang tidak
+  memakai Escape/backdrop-click di dialog mana pun):
+  1. Pemilih provider: 5 baris pilihan berglyph merek (tint warna
+     provider) + nama + keterangan satu baris dwibahasa.
+  2. Form provider terpilih — komponen form yang ADA dipindahkan apa
+     adanya (field, id, hint, validasi, error berkode, submit). Provider
+     Meta (messenger/instagram/whatsapp) menampilkan blok info webhook
+     (Callback URL + Verify Token + salin + status app secret +
+     petunjuk subscribe) secara kontekstual di atas form-nya, dari
+     endpoint `meta-webhook-info` yang sama (komponen bersama
+     `MetaWebhookInfoBlock`, juga dipakai dialog header). Tombol
+     "Kembali" ke langkah 1; field pertama form terfokus otomatis saat
+     langkah dibuka.
+- **Sukses** → modal tertutup, daftar di-refresh, kartu baru disorot
+  sesaat (`ring-accent`, ±3 detik).
+- **"Hubungkan lagi"** pada kartu terputus (telegram/messenger/
+  instagram/whatsapp) kini membuka modal langsung di langkah form
+  provider itu (menggantikan scroll-ke-form); semantik revive dari form
+  yang ada tidak berubah.
+- **Badan halaman** kini hanya grid kartu + seksi Sampah + keadaan
+  kosong (dengan tombol Hubungkan Channel yang sama). Lima form
+  bertumpuk + panel webhook mandiri dihapus dari badan; heading
+  "Channel terhubung" di atas grid ikut dihapus. Teks basi diperbaiki:
+  `channels.emptyBody` (tidak lagi menyebut form "di bawah"/"fase
+  berikutnya") dan hint token Meta/WhatsApp (webhook kini "ditampilkan
+  di atas", bukan "di bawah"). Dialog disconnect & hapus 6I tidak
+  diubah.
+- Verifikasi: typecheck i18n + web hijau; build web hijau; bundle
+  publik `index-Dk8DqF0i.js` identik build lokal dan memuat string khas
+  langkah pemilih (en+id). Rantai regresi API ringan dari server
+  (tenant uji `connect-modal-*@sk.test`): **10/10 PASS** — sign-up,
+  buat tenant, connect webchat lewat endpoint yang sama → 201 +
+  siteKey `wc_` + status connected, channel muncul di daftar,
+  `meta-webhook-info` owner → 200 dengan webhookUrl benar, halaman
+  publik /channels 200. 4 service active; health ok.
+- Batas jujur: bukti visual modal (pemilih, sheet mobile, sorotan
+  kartu) menunggu uji user sesuai pembagian kerja — yang terbukti di
+  sini adalah typecheck, build/bundle tersaji, dan regresi API.
