@@ -48,6 +48,7 @@ export const OUTBOX_RELAY_JOB = "outbox.relay";
 export const AUTOMATION_EVALUATE_JOB = "automation.evaluate";
 export const AGENT_RESPOND_JOB = "agent.respond";
 export const SEQUENCE_STEP_JOB = "sequence.step";
+export const BROADCAST_DISPATCH_JOB = "broadcast.dispatch";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -86,6 +87,24 @@ export interface SequenceStepJobData {
   stepPosition: number;
 }
 
+/**
+ * Job Fase 7C: dispatch satu broadcast (materialisasi penerima + pesan
+ * `queued` per penerima di core `dispatchBroadcast`). Di-enqueue oleh
+ * relay outbox dari event `broadcast.dispatch_due` (ditulis API saat
+ * broadcast dijadwalkan) sebagai job TERTUNDA dengan delay =
+ * scheduled_at − sekarang; kirim-sekarang adalah kasus delay 0 dari
+ * jalur yang sama. jobId deterministik `broadcast-<broadcastId>`:
+ * satu broadcast tidak pernah punya dua job dispatch; eksekusi ulang
+ * pun aman (klaim atomik + materialisasi yang bisa dilanjutkan di
+ * core). Pembatalan broadcast terjadwal TIDAK menghapus job ini —
+ * job yang terlanjur terjadwal akan menemukan status `cancelled`
+ * dan selesai tanpa efek (core menolak status selain scheduled).
+ */
+export interface BroadcastDispatchJobData {
+  tenantId: string;
+  broadcastId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -104,6 +123,11 @@ export function agentRespondJobId(messageId: string): string {
   return `agent-respond-${messageId}`;
 }
 
+/** jobId deterministik dispatch broadcast: `broadcast-<broadcastId>`. */
+export function broadcastDispatchJobId(broadcastId: string): string {
+  return `broadcast-${broadcastId}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -117,7 +141,8 @@ export function createRedisConnection(redisUrl: string): Redis {
 export type MainJobData =
   | AutomationEvaluateJobData
   | AgentRespondJobData
-  | SequenceStepJobData;
+  | SequenceStepJobData
+  | BroadcastDispatchJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -195,6 +220,31 @@ export async function enqueueSequenceStep(
     ...options,
   });
   return job.id ?? sequenceStepJobId(data.enrollmentId, data.stepPosition);
+}
+
+/**
+ * Meng-enqueue dispatch broadcast sebagai job TERTUNDA BullMQ.
+ * `delayMs` dihitung relay dari `dispatchAt` event outbox (titik mulai
+ * delay bergeser ±2 dtk dari jadwal ideal — toleransi yang sama
+ * seperti sequence). Aman dipanggil berulang: jobId diturunkan dari
+ * id broadcast.
+ */
+export async function enqueueBroadcastDispatch(
+  queue: MainQueue,
+  data: BroadcastDispatchJobData,
+  delayMs: number,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(BROADCAST_DISPATCH_JOB, data, {
+    jobId: broadcastDispatchJobId(data.broadcastId),
+    delay: Math.max(0, Math.floor(delayMs)),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? broadcastDispatchJobId(data.broadcastId);
 }
 
 export {

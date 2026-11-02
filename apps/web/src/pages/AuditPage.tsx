@@ -45,6 +45,7 @@ const CATEGORY_VALUES = [
   "telegram",
   "integration",
   "platform_settings",
+  "broadcast",
 ] as const;
 type CategoryValue = (typeof CATEGORY_VALUES)[number];
 
@@ -62,6 +63,7 @@ const CATEGORY_LABEL_KEYS: Record<CategoryValue, TranslationKey> = {
   telegram: "audit.categoryTelegram",
   integration: "audit.categoryIntegration",
   platform_settings: "audit.categoryPlatformSettings",
+  broadcast: "audit.categoryBroadcast",
 };
 
 /**
@@ -108,6 +110,13 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "platform_settings.set": "audit.actionPlatformSettingsSet",
   "platform_settings.cleared": "audit.actionPlatformSettingsCleared",
   "platform_settings.test": "audit.actionPlatformSettingsTest",
+  "broadcast.created": "audit.actionBroadcastCreated",
+  "broadcast.scheduled": "audit.actionBroadcastScheduled",
+  "broadcast.dispatched": "audit.actionBroadcastDispatched",
+  "broadcast.completed": "audit.actionBroadcastCompleted",
+  "broadcast.failed": "audit.actionBroadcastFailed",
+  "broadcast.cancelled": "audit.actionBroadcastCancelled",
+  "broadcast.deleted": "audit.actionBroadcastDeleted",
 };
 
 const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
@@ -124,6 +133,7 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   contact: "audit.targetContact",
   integration_log: "audit.targetIntegrationLog",
   platform_setting: "audit.targetPlatformSetting",
+  broadcast: "audit.targetBroadcast",
 };
 
 /** Warna chip actor mengikuti token semantik (pola chip Logs). */

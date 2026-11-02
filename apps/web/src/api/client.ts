@@ -12,6 +12,13 @@ import type {
   AutomationResponse,
   AutomationRunListResponse,
   AutomationRunResponse,
+  BroadcastAudienceEstimateResponse,
+  BroadcastListResponse,
+  BroadcastRecipientListResponse,
+  BroadcastResponse,
+  CreateBroadcastRequest,
+  ScheduleBroadcastRequest,
+  UpdateBroadcastRequest,
   ChannelAccountListResponse,
   ChannelAccountResponse,
   ContactListResponse,
@@ -811,6 +818,112 @@ export const api = {
       return request<IntegrationLogReplayResponse>(
         `/api/tenants/${tenantId}/logs/${logId}/replay`,
         { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  broadcasts: {
+    /** GET /api/tenants/:tenantId/broadcasts → daftar + statistik (Fase 7C). */
+    list(
+      tenantId: string,
+      query: { status?: string; cursor?: string; limit?: number } = {},
+    ): Promise<BroadcastListResponse> {
+      const params = new URLSearchParams();
+      if (query.status) params.set("status", query.status);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<BroadcastListResponse>(
+        `/api/tenants/${tenantId}/broadcasts${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/broadcasts/:id → detail + statistik. */
+    get(tenantId: string, broadcastId: string): Promise<BroadcastResponse> {
+      return request<BroadcastResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/broadcasts → 201 draf baru (owner/admin). */
+    create(
+      tenantId: string,
+      input: CreateBroadcastRequest,
+    ): Promise<BroadcastResponse> {
+      return request<BroadcastResponse>(
+        `/api/tenants/${tenantId}/broadcasts`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/broadcasts/:id → edit draf (owner/admin). */
+    update(
+      tenantId: string,
+      broadcastId: string,
+      input: UpdateBroadcastRequest,
+    ): Promise<BroadcastResponse> {
+      return request<BroadcastResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/broadcasts/:id → hapus draf (owner/admin). */
+    async remove(tenantId: string, broadcastId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}`,
+        { method: "DELETE" },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/broadcasts/:id/schedule — jadwalkan
+     * (scheduledAt ISO) atau kirim sekarang (tanpa scheduledAt).
+     */
+    schedule(
+      tenantId: string,
+      broadcastId: string,
+      input: ScheduleBroadcastRequest,
+    ): Promise<BroadcastResponse> {
+      return request<BroadcastResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}/schedule`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** POST /api/tenants/:tenantId/broadcasts/:id/cancel → batalkan. */
+    cancel(tenantId: string, broadcastId: string): Promise<BroadcastResponse> {
+      return request<BroadcastResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}/cancel`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/broadcasts/audience-estimate — estimasi
+     * audiens live untuk formulir (filter sebagai string koma).
+     */
+    estimateAudience(
+      tenantId: string,
+      query: { channelAccountId: string; tags?: string; stages?: string },
+    ): Promise<BroadcastAudienceEstimateResponse> {
+      const params = new URLSearchParams();
+      params.set("channelAccountId", query.channelAccountId);
+      if (query.tags) params.set("tags", query.tags);
+      if (query.stages) params.set("stages", query.stages);
+      return request<BroadcastAudienceEstimateResponse>(
+        `/api/tenants/${tenantId}/broadcasts/audience-estimate?${params.toString()}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/broadcasts/:id/recipients → penerima berpaginasi. */
+    listRecipients(
+      tenantId: string,
+      broadcastId: string,
+      query: { status?: string; cursor?: string; limit?: number } = {},
+    ): Promise<BroadcastRecipientListResponse> {
+      const params = new URLSearchParams();
+      if (query.status) params.set("status", query.status);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<BroadcastRecipientListResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}/recipients${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
       );
     },
   },

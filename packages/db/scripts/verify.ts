@@ -56,7 +56,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 6C (platform_settings)
 // + 1 tabel Fase 6D (profile_photos)
 // + 1 tabel Fase 7B.1 (integration_log)
-assert.equal(Number(tablesRes.rows[0].count), 34);
+// + 2 tabel Fase 7C (broadcasts, broadcast_recipients)
+assert.equal(Number(tablesRes.rows[0].count), 36);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -133,8 +134,11 @@ const policies = await db.query<{ count: string }>(
 //   membuatnya ulang termasuk provider whatsapp — jumlah tetap)
 // + 4 policy integration_log (Fase 7B.1, migrasi 0028: tenant_isolation,
 //   integration_log_ingest, platform_integration_log,
-//   integration_log_prune) = 45.
-assert.equal(Number(policies.rows[0].count), 45);
+//   integration_log_prune)
+// + tenant_isolation pada broadcasts & broadcast_recipients dan lengan
+//   baca `system_broadcast_scan` pada broadcasts (Fase 7C, migrasi
+//   0030) = 48.
+assert.equal(Number(policies.rows[0].count), 48);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -148,7 +152,8 @@ await db.exec(`
     agents, kb_documents, kb_chunks, agent_suggestions,
     products, payment_links,
     automation_steps, sequence_enrollments,
-    platform_settings, profile_photos, integration_log
+    platform_settings, profile_photos, integration_log,
+    broadcasts, broadcast_recipients
   TO app_user;
 `);
 
@@ -1332,6 +1337,140 @@ const REPLY_MSG_ID = "61616161-6161-4161-8161-616161616161";
   assert.equal(afterDelete.rows[0].reply, null);
   console.log(
     "[22] Fase 7B.5: kolom messages.reply_to_message_id ada; tautan kutipan terbaca dalam konteks tenant pemilik lewat policy yang ada; tenant lain melihat 0 baris; hapus target → FK SET NULL (balasan tetap ada, kutipan lepas): OK",
+  );
+}
+
+// ---------- 23. Fase 7C: broadcasts + broadcast_recipients ----------
+// Migrasi 0030: (a) kedua tabel ada dengan enum status; (b) konteks
+// tenant A hanya melihat broadcast/penerima tenant A pada KEDUA tabel
+// dan insert lintas tenant ditolak WITH CHECK; (c) tanpa konteks: 0
+// baris; (d) lengan baca `system_broadcast_scan` (flag
+// app.system_broadcast='reconcile') membuka SELECT broadcast lintas
+// tenant untuk penyapu worker, tetapi TIDAK membuka broadcast_
+// recipients dan TIDAK membuka tulis apa pun; (e) unik
+// (broadcast_id, contact_id) menolak penerima ganda; (f) hapus pesan
+// queued membuat message_id penerima NULL (FK SET NULL — semantik
+// cancel), baris penerima tetap ada.
+const BC_ID = "71717171-7171-4171-8171-717171717171";
+const BC_ID_B = "72727272-7272-4272-8272-727272727272";
+const BC_MSG_ID = "73737373-7373-4373-8373-737373737373";
+{
+  const chanRow = await db.query<{ id: string }>(
+    `SELECT id FROM channel_accounts WHERE tenant_id = $1 LIMIT 1`,
+    [TENANT_A],
+  );
+  const CHAN_ANY = chanRow.rows[0].id;
+  const chanB = await db.query<{ id: string }>(
+    `INSERT INTO channel_accounts (tenant_id, provider, external_id, status)
+     VALUES ($1, 'telegram', 'bc_verify_bot_b', 'connected') RETURNING id`,
+    [TENANT_B],
+  );
+  await db.query(
+    `INSERT INTO broadcasts (id, tenant_id, channel_account_id, name, message_text, status)
+     VALUES ($1, $3, $4, 'Kampanye Verify A', 'Halo {name}', 'sending'),
+            ($2, $5, $6, 'Kampanye Verify B', 'Halo B', 'scheduled')`,
+    [BC_ID, BC_ID_B, TENANT_A, CHAN_ANY, TENANT_B, chanB.rows[0].id],
+  );
+  await db.query(
+    `INSERT INTO messages (id, tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+     VALUES ($1, $2, $3, 'outbound', 'system', 'text', 'Halo Verify', 'queued')`,
+    [BC_MSG_ID, TENANT_A, CONV_A],
+  );
+  await db.query(
+    `INSERT INTO broadcast_recipients (tenant_id, broadcast_id, contact_id, conversation_id, message_id, status)
+     VALUES ($1, $2, $3, $4, $5, 'queued')`,
+    [TENANT_A, BC_ID, CONTACT_A, CONV_A, BC_MSG_ID],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO broadcast_recipients (tenant_id, broadcast_id, contact_id, status)
+       VALUES ($1, $2, $3, 'queued')`,
+      [TENANT_A, BC_ID, CONTACT_A],
+    ),
+    /duplicate key|broadcast_recipients_broadcast_contact_unique/i,
+  );
+
+  const bcViews = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    // Konteks tenant A: hanya milik A di kedua tabel.
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const ownB = await tx.query<{ id: string }>(
+      `SELECT id FROM broadcasts ORDER BY id`,
+    );
+    const ownR = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM broadcast_recipients`,
+    );
+    // Insert untuk tenant B dari konteks A ditolak WITH CHECK
+    // (savepoint agar kegagalannya tidak membatalkan transaksi uji).
+    await tx.query(`SAVEPOINT sp_bc1`);
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO broadcasts (tenant_id, channel_account_id, name, message_text)
+         VALUES ($1, $2, 'Siluman', 'x')`,
+        [TENANT_B, CHAN_ANY],
+      );
+    } catch {
+      crossBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_bc1`);
+    }
+    // Tanpa konteks & tanpa flag: 0 baris di kedua tabel.
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const bareB = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM broadcasts`,
+    );
+    const bareR = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM broadcast_recipients`,
+    );
+    // Flag reconcile: SELECT broadcasts lintas tenant terbuka (2 baris),
+    // recipients tetap tertutup, dan UPDATE tetap ditolak (FOR SELECT).
+    await tx.query(
+      `SELECT set_config('app.system_broadcast', 'reconcile', true)`,
+    );
+    const scanB = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM broadcasts`,
+    );
+    const scanR = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM broadcast_recipients`,
+    );
+    // UPDATE di bawah flag scan: policy lengan ini FOR SELECT, jadi
+    // UPDATE tidak melempar — ia hanya tidak melihat baris apa pun
+    // (0 baris terpengaruh; status dibuktikan utuh sebagai superuser
+    // sesudah transaksi).
+    const scanUpd = await tx.query<{ id: string }>(
+      `UPDATE broadcasts SET status = 'cancelled' WHERE id = $1 RETURNING id`,
+      [BC_ID],
+    );
+    const scanWriteBlocked = scanUpd.rows.length === 0;
+    await tx.query(`SELECT set_config('app.system_broadcast', '', true)`);
+    return { ownB, ownR, crossBlocked, bareB, bareR, scanB, scanR, scanWriteBlocked };
+  });
+  assert.deepEqual(
+    bcViews.ownB.rows.map((r) => r.id),
+    [BC_ID],
+  );
+  assert.equal(bcViews.ownR.rows[0].n, "1");
+  assert.equal(bcViews.crossBlocked, true);
+  assert.equal(bcViews.bareB.rows[0].n, "0");
+  assert.equal(bcViews.bareR.rows[0].n, "0");
+  assert.equal(bcViews.scanB.rows[0].n, "2");
+  assert.equal(bcViews.scanR.rows[0].n, "0");
+  assert.equal(bcViews.scanWriteBlocked, true);
+  const bcStatusAfter = await db.query<{ status: string }>(
+    `SELECT status FROM broadcasts WHERE id = $1`,
+    [BC_ID],
+  );
+  assert.equal(bcStatusAfter.rows[0].status, "sending");
+  // Hapus pesan → message_id penerima SET NULL, baris tetap ada.
+  await db.query(`DELETE FROM messages WHERE id = $1`, [BC_MSG_ID]);
+  const recipAfter = await db.query<{ message_id: string | null }>(
+    `SELECT message_id FROM broadcast_recipients WHERE broadcast_id = $1`,
+    [BC_ID],
+  );
+  assert.equal(recipAfter.rows.length, 1);
+  assert.equal(recipAfter.rows[0].message_id, null);
+  console.log(
+    "[23] Fase 7C: broadcasts/broadcast_recipients — isolasi tenant kedua tabel + insert silang ditolak; lengan system_broadcast_scan hanya SELECT broadcasts lintas tenant (recipients tertutup, tulis ditolak); unik (broadcast, kontak) menolak ganda; hapus pesan → message_id SET NULL: OK",
   );
 }
 

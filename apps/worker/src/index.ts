@@ -4,10 +4,12 @@ import { createDb } from "@sahabat-kreator/db";
 import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
 import {
   INTEGRATION_LOG_RETENTION_DAYS,
+  dispatchBroadcast,
   evaluateInboundMessageForAutomations,
   executeSequenceStep,
   pruneIntegrationLogs,
   purgeExpiredTrashedChannels,
+  reconcileBroadcasts,
   relayUnpublishedOutboxEvents,
   resolveOpenRouterConfig,
   respondToInboundMessage,
@@ -16,6 +18,7 @@ import {
 import {
   AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
+  BROADCAST_DISPATCH_JOB,
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
   createAutomationQueue,
@@ -23,9 +26,11 @@ import {
   createRedisConnection,
   enqueueAgentRespond,
   enqueueAutomationEvaluate,
+  enqueueBroadcastDispatch,
   enqueueSequenceStep,
   type AgentRespondJobData,
   type AutomationEvaluateJobData,
+  type BroadcastDispatchJobData,
   type MainJobData,
   type SequenceStepJobData,
 } from "@sahabat-kreator/queue";
@@ -63,6 +68,14 @@ import {
  *    langkah sebagai pesan `queued`, majukan enrollment, jadwalkan
  *    langkah berikut (atau selesaikan). Pesan pemicu sequence dihitung
  *    sebagai tembakan automation — tidak diteruskan ke agent.
+ * 5. BROADCAST (Fase 7C): relay menerjemahkan event outbox
+ *    `broadcast.dispatch_due` menjadi job tertunda `broadcast.dispatch`
+ *    (delay = scheduled_at; jobId `broadcast-<broadcastId>`).
+ *    Processor-nya menjalankan `dispatchBroadcast` di core:
+ *    materialisasi penerima + pesan `queued` per penerima (opt-out &
+ *    jendela 24 jam Meta menjadi `skipped`). Pengiriman tetap oleh
+ *    poller API; worker menutup broadcast lewat penyapu berkala
+ *    `reconcileBroadcasts` (sinkron status penerima ← status pesan).`
  *
  * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
  * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
@@ -202,6 +215,26 @@ const bullWorker = new Worker<MainJobData>(
       );
       return result;
     }
+    if (job.name === BROADCAST_DISPATCH_JOB) {
+      // Fase 7C: dispatch satu broadcast — klaim atomik, materialisasi
+      // penerima + pesan `queued`, aturan opt-out & jendela 24 jam Meta
+      // semuanya di core. Pengiriman sesungguhnya tetap oleh poller
+      // telegram/meta di proses API; penutupan status akhir oleh
+      // penyapu `reconcileBroadcasts` di bawah.
+      const data = job.data as BroadcastDispatchJobData;
+      const result = await dispatchBroadcast(db, {
+        tenantId: data.tenantId,
+        broadcastId: data.broadcastId,
+      });
+      console.log(
+        `[worker] broadcast.dispatch broadcast=${data.broadcastId} dispatched=${result.dispatched}` +
+          (result.reason ? ` reason=${result.reason}` : "") +
+          (result.materialized !== undefined
+            ? ` materialized=${result.materialized} queued=${result.queued ?? 0} skipped=${result.skipped ?? 0}`
+            : ""),
+      );
+      return result;
+    }
     if (job.name === AGENT_RESPOND_JOB) {
       const data = job.data as AgentRespondJobData;
       // Fase 6C: provider di-resolve per job (panel → env; lihat di atas).
@@ -289,6 +322,33 @@ async function relayTick(): Promise<void> {
             stepPosition: payload.stepPosition,
           },
           payload.delayMinutes * 60_000,
+        );
+        return;
+      }
+      // Fase 7C: broadcast jatuh tempo → job BullMQ TERTUNDA
+      // `broadcast.dispatch` (delay = dispatchAt − sekarang; kirim-
+      // sekarang adalah delay ±0 dari jalur yang sama). Broadcast yang
+      // dibatalkan sebelum waktunya tetap menghasilkan job — job-nya
+      // menemukan status `cancelled` di core dan selesai tanpa efek.
+      if (event.type === "broadcast.dispatch_due") {
+        const payload = event.payload as {
+          broadcastId?: unknown;
+          dispatchAt?: unknown;
+        };
+        if (
+          typeof payload.broadcastId !== "string" ||
+          typeof payload.dispatchAt !== "string"
+        ) {
+          console.warn(
+            `[worker] event broadcast.dispatch_due ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        const delayMs = Date.parse(payload.dispatchAt) - Date.now();
+        await enqueueBroadcastDispatch(
+          queue,
+          { tenantId: event.tenantId, broadcastId: payload.broadcastId },
+          Number.isNaN(delayMs) ? 0 : delayMs,
         );
         return;
       }
@@ -391,6 +451,39 @@ async function logPruneTick(): Promise<void> {
 const logPruneTimer = setInterval(() => void logPruneTick(), LOG_PRUNE_INTERVAL_MS);
 void logPruneTick();
 
+// ---------------------------------------------------------------------------
+// Finalisasi broadcast (Fase 7C): penyapu `reconcileBroadcasts` —
+// menemukan broadcast `sending` lintas tenant (lengan baca
+// system_broadcast_scan), menyinkronkan status penerima dari status
+// pesannya di konteks tenant masing-masing, dan menutup broadcast
+// yang penerimanya sudah terminal semua (completed / partially_failed
+// / failed + audit). Poller pola yang sama: sekali saat boot lalu
+// tiap 10 detik — cukup rapat agar status akhir tampil segera setelah
+// poller pengiriman menyelesaikan antrean, tanpa membebani DB.
+const BROADCAST_RECONCILE_INTERVAL_MS = 10_000;
+let broadcastReconcileRunning = false;
+async function broadcastReconcileTick(): Promise<void> {
+  if (broadcastReconcileRunning) return;
+  broadcastReconcileRunning = true;
+  try {
+    const result = await reconcileBroadcasts(db);
+    if (result.finalized > 0) {
+      console.log(
+        `[worker] broadcast reconcile: ${result.finalized} broadcast ditutup dari ${result.scanned} yang sending`,
+      );
+    }
+  } catch (err) {
+    console.error("[worker] broadcast reconcile gagal (akan dicoba lagi):", err);
+  } finally {
+    broadcastReconcileRunning = false;
+  }
+}
+const broadcastReconcileTimer = setInterval(
+  () => void broadcastReconcileTick(),
+  BROADCAST_RECONCILE_INTERVAL_MS,
+);
+void broadcastReconcileTick();
+
 console.log(
   `[worker] Sahabat Kreator worker aktif — antrean "${MAIN_QUEUE_NAME}", relay outbox tiap ${RELAY_INTERVAL_MS}ms`,
 );
@@ -403,6 +496,7 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(relayTimer);
   clearInterval(purgeTimer);
   clearInterval(logPruneTimer);
+  clearInterval(broadcastReconcileTimer);
   await bullWorker.close();
   await queue.close();
   realtimePublisher.close();

@@ -38,6 +38,12 @@ export const ErrorCodeSchema = z.enum([
   // Fase 7B.5: target kutipan balasan tidak sah (tak ada / tenant lain /
   // percakapan lain) → 422 pada endpoint balas dashboard & API publik v1.
   "MESSAGE_REPLY_TARGET_INVALID",
+  // Fase 7C: broadcast — channel tidak mendukung broadcast v1 (whatsapp
+  // menunggu template resmi; webchat tanpa semantik push) → 422; transisi
+  // status tidak sah (edit non-draft, jadwalkan non-draft, batalkan yang
+  // sudah terminal) → 409.
+  "BROADCAST_CHANNEL_UNSUPPORTED",
+  "BROADCAST_INVALID_STATE",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -1560,6 +1566,7 @@ export const AuditCategorySchema = z.enum([
   "telegram",
   "integration",
   "platform_settings",
+  "broadcast",
 ]);
 export type AuditCategory = z.infer<typeof AuditCategorySchema>;
 
@@ -1619,3 +1626,210 @@ export const AuditLogListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 export type AuditLogListQuery = z.infer<typeof AuditLogListQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Fase 7C — Broadcasts v1
+// ---------------------------------------------------------------------------
+
+/**
+ * Status broadcast. `draft` hanya hidup di dashboard; `scheduled`
+ * menunggu job worker `broadcast.dispatch` (delayed sampai
+ * scheduled_at); `sending` selama dispatch berjalan dan penerima belum
+ * semuanya terminal; status akhir dihitung dari baris penerima:
+ * completed (tanpa failed), partially_failed (ada failed), failed
+ * (semua penerima gagal / dispatch gagal), cancelled (dibatalkan
+ * sebelum atau saat pengiriman — sisa queued dihapus).
+ */
+export const BroadcastStatusSchema = z.enum([
+  "draft",
+  "scheduled",
+  "sending",
+  "completed",
+  "partially_failed",
+  "failed",
+  "cancelled",
+]);
+export type BroadcastStatus = z.infer<typeof BroadcastStatusSchema>;
+
+/**
+ * Status satu penerima. queued/sent/delivered/read/failed mengikuti
+ * status pesan keluarnya; skipped adalah terminal lokal saat dispatch
+ * (skipReason wajib menyertainya); cancelled = pesan queued-nya
+ * dihapus oleh pembatalan broadcast.
+ */
+export const BroadcastRecipientStatusSchema = z.enum([
+  "queued",
+  "sent",
+  "delivered",
+  "read",
+  "failed",
+  "skipped",
+  "cancelled",
+]);
+export type BroadcastRecipientStatus = z.infer<
+  typeof BroadcastRecipientStatusSchema
+>;
+
+/** Alasan penerima dilewati saat dispatch (tidak dicoba kirim). */
+export const BroadcastSkipReasonSchema = z.enum([
+  "opted_out",
+  "outside_24h_window",
+  "message_deleted",
+]);
+export type BroadcastSkipReason = z.infer<typeof BroadcastSkipReasonSchema>;
+
+/**
+ * Filter audiens: kontak cocok bila punya SALAH SATU tag pada `tags`
+ * (OR dalam kelompok) DAN stage pipeline-nya termasuk salah satu
+ * `stages`; antar-kelompok digabung AND. Kedua kelompok opsional;
+ * filter kosong = semua kontak yang punya identitas di channel itu.
+ */
+export const BroadcastAudienceFilterSchema = z.object({
+  tags: z.array(z.string().min(1).max(64)).max(20).optional(),
+  stages: z.array(z.string().min(1).max(64)).max(20).optional(),
+});
+export type BroadcastAudienceFilter = z.infer<
+  typeof BroadcastAudienceFilterSchema
+>;
+
+/** Statistik penerima — SELALU dihitung server dari broadcast_recipients. */
+export const BroadcastStatsSchema = z.object({
+  total: z.number().int().nonnegative(),
+  queued: z.number().int().nonnegative(),
+  sent: z.number().int().nonnegative(),
+  delivered: z.number().int().nonnegative(),
+  read: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  cancelled: z.number().int().nonnegative(),
+});
+export type BroadcastStats = z.infer<typeof BroadcastStatsSchema>;
+
+export const BroadcastResponseSchema = z.object({
+  id: z.string().uuid(),
+  channelAccountId: z.string().uuid(),
+  /** Provider + label channel diturunkan server untuk daftar UI. */
+  provider: ChannelProviderSchema,
+  channelDisplayName: z.string().nullable(),
+  name: z.string(),
+  messageText: z.string(),
+  audienceFilter: BroadcastAudienceFilterSchema,
+  status: BroadcastStatusSchema,
+  scheduledAt: z.string().datetime().nullable(),
+  startedAt: z.string().datetime().nullable(),
+  completedAt: z.string().datetime().nullable(),
+  /** Kode kegagalan tingkat dispatch (CHANNEL_DISCONNECTED / AUDIENCE_EMPTY). */
+  errorCode: z.string().nullable(),
+  createdByUserId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  stats: BroadcastStatsSchema,
+});
+export type BroadcastResponse = z.infer<typeof BroadcastResponseSchema>;
+
+export const BroadcastListResponseSchema = z.object({
+  broadcasts: z.array(BroadcastResponseSchema),
+  nextCursor: z.string().nullable(),
+});
+export type BroadcastListResponse = z.infer<typeof BroadcastListResponseSchema>;
+
+export const BroadcastListQuerySchema = z.object({
+  status: BroadcastStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
+
+export const CreateBroadcastRequestSchema = z.object({
+  name: z.string().min(1).max(255),
+  channelAccountId: z.string().uuid(),
+  messageText: z.string().min(1).max(4096),
+  audienceFilter: BroadcastAudienceFilterSchema.optional(),
+});
+export type CreateBroadcastRequest = z.infer<
+  typeof CreateBroadcastRequestSchema
+>;
+
+/** Edit hanya sah selama broadcast masih `draft`. */
+export const UpdateBroadcastRequestSchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+  channelAccountId: z.string().uuid().optional(),
+  messageText: z.string().min(1).max(4096).optional(),
+  audienceFilter: BroadcastAudienceFilterSchema.optional(),
+});
+export type UpdateBroadcastRequest = z.infer<
+  typeof UpdateBroadcastRequestSchema
+>;
+
+/**
+ * Jadwalkan broadcast. `scheduledAt` kosong/null = kirim sekarang
+ * (dispatch secepatnya lewat antrean worker yang sama). Waktu lampau
+ * diperlakukan sebagai sekarang — server tidak menolak jam user.
+ */
+export const ScheduleBroadcastRequestSchema = z.object({
+  scheduledAt: z.string().datetime().nullable().optional(),
+});
+export type ScheduleBroadcastRequest = z.infer<
+  typeof ScheduleBroadcastRequestSchema
+>;
+
+/**
+ * Estimasi audiens untuk formulir: `matched` = kontak beridentitas di
+ * channel yang cocok filter dan TIDAK opt-out (kandidat kirim);
+ * `optedOut` = cocok filter tetapi akan dilewati sebagai opt-out;
+ * `totalWithIdentity` = seluruh kontak beridentitas di channel itu.
+ * Aturan jendela 24 jam Meta TIDAK diterapkan di estimasi (tergantung
+ * waktu dispatch) — penerima di luar jendela dilewati saat pengiriman
+ * dan terlihat sebagai skipped pada statistik akhir.
+ */
+export const BroadcastAudienceEstimateResponseSchema = z.object({
+  matched: z.number().int().nonnegative(),
+  optedOut: z.number().int().nonnegative(),
+  totalWithIdentity: z.number().int().nonnegative(),
+});
+export type BroadcastAudienceEstimateResponse = z.infer<
+  typeof BroadcastAudienceEstimateResponseSchema
+>;
+
+export const BroadcastAudienceEstimateQuerySchema = z.object({
+  channelAccountId: z.string().uuid(),
+  /** Daftar tag terpisah koma (mengikuti pola query daftar kontak). */
+  tags: z.string().max(1024).optional(),
+  stages: z.string().max(1024).optional(),
+});
+export type BroadcastAudienceEstimateQuery = z.infer<
+  typeof BroadcastAudienceEstimateQuerySchema
+>;
+
+export const BroadcastRecipientResponseSchema = z.object({
+  id: z.string().uuid(),
+  contactId: z.string().uuid(),
+  contactName: z.string(),
+  conversationId: z.string().uuid().nullable(),
+  messageId: z.string().uuid().nullable(),
+  status: BroadcastRecipientStatusSchema,
+  skipReason: BroadcastSkipReasonSchema.nullable(),
+  errorCode: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type BroadcastRecipientResponse = z.infer<
+  typeof BroadcastRecipientResponseSchema
+>;
+
+export const BroadcastRecipientListResponseSchema = z.object({
+  recipients: z.array(BroadcastRecipientResponseSchema),
+  nextCursor: z.string().nullable(),
+});
+export type BroadcastRecipientListResponse = z.infer<
+  typeof BroadcastRecipientListResponseSchema
+>;
+
+export const BroadcastRecipientListQuerySchema = z.object({
+  status: BroadcastRecipientStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type BroadcastRecipientListQuery = z.infer<
+  typeof BroadcastRecipientListQuerySchema
+>;

@@ -14,3 +14,4 @@ export * from "./agents";
 export * from "./products";
 export * from "./platform";
 export * from "./avatars";
+export * from "./broadcasts";

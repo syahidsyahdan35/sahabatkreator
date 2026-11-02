@@ -41,6 +41,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { AdminPage } from "./pages/AdminPage";
 import { LogsPage } from "./pages/LogsPage";
 import { AuditPage } from "./pages/AuditPage";
+import { BroadcastsPage } from "./pages/BroadcastsPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -230,6 +231,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <ChannelsPage t={t} locale={locale} />
         ) : activeId === "automations" ? (
           <AutomationsPage t={t} locale={locale} />
+        ) : activeId === "broadcasts" ? (
+          <BroadcastsPage t={t} locale={locale} />
         ) : activeId === "products" ? (
           <ProductsPage t={t} locale={locale} />
         ) : activeId === "settings" ? (

@@ -1,0 +1,469 @@
+import { Hono } from "hono";
+import { z } from "zod";
+import {
+  BroadcastAudienceEstimateQuerySchema,
+  BroadcastAudienceEstimateResponseSchema,
+  BroadcastListQuerySchema,
+  BroadcastListResponseSchema,
+  BroadcastRecipientListQuerySchema,
+  BroadcastRecipientListResponseSchema,
+  BroadcastResponseSchema,
+  CreateBroadcastRequestSchema,
+  ScheduleBroadcastRequestSchema,
+  UpdateBroadcastRequestSchema,
+  type BroadcastResponse,
+} from "@sahabat-kreator/contracts";
+import {
+  cancelBroadcast,
+  createBroadcast,
+  deleteBroadcast,
+  estimateBroadcastAudience,
+  getBroadcast,
+  listBroadcastRecipients,
+  listBroadcasts,
+  scheduleBroadcast,
+  updateBroadcast,
+  type BroadcastStats,
+  type BroadcastWithChannel,
+} from "@sahabat-kreator/core";
+import type { AuthBundle } from "../../auth";
+import { apiError, type AppContext, type AppVariables } from "../../http";
+import { requireAuth } from "../auth/session";
+import { resolveTenantForUser } from "../tenants/guard";
+
+/**
+ * Modul broadcasts (Fase 7C) — kampanye siaran teks per channel:
+ *   GET    /tenants/:tenantId/broadcasts                 daftar + statistik
+ *   POST   /tenants/:tenantId/broadcasts                 buat draft
+ *   GET    /tenants/:tenantId/broadcasts/audience-estimate  estimasi audiens
+ *   GET    /tenants/:tenantId/broadcasts/:id             detail + statistik
+ *   PATCH  /tenants/:tenantId/broadcasts/:id             edit (draft saja)
+ *   DELETE /tenants/:tenantId/broadcasts/:id             hapus (draft saja)
+ *   POST   /tenants/:tenantId/broadcasts/:id/schedule    jadwalkan / kirim sekarang
+ *   POST   /tenants/:tenantId/broadcasts/:id/cancel      batalkan
+ *   GET    /tenants/:tenantId/broadcasts/:id/recipients  penerima berpaginasi
+ *
+ * Eksekusi pengiriman BUKAN di sini: schedule menulis event outbox
+ * `broadcast.dispatch_due`; worker yang men-dispatch (materialisasi
+ * penerima + pesan `queued`) dan poller telegram/meta yang mengirim.
+ *
+ * AKSES (keputusan Fase 7C, terdokumentasi): mutasi (buat/edit/hapus/
+ * jadwalkan/batalkan) = OWNER/ADMIN — broadcast adalah pengiriman
+ * massal keluar, setara sensitivitasnya dengan mengelola channel.
+ * Baca (daftar/detail/penerima/estimasi) = semua member workspace —
+ * data kampanye bersama, selaras daftar kontak/automation. Non-member
+ * selalu 404 TENANT_NOT_FOUND agar eksistensi tenant tidak bocor.
+ *
+ * Gerbang channel ditegakkan core: provider whatsapp/webchat →
+ * 422 BROADCAST_CHANNEL_UNSUPPORTED (whatsapp menunggu template
+ * resmi; webchat tanpa semantik push); jadwalkan pada channel yang
+ * tidak `connected` → 409 CHANNEL_DISCONNECTED; transisi status tidak
+ * sah → 409 BROADCAST_INVALID_STATE.
+ */
+
+function serializeBroadcast(
+  broadcast: BroadcastWithChannel,
+  stats: BroadcastStats,
+): BroadcastResponse {
+  return BroadcastResponseSchema.parse({
+    id: broadcast.id,
+    channelAccountId: broadcast.channelAccountId,
+    provider: broadcast.provider,
+    channelDisplayName: broadcast.channelDisplayName,
+    name: broadcast.name,
+    messageText: broadcast.messageText,
+    audienceFilter: broadcast.audienceFilter ?? {},
+    status: broadcast.status,
+    scheduledAt: broadcast.scheduledAt?.toISOString() ?? null,
+    startedAt: broadcast.startedAt?.toISOString() ?? null,
+    completedAt: broadcast.completedAt?.toISOString() ?? null,
+    errorCode: broadcast.errorCode,
+    createdByUserId: broadcast.createdByUserId,
+    createdAt: broadcast.createdAt.toISOString(),
+    updatedAt: broadcast.updatedAt.toISOString(),
+    stats,
+  });
+}
+
+const EMPTY_STATS: BroadcastStats = {
+  total: 0,
+  queued: 0,
+  sent: 0,
+  delivered: 0,
+  read: 0,
+  failed: 0,
+  skipped: 0,
+  cancelled: 0,
+};
+
+export function createBroadcastsRoutes(bundle: AuthBundle | null) {
+  const app = new Hono<{ Variables: AppVariables }>();
+  const base = "/tenants/:tenantId/broadcasts";
+
+  if (!bundle) {
+    const unavailable = (c: AppContext) =>
+      apiError(c, 503, "INTERNAL_ERROR", "Database is not configured");
+    app.get(base, unavailable);
+    app.post(base, unavailable);
+    app.get(`${base}/audience-estimate`, unavailable);
+    app.get(`${base}/:id`, unavailable);
+    app.patch(`${base}/:id`, unavailable);
+    app.delete(`${base}/:id`, unavailable);
+    app.post(`${base}/:id/schedule`, unavailable);
+    app.post(`${base}/:id/cancel`, unavailable);
+    app.get(`${base}/:id/recipients`, unavailable);
+    return app;
+  }
+
+  const auth = requireAuth(bundle);
+  app.use("/tenants/*", auth);
+
+  type GuardOk = {
+    tenant: NonNullable<Awaited<ReturnType<typeof resolveTenantForUser>>>;
+    appUser: { id: string };
+  };
+  async function guard(
+    c: AppContext,
+    opts: { ownerAdmin: boolean },
+  ): Promise<GuardOk | { error: Response }> {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(
+      bundle!,
+      c.req.param("tenantId") ?? "",
+      appUser.id,
+    );
+    if (!tenant) {
+      return {
+        error: apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found"),
+      };
+    }
+    if (opts.ownerAdmin && tenant.role !== "owner" && tenant.role !== "admin") {
+      return {
+        error: apiError(
+          c,
+          403,
+          "FORBIDDEN",
+          "Only workspace owners and admins can manage broadcasts",
+        ),
+      };
+    }
+    return { tenant, appUser: { id: appUser.id } };
+  }
+
+  function parseBroadcastId(c: AppContext): string | null {
+    const id = c.req.param("id");
+    return typeof id === "string" && z.string().uuid().safeParse(id).success
+      ? id
+      : null;
+  }
+
+  function invalidState(c: AppContext, status: string) {
+    return apiError(
+      c,
+      409,
+      "BROADCAST_INVALID_STATE",
+      `Broadcast in status '${status}' cannot perform this action`,
+    );
+  }
+
+  // ---- Daftar -------------------------------------------------------------
+  app.get(base, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const parsed = BroadcastListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid broadcast list query");
+    }
+    const page = await listBroadcasts(bundle.db, {
+      tenantId: g.tenant.id,
+      status: parsed.data.status,
+      cursor: parsed.data.cursor,
+      limit: parsed.data.limit,
+    });
+    const body = BroadcastListResponseSchema.parse({
+      broadcasts: page.broadcasts.map((b) => serializeBroadcast(b, b.stats)),
+      nextCursor: page.nextCursor,
+    });
+    return c.json(body);
+  });
+
+  // ---- Estimasi audiens (sebelum route :id agar tidak tertangkap) --------
+  app.get(`${base}/audience-estimate`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const parsed = BroadcastAudienceEstimateQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid audience estimate query");
+    }
+    const splitList = (raw: string | undefined): string[] | undefined => {
+      if (!raw) return undefined;
+      const items = raw.split(",").map((s) => s.trim()).filter(Boolean);
+      return items.length > 0 ? items : undefined;
+    };
+    const result = await estimateBroadcastAudience(bundle.db, {
+      tenantId: g.tenant.id,
+      channelAccountId: parsed.data.channelAccountId,
+      filter: {
+        tags: splitList(parsed.data.tags),
+        stages: splitList(parsed.data.stages),
+      },
+    });
+    if (result.kind === "channel_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+    }
+    const body = BroadcastAudienceEstimateResponseSchema.parse({
+      matched: result.matched,
+      optedOut: result.optedOut,
+      totalWithIdentity: result.totalWithIdentity,
+    });
+    return c.json(body);
+  });
+
+  // ---- Buat draft -----------------------------------------------------------
+  app.post(base, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = CreateBroadcastRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid broadcast payload");
+    }
+    const result = await createBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      userId: g.appUser.id,
+      name: parsed.data.name,
+      channelAccountId: parsed.data.channelAccountId,
+      messageText: parsed.data.messageText,
+      filter: parsed.data.audienceFilter,
+    });
+    switch (result.kind) {
+      case "created":
+        return c.json(serializeBroadcast(result.broadcast, EMPTY_STATS), 201);
+      case "channel_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+      case "channel_unsupported":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_CHANNEL_UNSUPPORTED",
+          `Broadcasts are not supported for provider '${result.provider}' yet`,
+        );
+    }
+  });
+
+  // ---- Detail ---------------------------------------------------------------
+  app.get(`${base}/:id`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const result = await getBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+    });
+    if (!result) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    return c.json(serializeBroadcast(result.broadcast, result.stats));
+  });
+
+  // ---- Edit draft -------------------------------------------------------------
+  app.patch(`${base}/:id`, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = UpdateBroadcastRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid broadcast payload");
+    }
+    const result = await updateBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+      patch: {
+        name: parsed.data.name,
+        channelAccountId: parsed.data.channelAccountId,
+        messageText: parsed.data.messageText,
+        filter: parsed.data.audienceFilter,
+      },
+    });
+    switch (result.kind) {
+      case "updated": {
+        const detail = await getBroadcast(bundle.db, {
+          tenantId: g.tenant.id,
+          broadcastId: id,
+        });
+        return c.json(
+          serializeBroadcast(result.broadcast, detail?.stats ?? EMPTY_STATS),
+        );
+      }
+      case "not_found":
+        return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+      case "invalid_state":
+        return invalidState(c, result.status);
+      case "channel_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+      case "channel_unsupported":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_CHANNEL_UNSUPPORTED",
+          `Broadcasts are not supported for provider '${result.provider}' yet`,
+        );
+    }
+  });
+
+  // ---- Hapus draft ------------------------------------------------------------
+  app.delete(`${base}/:id`, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const result = await deleteBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+      userId: g.appUser.id,
+    });
+    switch (result.kind) {
+      case "deleted":
+        return c.body(null, 204);
+      case "not_found":
+        return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+      case "invalid_state":
+        return invalidState(c, result.status);
+    }
+  });
+
+  // ---- Jadwalkan / kirim sekarang --------------------------------------------
+  app.post(`${base}/:id/schedule`, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    let json: unknown = {};
+    try {
+      json = await c.req.json();
+    } catch {
+      // Body kosong sah = kirim sekarang.
+      json = {};
+    }
+    const parsed = ScheduleBroadcastRequestSchema.safeParse(json ?? {});
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid schedule payload");
+    }
+    const result = await scheduleBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+      userId: g.appUser.id,
+      scheduledAt: parsed.data.scheduledAt
+        ? new Date(parsed.data.scheduledAt)
+        : null,
+    });
+    switch (result.kind) {
+      case "scheduled": {
+        const detail = await getBroadcast(bundle.db, {
+          tenantId: g.tenant.id,
+          broadcastId: id,
+        });
+        return c.json(
+          serializeBroadcast(result.broadcast, detail?.stats ?? EMPTY_STATS),
+        );
+      }
+      case "not_found":
+        return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+      case "invalid_state":
+        return invalidState(c, result.status);
+      case "channel_disconnected":
+        return apiError(
+          c,
+          409,
+          "CHANNEL_DISCONNECTED",
+          "Channel is not connected",
+        );
+      case "channel_unsupported":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_CHANNEL_UNSUPPORTED",
+          `Broadcasts are not supported for provider '${result.provider}' yet`,
+        );
+    }
+  });
+
+  // ---- Batalkan -----------------------------------------------------------------
+  app.post(`${base}/:id/cancel`, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const result = await cancelBroadcast(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+      userId: g.appUser.id,
+    });
+    switch (result.kind) {
+      case "cancelled": {
+        const detail = await getBroadcast(bundle.db, {
+          tenantId: g.tenant.id,
+          broadcastId: id,
+        });
+        return c.json(
+          serializeBroadcast(result.broadcast, detail?.stats ?? EMPTY_STATS),
+        );
+      }
+      case "not_found":
+        return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+      case "invalid_state":
+        return invalidState(c, result.status);
+    }
+  });
+
+  // ---- Penerima -------------------------------------------------------------------
+  app.get(`${base}/:id/recipients`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const parsed = BroadcastRecipientListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid recipient list query");
+    }
+    const result = await listBroadcastRecipients(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+      status: parsed.data.status,
+      cursor: parsed.data.cursor,
+      limit: parsed.data.limit,
+    });
+    if (result.kind === "not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    }
+    const body = BroadcastRecipientListResponseSchema.parse({
+      recipients: result.recipients.map((r) => ({
+        id: r.id,
+        contactId: r.contactId,
+        contactName: r.contactName,
+        conversationId: r.conversationId,
+        messageId: r.messageId,
+        status: r.status,
+        skipReason: r.skipReason,
+        errorCode: r.errorCode,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+      nextCursor: result.nextCursor,
+    });
+    return c.json(body);
+  });
+
+  return app;
+}

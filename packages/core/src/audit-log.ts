@@ -124,6 +124,9 @@ export function auditActionCategory(action: string): string {
  * sequence.*). Hanya nilai string non-kosong yang dipakai.
  */
 const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
+  // broadcastId didahulukan dari channelAccountId: meta broadcast.*
+  // membawa keduanya, dan target utamanya adalah broadcast-nya.
+  ["broadcastId", "broadcast"],
   ["channelAccountId", "channel_account"],
   ["paymentLinkId", "payment_link"],
   ["apiKeyId", "api_key"],
