@@ -112,6 +112,14 @@ export {
   listChannelAccounts,
   generateWebchatSiteKey,
   setChannelAccountStatus,
+  getChannelAccount,
+  lookupChannelAccountsByProviderExternalId,
+  disconnectChannelAccount,
+  updateTelegramChannelAccountCredentials,
+  type ChannelProviderName,
+  type ChannelAccountLookupRef,
+  type DisconnectChannelContext,
+  type UpdateTelegramCredentialsInput,
 } from "./channels";
 export {
   encryptChannelSecret,

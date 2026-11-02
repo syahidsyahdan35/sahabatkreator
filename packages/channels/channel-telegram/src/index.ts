@@ -15,7 +15,8 @@ import type {
  * saat setWebhook. Pembagian kerja (meniru pola webchat):
  *
  * - Paket ini memiliki KLIEN Bot API tipis (getMe / setWebhook /
- *   sendMessage) + normalisasi update → StandardEvent (fungsi murni).
+ *   getWebhookInfo / deleteWebhook / sendMessage) + normalisasi update
+ *   → StandardEvent (fungsi murni).
  * - Logika DB (kontak/percakapan/pesan/outbox) hidup di
  *   @sahabat-kreator/core (`telegram.ts`).
  * - Verifikasi secret webhook dilakukan route API terhadap hash yang
@@ -89,6 +90,12 @@ export interface TelegramBotIdentity {
   id: string;
   username: string | null;
   firstName: string | null;
+}
+
+/** Subset `getWebhookInfo` yang dipakai (URL webhook aktif bot ini). */
+export interface TelegramWebhookInfo {
+  /** URL webhook yang sedang aktif di Telegram; string kosong = tidak ada. */
+  url: string;
 }
 
 /** Error Bot API yang AMAN dicatat: tanpa token, tanpa URL. */
@@ -190,6 +197,23 @@ export class TelegramBotApiClient {
       // (Fase 6A.1) — update itu bukan pesan dan hanya dicatat audit.
       allowed_updates: ["message", "my_chat_member"],
     });
+  }
+
+  /**
+   * Webhook yang SEDANG aktif untuk bot ini menurut Telegram. Dipakai
+   * saat disconnect: webhook hanya boleh dicabut bila URL-nya menunjuk
+   * ke akun channel yang sedang diputuskan (satu bot = satu webhook;
+   * akun duplikat yang bukan pemilik tidak boleh mencabut webhook
+   * pemilik sah).
+   */
+  async getWebhookInfo(): Promise<TelegramWebhookInfo> {
+    const info = await this.call<{ url?: string }>("getWebhookInfo", {});
+    return { url: typeof info.url === "string" ? info.url : "" };
+  }
+
+  /** Cabut webhook bot ini di Telegram (pesan berhenti masuk). */
+  async deleteWebhook(): Promise<void> {
+    await this.call<boolean>("deleteWebhook", {});
   }
 
   /**

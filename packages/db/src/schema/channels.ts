@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   index,
   pgEnum,
@@ -66,6 +67,15 @@ export const channelAccounts = pgTable(
       t.provider,
       t.externalId,
     ),
+    // Penjaga "satu bot = satu koneksi" (hotfix Telegram, migrasi 0020):
+    // (provider, external_id) unik di SEMUA tenant selama akunnya belum
+    // 'disconnected' — satu bot Telegram hanya punya satu webhook, jadi
+    // koneksi kedua di workspace mana pun harus mustahil di level data.
+    // Baris 'disconnected' dikecualikan agar bot bisa dihubungkan lagi
+    // (di workspace yang sama atau yang lain) setelah diputuskan.
+    uniqueIndex("channel_accounts_provider_external_active_unique")
+      .on(t.provider, t.externalId)
+      .where(sql`${t.status} <> 'disconnected'`),
     index("channel_accounts_tenant_id_idx").on(t.tenantId),
   ],
 );

@@ -224,6 +224,13 @@ export const api = {
         { method: "POST", body: JSON.stringify(input) },
       );
     },
+    /** DELETE /api/tenants/:tenantId/channels/:channelId — putuskan koneksi (hotfix Telegram); riwayat percakapan tidak dihapus. */
+    disconnect(tenantId: string, channelId: string): Promise<void> {
+      return request<void>(
+        `/api/tenants/${tenantId}/channels/${channelId}`,
+        { method: "DELETE" },
+      );
+    },
   },
   conversations: {
     /** GET /api/tenants/:tenantId/conversations?status= */

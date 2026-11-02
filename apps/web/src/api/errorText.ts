@@ -48,6 +48,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.CHANNEL_NOT_CONNECTED");
     case "TELEGRAM_TOKEN_INVALID":
       return t("errors.TELEGRAM_TOKEN_INVALID");
+    case "TELEGRAM_BOT_ALREADY_CONNECTED":
+      return t("errors.TELEGRAM_BOT_ALREADY_CONNECTED");
     case "PRODUCT_HAS_LINKS":
       return t("errors.PRODUCT_HAS_LINKS");
     default:

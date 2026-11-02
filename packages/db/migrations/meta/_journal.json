@@ -141,6 +141,13 @@
       "when": 1793584914795,
       "tag": "0019_telegram_group_chats",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793590000000,
+      "tag": "0020_channel_connection_guard",
+      "breakpoints": true
     }
   ]
 }

@@ -118,8 +118,10 @@ const policies = await db.query<{ count: string }>(
 // + automation_steps & sequence_enrollments tenant_isolation (Fase 2C)
 // + lengan publik `public_key_lookup` pada api_keys (Fase 5A)
 // + lengan webhook `telegram_webhook_lookup` pada channel_accounts dan
-//   4 policy `system_delivery_scan` (Fase 6A) = 32.
-assert.equal(Number(policies.rows[0].count), 32);
+//   4 policy `system_delivery_scan` (Fase 6A)
+// + lengan lookup `provider_external_lookup` pada channel_accounts
+//   (hotfix Telegram, migrasi 0020) = 33.
+assert.equal(Number(policies.rows[0].count), 33);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -674,6 +676,61 @@ const senderNames = await db.query<{ sender_name: string | null }>(
 assert.deepEqual(senderNames.rows.map((r) => r.sender_name), ["Anggota Satu"]);
 console.log(
   "[13] Fase 6A.1: kolom provider_chat_id/title/sender_name ada; alamat balasan grup teresolusi ke id grup negatif lewat coalesce & privat lama jatuh ke identitas kontak; sender_name tersimpan per pesan grup: OK",
+);
+
+// ---------- 14. Hotfix Telegram: satu bot = satu koneksi ----------
+// Migrasi 0020: (a) index unik parsial (provider, external_id) WHERE
+// status <> 'disconnected' menolak baris AKTIF kedua untuk pasangan yang
+// sama — lintas tenant maupun 'error' — tetapi membolehkan baris
+// 'disconnected' kembar; (b) lengan RLS provider_external_lookup hanya
+// membuka baris yang (provider, external_id)-nya persis pasangan yang
+// di-set transaksi (fondasi lookup connect lintas tenant).
+const TG_ACC_B_DUPE = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+await assert.rejects(
+  db.query(
+    `INSERT INTO channel_accounts (tenant_id, provider, external_id, status)
+     VALUES ($1, 'telegram', '555001', 'connected')`,
+    [TENANT_B],
+  ),
+  /channel_accounts_provider_external_active_unique/,
+);
+await assert.rejects(
+  db.query(
+    `INSERT INTO channel_accounts (tenant_id, provider, external_id, status)
+     VALUES ($1, 'telegram', '555001', 'error')`,
+    [TENANT_B],
+  ),
+  /channel_accounts_provider_external_active_unique/,
+);
+await db.query(
+  `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, status)
+   VALUES ($1, $2, 'telegram', '555001', 'disconnected')`,
+  [TG_ACC_B_DUPE, TENANT_B],
+);
+const guardSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noCtx = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM channel_accounts`,
+  );
+  await tx.query(`SELECT set_config('app.channel_provider', 'telegram', true)`);
+  await tx.query(`SELECT set_config('app.channel_external_id', '555001', true)`);
+  const pair = await tx.query<{ id: string; status: string }>(
+    `SELECT id, status FROM channel_accounts ORDER BY status`,
+  );
+  await tx.query(`SELECT set_config('app.channel_external_id', 'tidak-ada', true)`);
+  const none = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM channel_accounts`,
+  );
+  return { noCtx, pair, none };
+});
+assert.equal(guardSeen.noCtx.rows[0].n, "0");
+assert.deepEqual(
+  guardSeen.pair.rows.map((r) => `${r.id}:${r.status}`),
+  [`${TG_ACC_A}:connected`, `${TG_ACC_B_DUPE}:disconnected`],
+);
+assert.equal(guardSeen.none.rows[0].n, "0");
+console.log(
+  "[14] Hotfix Telegram: index unik parsial menolak bot aktif ganda lintas tenant (connected & error), membolehkan baris disconnected; lengan provider_external_lookup hanya membuka pasangan persis: OK",
 );
 
 await db.close();

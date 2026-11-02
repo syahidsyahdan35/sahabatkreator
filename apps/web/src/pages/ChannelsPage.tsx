@@ -62,6 +62,10 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
   const [tgToken, setTgToken] = useState("");
   const [tgCreating, setTgCreating] = useState(false);
   const [tgError, setTgError] = useState<string | null>(null);
+  const [disconnectTarget, setDisconnectTarget] =
+    useState<ChannelAccountResponse | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!tenantId) return;
@@ -130,6 +134,25 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
     }
   };
 
+  const handleDisconnect = async () => {
+    if (!tenantId || !disconnectTarget) return;
+    setDisconnecting(true);
+    setDisconnectError(null);
+    try {
+      await api.channels.disconnect(tenantId, disconnectTarget.id);
+      setDisconnectTarget(null);
+      await load();
+    } catch (err) {
+      setDisconnectError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("channels.disconnectError"),
+      );
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
   const copySnippet = async (channel: ChannelAccountResponse) => {
     try {
       await navigator.clipboard.writeText(embedSnippet(channel.externalId));
@@ -179,7 +202,9 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
           items.map((channel) => (
             <article
               key={channel.id}
-              className="rounded-lg border border-line bg-surface p-4"
+              className={`rounded-lg border border-line bg-surface p-4 ${
+                channel.status === "disconnected" ? "opacity-60" : ""
+              }`}
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold">
@@ -191,6 +216,18 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
                 <span className="rounded-full bg-elevated px-2 py-0.5 text-xs">
                   {statusLabel(t, channel.status)}
                 </span>
+                {channel.status !== "disconnected" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDisconnectError(null);
+                      setDisconnectTarget(channel);
+                    }}
+                    className="ml-auto rounded-md bg-elevated px-3 py-1 text-sm font-medium"
+                  >
+                    {t("channels.disconnectButton")}
+                  </button>
+                ) : null}
               </div>
               {channel.provider === "telegram" && channel.botUsername ? (
                 <div className="mt-2 text-xs text-muted">
@@ -198,7 +235,7 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
                   <span className="font-mono">@{channel.botUsername}</span>
                 </div>
               ) : null}
-              {channel.provider === "webchat" ? (
+              {channel.provider === "webchat" && channel.status === "connected" ? (
                 <div className="mt-3 space-y-2">
                   <div className="text-xs text-muted">
                     {t("channels.siteKeyLabel")}:{" "}
@@ -323,6 +360,49 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
           ))}
         </div>
       </div>
+
+      {disconnectTarget ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+            <h2 className="text-lg font-bold">{t("channels.disconnectTitle")}</h2>
+            <p className="mt-2 text-sm text-muted">
+              {t("channels.disconnectBody", {
+                name:
+                  disconnectTarget.displayName ||
+                  providerLabel(t, disconnectTarget.provider),
+              })}
+            </p>
+            {disconnectError ? (
+              <div className="mt-2">
+                <FieldError message={disconnectError} />
+              </div>
+            ) : null}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                disabled={disconnecting}
+                onClick={() => void handleDisconnect()}
+                className="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {disconnecting
+                  ? t("channels.disconnecting")
+                  : t("channels.disconnectButton")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDisconnectTarget(null)}
+                className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium"
+              >
+                {t("common.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
