@@ -88,6 +88,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.FLOW_INVALID_STATE");
     case "FLOW_GRAPH_INVALID":
       return t("errors.FLOW_GRAPH_INVALID");
+    case "FLOW_TEMPLATE_NOT_FOUND":
+      return t("errors.FLOW_TEMPLATE_NOT_FOUND");
     case "ASSIGNEE_NOT_MEMBER":
       return t("errors.ASSIGNEE_NOT_MEMBER");
     case "INVITATION_EXPIRED":

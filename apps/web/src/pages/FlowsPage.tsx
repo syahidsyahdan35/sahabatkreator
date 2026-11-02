@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   FlowResponse,
   FlowStatus,
+  FlowTemplateCategory,
+  FlowTemplateSummary,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
@@ -29,6 +31,14 @@ const STATUS_CHIP: Record<
   draft: { labelKey: "flows.statusDraft", className: "bg-elevated text-muted" },
   active: { labelKey: "flows.statusActive", className: "bg-success/15 text-success" },
   archived: { labelKey: "flows.statusArchived", className: "bg-elevated text-muted" },
+};
+
+const TPL_CATEGORY_KEYS: Record<FlowTemplateCategory, TranslationKey> = {
+  onboarding: "flows.tplCatOnboarding",
+  sales: "flows.tplCatSales",
+  support: "flows.tplCatSupport",
+  event: "flows.tplCatEvent",
+  lead: "flows.tplCatLead",
 };
 
 const FILTERS: { value: FlowStatus | "all"; labelKey: TranslationKey }[] = [
@@ -73,7 +83,43 @@ export function FlowsPage({ t, locale, onOpenBuilder }: FlowsPageProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [templates, setTemplates] = useState<FlowTemplateSummary[] | null>(
+    null,
+  );
+  const [usingSlug, setUsingSlug] = useState<string | null>(null);
   const requestSeq = useRef(0);
+
+  const loadTemplates = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      const res = await api.flows.listTemplates(tenantId);
+      setTemplates(res.templates);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    }
+  }, [tenantId, t]);
+
+  useEffect(() => {
+    if (galleryOpen && templates === null) void loadTemplates();
+  }, [galleryOpen, templates, loadTemplates]);
+
+  const useTemplate = async (tpl: FlowTemplateSummary) => {
+    if (!tenantId || usingSlug) return;
+    setUsingSlug(tpl.slug);
+    setError(null);
+    try {
+      const flow = await api.flows.instantiateTemplate(tenantId, tpl.slug, {
+        name: t(tpl.nameKey as TranslationKey),
+      });
+      setGalleryOpen(false);
+      onOpenBuilder(flow.id);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setUsingSlug(null);
+    }
+  };
 
   const load = useCallback(async () => {
     if (!tenantId) return;
@@ -194,16 +240,89 @@ export function FlowsPage({ t, locale, onOpenBuilder }: FlowsPageProps) {
             {t("flows.subtitle")}
           </p>
         </div>
-        {canManage ? (
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setCreateOpen((v) => !v)}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+            onClick={() => setGalleryOpen((v) => !v)}
+            className="rounded-lg border border-line px-4 py-2 text-sm font-medium text-ink hover:bg-elevated"
           >
-            {t("flows.createButton")}
+            {t("flows.tplGalleryButton")}
           </button>
-        ) : null}
+          {canManage ? (
+            <button
+              type="button"
+              onClick={() => setCreateOpen((v) => !v)}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              {t("flows.createButton")}
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {galleryOpen ? (
+        <div className="mt-4 rounded-xl border border-line bg-surface p-4">
+          <h2 className="text-sm font-semibold text-ink">
+            {t("flows.tplGalleryTitle")}
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            {t("flows.tplGallerySubtitle")}
+          </p>
+          {templates === null ? (
+            <p className="mt-4 text-sm text-muted">{t("workspace.loading")}</p>
+          ) : (
+            <ul className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {templates.map((tpl) => (
+                <li
+                  key={tpl.slug}
+                  className="flex flex-col rounded-xl border border-line bg-elevated/40 p-4"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-ink">
+                      {t(tpl.nameKey as TranslationKey)}
+                    </span>
+                    <span className="inline-flex items-center rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
+                      {t(TPL_CATEGORY_KEYS[tpl.category])}
+                    </span>
+                  </div>
+                  <p className="mt-2 flex-1 text-sm text-muted">
+                    {t(tpl.descriptionKey as TranslationKey)}
+                  </p>
+                  <p className="mt-2 text-xs text-muted">
+                    {t("flows.tplNodeCount", { count: tpl.nodeCount })}
+                  </p>
+                  {tpl.needs.length > 0 ? (
+                    <p className="mt-2">
+                      <span className="inline-flex items-center rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning">
+                        {t("flows.tplNeedsLabel")}{" "}
+                        {tpl.needs
+                          .map((n) =>
+                            n === "product"
+                              ? t("flows.tplNeedsProduct")
+                              : n,
+                          )
+                          .join(", ")}
+                      </span>
+                    </p>
+                  ) : null}
+                  {canManage ? (
+                    <button
+                      type="button"
+                      disabled={usingSlug !== null}
+                      onClick={() => void useTemplate(tpl)}
+                      className="mt-3 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                    >
+                      {usingSlug === tpl.slug
+                        ? t("flows.tplUsing")
+                        : t("flows.tplUseButton")}
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
 
       {!canManage ? (
         <p className="mt-4 rounded-lg bg-elevated px-3 py-2 text-sm text-muted">

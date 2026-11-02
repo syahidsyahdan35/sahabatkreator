@@ -56,6 +56,8 @@ import type {
   FlowResponse,
   FlowRunListResponse,
   FlowRunStepListResponse,
+  FlowTemplateListResponse,
+  InstantiateFlowTemplateRequest,
   FlowValidationResponse,
   CreateKbDocumentRequest,
   CreatePaymentLinkRequest,
@@ -1126,6 +1128,31 @@ export const api = {
       return request<FlowListResponse>(
         `/api/tenants/${tenantId}/flows${qs ? `?${qs}` : ""}`,
         { method: "GET" },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/flows/templates — katalog template flow
+     * (Fase 12B): ringkasan dwibahasa via kunci i18n, tanpa graf.
+     */
+    listTemplates(tenantId: string): Promise<FlowTemplateListResponse> {
+      return request<FlowTemplateListResponse>(
+        `/api/tenants/${tenantId}/flows/templates`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/flows/templates/:slug/instantiate —
+     * salin template menjadi flow DRAFT (owner/admin); nama bawaan dari
+     * nama template sesuai locale bila body tidak mengirim nama.
+     */
+    instantiateTemplate(
+      tenantId: string,
+      slug: string,
+      input: InstantiateFlowTemplateRequest = {},
+    ): Promise<FlowResponse> {
+      return request<FlowResponse>(
+        `/api/tenants/${tenantId}/flows/templates/${slug}/instantiate`,
+        { method: "POST", body: JSON.stringify(input) },
       );
     },
     /** GET /api/tenants/:tenantId/flows/:id → detail flow (graf utuh). */

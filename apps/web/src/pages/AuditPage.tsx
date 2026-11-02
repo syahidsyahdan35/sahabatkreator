@@ -133,6 +133,7 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "comment.hidden": "audit.actionCommentHidden",
   "comment.unhidden": "audit.actionCommentUnhidden",
   "flow.created": "audit.actionFlowCreated",
+  "flow.template_instantiated": "audit.actionFlowTemplateInstantiated",
   "flow.updated": "audit.actionFlowUpdated",
   "flow.activated": "audit.actionFlowActivated",
   "flow.deactivated": "audit.actionFlowDeactivated",
