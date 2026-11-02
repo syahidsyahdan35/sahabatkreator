@@ -2239,3 +2239,161 @@ di-restart (tidak tersentuh).
   bundle tersaji, dan typecheck/build.
 - Slot avatar masih glyph/inisial sampai Fase 6D mengisi foto asli;
   ikon sampah menyusul di Fase 6I.
+
+## Update Fase 6I — Hapus channel permanen BERPENJAGA (Sampah 30 hari) (2026-11-02)
+
+Desain disetujui user (2026-11-02): tanpa fitur hapus, channel mati
+menumpuk jadi sampah sistem selamanya — maka hapus dibangun DELIBERATE
+dengan pengaman: ketik nama channel untuk konfirmasi (validasi server),
+opsi ekspor riwayat dulu, masa tenggang 30 hari di "Sampah" (bisa
+dipulihkan/diekspor), baru purge permanen oleh worker. Purge manual
+sengaja TIDAK dibuat — masa tenggang adalah pengamannya.
+
+### Model & migrasi 0023
+- `channel_accounts.trashed_at` (timestamptz nullable) + index parsial
+  `channel_accounts_trashed_at_idx` (hanya baris trashed) + policy RLS
+  tulisan tangan `system_purge_scan`: lengan SELECT sempit untuk
+  pemindaian purge worker — transaksi harus men-set
+  `app.system_relay='channel_purge'` DAN yang terbuka HANYA baris
+  `trashed_at IS NOT NULL` lintas tenant. Penghapusan per akun tetap
+  dalam konteks tenant pemiliknya. Staging kini **36 policy RLS**.
+- Membuang ke Sampah = (a) bila masih connected, semantik disconnect
+  yang ADA dijalankan persis (webhook Telegram dicabut bila pemilik —
+  helper `deleteTelegramWebhookIfOwner` kini dipakai bersama DELETE &
+  trash; kredensial dikosongkan; audit `channel.disconnected`), lalu
+  (b) `trashed_at = now` + audit `channel.trashed` (meta purgeAt).
+  Akun berakhir `disconnected` → index unik parsial 0020 otomatis
+  membebaskan botnya untuk dihubungkan di workspace lain (terverifikasi
+  di rantai Telegram di bawah).
+- Connect ulang Telegram pada baris yang sama (revive) membersihkan
+  `trashed_at` — akun yang hidup lagi tidak boleh tetap berstatus Sampah.
+- **Nama konfirmasi**: `displayName` akun bisa NULL (webchat boleh tanpa
+  nama) → target ketik = displayName bila non-kosong, else `botUsername`
+  (telegram), else `externalId`; server mengeksposnya sebagai
+  `confirmationName` di respons channel agar UI & validasi selalu sepakat.
+
+### Peta FK & keputusan purge (per tabel)
+DELETE baris `channel_accounts` men-cascade percakapan → pesan. Purge
+(core `channel-purge.ts`, satu transaksi per akun) bekerja begini:
+- `messages`: dihapus eksplisit (agar hitungan audit akurat).
+- `media`: baris yang dirujuk pesan yang dihapus DAN tak lagi dirujuk
+  pesan mana pun dihapus (FK pesan→media adalah SET NULL, jadi ini
+  satu-satunya pekerjaan manual). Objek R2: belum ada pipeline media
+  yang menulis objek — purge baris DB saja (batas jujur di bawah).
+- `conversations`: dihapus; CASCADE membawa `automation_runs`,
+  `sequence_enrollments`, `agent_suggestions` miliknya (dihitung dulu
+  untuk audit).
+- `channel_identities`: dihapus eksplisit.
+- `outbox_events`: yang BELUM ter-publish dan menunjuk percakapan yang
+  dihapus ikut dihapus (tak akan bisa diproses); yang sudah ter-publish
+  dipertahankan sebagai sejarah.
+- TIDAK dihapus: `contacts` (CRM tenant lintas channel), `audit_logs`
+  (append-only — purge justru menulis `channel.purged` actor system
+  `channel-purge` dengan meta hitungan per jenis), `usage_ledger`
+  (append-only billing; ref varchar tanpa FK), `webhook_inbox`.
+
+### Endpoint (owner/admin, pola route channels)
+- `POST /api/tenants/:tenantId/channels/:channelId/trash`
+  `{ confirmationName }` — validasi SEBELUM mutasi: tak ditemukan 404;
+  sudah di Sampah → **409 `CHANNEL_ALREADY_TRASHED`** (dipilih jujur,
+  bukan idempoten); nama tak sama persis → **422
+  `CHANNEL_DELETE_CONFIRMATION_MISMATCH`**. Sukses 200 akun terserialisasi.
+- `GET /api/tenants/:tenantId/channels/trash` — daftar Sampah
+  (`trashedAt` + `purgeAt` = trashedAt + 30 hari per akun). Daftar baku
+  `GET .../channels` MENGECUALIKAN yang trashed (filter core).
+- `POST .../channels/:channelId/restore` — bersihkan `trashed_at`,
+  status tetap `disconnected` (TIDAK auto-reconnect), audit
+  `channel.restored`; tak sedang di Sampah → **409 `CHANNEL_NOT_TRASHED`**.
+- `GET .../channels/:channelId/export` — unduhan JSON
+  `Content-Disposition: attachment; filename="channel-export-<provider>-<8 char id>.json"`,
+  struktur `sahabat-kreator/channel-export@1` (metadata channel + semua
+  percakapan + pesan kronologis dengan nama kontak); berlaku untuk
+  channel aktif maupun di Sampah; audit `channel.exported` meta hitungan saja.
+- Kontrak: `ChannelAccountResponse` + `trashedAt`, `purgeAt`,
+  `confirmationName`; `TrashChannelRequestSchema`; 3 kode error baru di
+  `ErrorCodeSchema` + teks UI en/id + case `errorText.ts`.
+
+### Visibilitas
+- `listConversations` (core) men-join `channel_accounts` +
+  `isNull(trashedAt)`: percakapan channel trashed hilang dari inbox &
+  API v1; kontak tetap di CRM.
+- Webhook Telegram akun trashed = perilaku disconnected (sudah
+  ditolak/diabaikan gerbang status yang ada); gerbang webchat berbasis
+  status disconnected → otomatis tertutup (akun trashed selalu
+  disconnected).
+
+### Purge oleh worker
+- Poller di `apps/worker` mengikuti pola relay outbox: jalan sekali
+  saat boot + tiap 1 jam, penjaga anti-tumpang-tindih, dimatikan anggun
+  saat shutdown. Memindai lewat lengan `system_purge_scan`, menghapus
+  per akun; kegagalan satu akun dicatat dan tidak menghentikan akun lain.
+- Run-once untuk pengujian/operasi: `pnpm --filter
+  @sahabat-kreator/worker purge:channels` (skrip
+  `apps/worker/scripts/purge-trashed-channels.ts`, env dari
+  `DATABASE_URL`).
+
+### UI Channels
+- Ikon sampah di kanan atas setiap kartu (di samping power) membuka
+  dialog hapus berpenjaga dwibahasa: penjelasan konsekuensi, tombol
+  "Unduh ekspor riwayat" di dialog yang sama, kolom ketik nama —
+  tombol "Pindahkan ke Sampah" nonaktif sampai input PERSIS sama
+  dengan `confirmationName`.
+- Seksi "Sampah" di bawah halaman: baris per channel trashed (avatar,
+  nama, provider, "Dibuang {tanggal}" + "Dihapus permanen pada
+  {tanggal}") + tombol Ekspor & Pulihkan; tampil juga saat kosong
+  ("Sampah kosong"). String en+id lengkap; token tema semantik.
+
+### Deploy
+Migrasi 0023 diterapkan ke staging via psql (`MIGRATION_DATABASE_URL`,
+ON_ERROR_STOP) → build semua → rsync repo (`.env.staging`
+dikecualikan & utuh) → proses api/worker/web milik `ubuntu` dibunuh →
+systemd `Restart=always` mengangkat kode baru (bundle web
+**`index-CjRrhguZ.js`**, identik dengan build lokal). Jendela mock
+Telegram singkat untuk rantai uji (`TELEGRAM_API_BASE` sementara di
+`.env.staging`, dibackup & dipulihkan persis; baris itu kini TIDAK ada
+di `.env.staging`).
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+- Typecheck SEMUA proyek hijau; build hijau; PGlite verify lulus
+  termasuk seksi baru **[17]**: kolom `trashed_at` ada; tanpa flag
+  pindai purge buta (0 baris); dengan `app.system_relay='channel_purge'`
+  hanya baris trashed lintas tenant terlihat; konteks tenant tetap
+  melihat semua barisnya. Hitungan policy di verify naik 35 → 36.
+- **Rantai webchat dari server 28/28 PASS** (tenant uji
+  `fase6i-*@sk.test`): register → tenant → webchat → sesi+pesan publik
+  → inbox memuat → trash nama SALAH 422 berkode → nama BENAR 200
+  (disconnected, trashedAt, purgeAt = +30 hari tepat) → trash ulang 409
+  → daftar baku bersih, daftar Sampah memuat → inbox tak lagi memuat
+  percakapan → ekspor 200 (attachment, format @1, counts 1 percakapan,
+  memuat pesan semai + nama kontak) → restore 200 (tetap disconnected)
+  → restore ulang 409 → trash lagi 200.
+- **Purge terbukti**: `trashed_at` akun uji dimundurkan 31 hari (psql)
+  → `purge:channels` run-once: "terpinai 1; ter-purge 1; gagal 0",
+  counts `{conversations:1, messages:1, media:0, channelIdentities:1,
+  automationRuns:0, sequenceEnrollments:0, agentSuggestions:0,
+  outboxEventsRemoved:0}` — sama persis dengan hitungan pra-purge.
+  Query DB sesudahnya: baris akun/percakapan/pesan/identitas = 0;
+  **kontak tetap ada**; audit lengkap (`channel.trashed` ×2,
+  `channel.restored`, `channel.exported`, `channel.purged` dengan meta
+  hitungan yang benar).
+- **Rantai Telegram mock 6/6 PASS**: tenant A connect bot mock →
+  trash saat MASIH connected 200 (log mock membuktikan
+  getWebhookInfo → deleteWebhook dipanggil dalam langkah trash) →
+  tenant B connect bot yang SAMA → **201, bukan 409**.
+- Channel asli user TIDAK tersentuh (diverifikasi DB sesudahnya:
+  `8fb9b81c` tetap connected, `10be58d5` tetap disconnected, keduanya
+  `trashed_at` NULL; satu-satunya baris trashed di DB adalah akun mock
+  uji tenant A di atas). Health publik ok; 4 service active.
+
+### Batas jujur
+- Bukti visual UI (dialog hapus, seksi Sampah) menunggu uji user —
+  yang terbukti di sini: API, kontrak, bundle tersaji, rantai DB.
+- Purge menghapus baris `media` di DB; penghapusan OBJEK R2 fisik
+  menyusul saat pipeline media benar-benar menulis objek ke R2
+  (belum ada konsumen R2 sampai fase media/KB).
+- `getConversation` (buka satu percakapan by-id) tidak disaring
+  trashed — hanya daftar/pencarian yang disembunyikan; percakapan
+  trashed tetap bisa dibuka lewat deep-link selama masa tenggang
+  (disengaja: data belum dihapus sampai purge).
+- Hitungan purge di audit adalah hitungan saat transaksi purge
+  berjalan (satu transaksi per akun).
