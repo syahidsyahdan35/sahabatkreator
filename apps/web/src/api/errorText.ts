@@ -90,6 +90,12 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.FLOW_GRAPH_INVALID");
     case "FLOW_TEMPLATE_NOT_FOUND":
       return t("errors.FLOW_TEMPLATE_NOT_FOUND");
+    case "KB_DOCUMENT_NO_TEXT":
+      return t("errors.KB_DOCUMENT_NO_TEXT");
+    case "KB_DOCUMENT_TYPE_UNSUPPORTED":
+      return t("errors.KB_DOCUMENT_TYPE_UNSUPPORTED");
+    case "KB_DOCUMENT_TOO_LARGE":
+      return t("errors.KB_DOCUMENT_TOO_LARGE");
     case "ASSIGNEE_NOT_MEMBER":
       return t("errors.ASSIGNEE_NOT_MEMBER");
     case "INVITATION_EXPIRED":

@@ -4,14 +4,24 @@ import {
   CreateKbDocumentRequestSchema,
   KbDocumentListResponseSchema,
   KbDocumentResponseSchema,
+  KbFileDocumentListResponseSchema,
+  KbFileDocumentResponseSchema,
   type KbDocumentResponse,
+  type KbFileDocumentResponse,
 } from "@sahabat-kreator/contracts";
 import {
   createKbDocument,
   deleteKbDocument,
+  deleteKbFile,
+  extractKbFileText,
   getKbDocument,
+  importKbFile,
+  KB_FILE_MAX_BYTES,
   listKbDocuments,
+  listKbFiles,
+  resolveKbFileKind,
   type KbDocumentWithChunkCount,
+  type KbFileWithEntry,
 } from "@sahabat-kreator/core";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppContext, type AppVariables } from "../../http";
@@ -29,15 +39,36 @@ function serializeDocument(row: KbDocumentWithChunkCount): KbDocumentResponse {
   });
 }
 
+function serializeFile(row: KbFileWithEntry): KbFileDocumentResponse {
+  return KbFileDocumentResponseSchema.parse({
+    id: row.id,
+    fileName: row.fileName,
+    mimeType: row.mimeType,
+    byteSize: row.byteSize,
+    chunkCount: row.chunkCount,
+    documentId: row.documentId,
+    createdAt: row.createdAt.toISOString(),
+  });
+}
+
 /**
  * Modul knowledge (Fase 3A) — basis pengetahuan agent per workspace:
  *   POST   /tenants/:tenantId/kb/documents        buat dokumen (+ chunking) → 201
  *   GET    /tenants/:tenantId/kb/documents        daftar + jumlah chunk
  *   GET    /tenants/:tenantId/kb/documents/:id    satu dokumen + jumlah chunk
  *   DELETE /tenants/:tenantId/kb/documents/:id    hapus (chunk ikut cascade) → 204
+ *   POST   /tenants/:tenantId/kb/files            unggah berkas (multipart, Fase 12C) → 201
+ *   GET    /tenants/:tenantId/kb/files            daftar berkas lampiran
+ *   DELETE /tenants/:tenantId/kb/files/:id        hapus berkas + entri turunannya → 204
  * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND).
  * Retrieval-nya sendiri berjalan di worker saat agent menjawab
  * (full-text Postgres — lihat @sahabat-kreator/core kb.ts).
+ *
+ * Lampiran berkas (12C): hanya PDF/TXT/MD ≤5MB; teks hasil ekstraksi
+ * menjadi entri dokumen biasa (judul = nama berkas) sehingga halaman
+ * Knowledge menampilkannya di daftar dokumen yang sama. Berkas tanpa
+ * teks yang bisa diekstrak (PDF pindaian, berkas rusak) ditolak 422
+ * KB_DOCUMENT_NO_TEXT dan TIDAK disimpan sama sekali.
  */
 export function createKnowledgeRoutes(bundle: AuthBundle | null) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -50,6 +81,9 @@ export function createKnowledgeRoutes(bundle: AuthBundle | null) {
     app.get(base, notConfigured);
     app.get(`${base}/:id`, notConfigured);
     app.delete(`${base}/:id`, notConfigured);
+    app.post("/tenants/:tenantId/kb/files", notConfigured);
+    app.get("/tenants/:tenantId/kb/files", notConfigured);
+    app.delete("/tenants/:tenantId/kb/files/:id", notConfigured);
     return app;
   }
 
@@ -120,6 +154,116 @@ export function createKnowledgeRoutes(bundle: AuthBundle | null) {
     );
     if (!deleted) {
       return apiError(c, 404, "NOT_FOUND", "Knowledge document not found");
+    }
+    return c.body(null, 204);
+  });
+
+  // ——— Lampiran berkas (Fase 12C) ———
+  const filesBase = "/tenants/:tenantId/kb/files";
+
+  app.post(filesBase, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    // Tolak lebih dulu dari header sebelum body dibaca ke memori.
+    const declaredLength = Number(c.req.header("content-length") ?? "0");
+    if (declaredLength > KB_FILE_MAX_BYTES + 65_536) {
+      return apiError(
+        c,
+        422,
+        "KB_DOCUMENT_TOO_LARGE",
+        "File exceeds the 5 MB limit",
+      );
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.parseBody();
+    } catch {
+      return apiError(
+        c,
+        400,
+        "VALIDATION_ERROR",
+        "Request body must be multipart form data",
+      );
+    }
+    const file = body.file;
+    if (!(file instanceof File)) {
+      return apiError(c, 400, "VALIDATION_ERROR", "A 'file' field is required");
+    }
+    if (file.size === 0) {
+      return apiError(c, 422, "KB_DOCUMENT_NO_TEXT", "File is empty");
+    }
+    if (file.size > KB_FILE_MAX_BYTES) {
+      return apiError(
+        c,
+        422,
+        "KB_DOCUMENT_TOO_LARGE",
+        "File exceeds the 5 MB limit",
+      );
+    }
+    const kind = resolveKbFileKind(file.name, file.type);
+    if (!kind) {
+      return apiError(
+        c,
+        422,
+        "KB_DOCUMENT_TYPE_UNSUPPORTED",
+        "Only PDF, TXT, and Markdown files are supported",
+      );
+    }
+    const data = Buffer.from(await file.arrayBuffer());
+    let text: string;
+    try {
+      text = (await extractKbFileText(kind.kind, data)).trim();
+    } catch {
+      // PDF rusak/tidak terbaca diperlakukan sama seperti tanpa teks:
+      // tidak ada yang disimpan dan user mendapat kode yang sama.
+      return apiError(
+        c,
+        422,
+        "KB_DOCUMENT_NO_TEXT",
+        "No extractable text found in the file",
+      );
+    }
+    if (!text) {
+      return apiError(
+        c,
+        422,
+        "KB_DOCUMENT_NO_TEXT",
+        "No extractable text found in the file",
+      );
+    }
+    const fileName = (file.name.trim() || "document").slice(0, 255);
+    const created = await importKbFile(
+      bundle.db,
+      { tenantId: tenant.id, userId: c.get("appUser").id },
+      { fileName, mimeType: kind.mimeType, data, text },
+    );
+    return c.json(serializeFile(created), 201);
+  });
+
+  app.get(filesBase, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const rows = await listKbFiles(bundle.db, { tenantId: tenant.id });
+    const body = KbFileDocumentListResponseSchema.parse({
+      files: rows.map(serializeFile),
+    });
+    return c.json(body);
+  });
+
+  app.delete(`${filesBase}/:id`, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Knowledge file not found");
+    }
+    const deleted = await deleteKbFile(
+      bundle.db,
+      { tenantId: tenant.id, userId: c.get("appUser").id },
+      id,
+    );
+    if (!deleted) {
+      return apiError(c, 404, "NOT_FOUND", "Knowledge file not found");
     }
     return c.body(null, 204);
   });

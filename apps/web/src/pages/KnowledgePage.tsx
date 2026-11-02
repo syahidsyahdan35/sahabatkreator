@@ -5,7 +5,10 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import type { KbDocumentResponse } from "@sahabat-kreator/contracts";
+import type {
+  KbDocumentResponse,
+  KbFileDocumentResponse,
+} from "@sahabat-kreator/contracts";
 import {
   formatNumber,
   type Locale,
@@ -32,12 +35,19 @@ interface KnowledgePageProps {
  * — daftar (judul, jumlah chunk, waktu), tambah, lihat isi, hapus dengan
  * konfirmasi. Dokumen di-chunk otomatis di server; agent mencarinya saat
  * menjawab (retrieval full-text Fase 3A). Semua teks lewat i18n.
+ *
+ * Fase 12C menambah area "Dokumen" (lampiran berkas): unggah PDF/TXT/MD
+ * ≤5MB, daftar berkas, hapus dengan konfirmasi. Teks berkas menjadi
+ * entri dokumen biasa (muncul di daftar dokumen di bawah), jadi
+ * menghapus entri turunan dari daftar dokumen juga membersihkan
+ * berkasnya — dan sebaliknya.
  */
 export function KnowledgePage({ t, locale }: KnowledgePageProps) {
   const { status, tenants, active, reload } = useWorkspace();
   const tenantId = active?.id ?? null;
 
   const [documents, setDocuments] = useState<KbDocumentResponse[]>([]);
+  const [files, setFiles] = useState<KbFileDocumentResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -45,6 +55,11 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
   const [deleteTarget, setDeleteTarget] = useState<KbDocumentResponse | null>(
     null,
   );
+  const [fileDeleteTarget, setFileDeleteTarget] =
+    useState<KbFileDocumentResponse | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -53,17 +68,41 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
     setLoading(true);
     setError(null);
     try {
-      const list = await api.kb.listDocuments(tenantId);
+      const [list, fileList] = await Promise.all([
+        api.kb.listDocuments(tenantId),
+        api.kb.listFiles(tenantId),
+      ]);
       if (requestSeq.current !== seq) return;
       setDocuments(list);
+      setFiles(fileList);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
       setDocuments([]);
+      setFiles([]);
     } finally {
       if (requestSeq.current === seq) setLoading(false);
     }
   }, [tenantId, t]);
+
+  const handleUpload = useCallback(
+    async (file: File | undefined) => {
+      if (!file || !tenantId) return;
+      setFileError(null);
+      setUploading(true);
+      try {
+        await api.kb.uploadFile(tenantId, file);
+        // Entri turunan muncul di daftar dokumen — muat ulang keduanya.
+        await load();
+      } catch (err) {
+        setFileError(translateApiError(t, err));
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    },
+    [tenantId, t, load],
+  );
 
   useEffect(() => {
     void load();
@@ -126,6 +165,77 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
         <p className="text-xs leading-relaxed text-muted">
           {t("knowledge.chunkNote")}
         </p>
+      </div>
+
+      <div className="mt-6 rounded-xl border border-line bg-surface p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-ink">
+              {t("knowledge.filesTitle")}
+            </h2>
+            <p className="mt-0.5 max-w-lg text-xs leading-relaxed text-muted">
+              {t("knowledge.filesBody")}
+            </p>
+          </div>
+          <div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown"
+              className="hidden"
+              onChange={(e) => void handleUpload(e.target.files?.[0])}
+            />
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            >
+              {uploading
+                ? t("knowledge.fileUploading")
+                : t("knowledge.fileUploadButton")}
+            </button>
+          </div>
+        </div>
+        <FieldError message={fileError} />
+        {files.length > 0 ? (
+          <ul className="mt-4 space-y-2">
+            {files.map((file) => (
+              <li
+                key={file.id}
+                className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-elevated px-3 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium text-ink">
+                    {file.fileName}
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted">
+                    {file.mimeType}
+                    {" · "}
+                    {formatFileSize(file.byteSize, locale)}
+                    {" · "}
+                    {t("knowledge.chunksLabel", {
+                      count: formatNumber(file.chunkCount, locale),
+                    })}
+                    {" · "}
+                    {t("knowledge.createdLabel", {
+                      date: formatDateTime(file.createdAt, locale),
+                    })}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFileDeleteTarget(file)}
+                  className="rounded-lg bg-surface px-3 py-1.5 text-xs font-medium text-danger"
+                >
+                  {t("common.delete")}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 text-sm text-muted">{t("knowledge.filesEmpty")}</p>
+        )}
       </div>
 
       <FieldError message={error} />
@@ -226,10 +336,99 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
           onDeleted={(id) => {
             setDeleteTarget(null);
             setDocuments((prev) => prev.filter((d) => d.id !== id));
+            // Entri turunan berkas menghilang → berkasnya ikut dibersihkan
+            // di server; sinkronkan daftar berkas juga.
+            void load();
+          }}
+        />
+      ) : null}
+
+      {fileDeleteTarget ? (
+        <FileDeleteModal
+          t={t}
+          tenantId={active.id}
+          file={fileDeleteTarget}
+          onClose={() => setFileDeleteTarget(null)}
+          onDeleted={() => {
+            setFileDeleteTarget(null);
+            void load();
           }}
         />
       ) : null}
     </section>
+  );
+}
+
+function formatFileSize(bytes: number, locale: Locale): string {
+  if (bytes < 1024) return `${formatNumber(bytes, locale)} B`;
+  if (bytes < 1024 * 1024) {
+    return `${formatNumber(Math.round(bytes / 1024), locale)} KB`;
+  }
+  const mb = Math.round((bytes / (1024 * 1024)) * 10) / 10;
+  return `${formatNumber(mb, locale)} MB`;
+}
+
+function FileDeleteModal({
+  t,
+  tenantId,
+  file,
+  onClose,
+  onDeleted,
+}: {
+  t: Translate;
+  tenantId: string;
+  file: KbFileDocumentResponse;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    setError(null);
+    setDeleting(true);
+    try {
+      await api.kb.deleteFile(tenantId, file.id);
+      onDeleted();
+    } catch (err) {
+      setError(translateApiError(t, err));
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+        <h2 className="text-lg font-bold text-ink">
+          {t("knowledge.fileDeleteTitle")}
+        </h2>
+        <p className="mt-2 text-sm text-muted">
+          {t("knowledge.fileDeleteBody", { name: file.fileName })}
+        </p>
+        <FieldError message={error} />
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            disabled={deleting}
+            onClick={() => void handleDelete()}
+            className="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {deleting ? t("knowledge.deleting") : t("common.delete")}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
+          >
+            {t("common.cancel")}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

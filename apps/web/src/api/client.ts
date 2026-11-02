@@ -69,6 +69,8 @@ import type {
   IntegrationLogReplayResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
+  KbFileDocumentListResponse,
+  KbFileDocumentResponse,
   MessageListResponse,
   MessageResponse,
   MetaOAuthCompleteResponse,
@@ -156,6 +158,51 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       ...init,
+    });
+  } catch {
+    throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
+  }
+
+  const raw = await res.text();
+  let body: unknown = null;
+  if (raw) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+  }
+
+  if (!res.ok) {
+    const record = (body ?? {}) as Record<string, unknown>;
+    const contractError = record.error as Record<string, unknown> | undefined;
+    const code =
+      (typeof contractError?.code === "string" && contractError.code) ||
+      (typeof record.code === "string" && record.code) ||
+      fallbackCodeForStatus(res.status);
+    const message =
+      (typeof contractError?.message === "string" && contractError.message) ||
+      (typeof record.message === "string" && record.message) ||
+      res.statusText;
+    throw new ApiClientError(res.status, code, message, contractError?.details);
+  }
+
+  return body as T;
+}
+
+/**
+ * Varian multipart (Fase 12C — unggah berkas KB): TANPA header
+ * Content-Type JSON agar browser mengisi
+ * `multipart/form-data; boundary=...` sendiri. Penanganan error
+ * identik request() — kode kontrak diterjemahkan UI lewat errorText.
+ */
+async function requestFormData<T>(path: string, form: FormData): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      credentials: "include",
+      body: form,
     });
   } catch {
     throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
@@ -760,6 +807,37 @@ export const api = {
         `/api/tenants/${tenantId}/kb/documents/${documentId}`,
         { method: "DELETE" },
       );
+    },
+    /** GET /api/tenants/:tenantId/kb/files → daftar berkas lampiran (Fase 12C). */
+    async listFiles(tenantId: string): Promise<KbFileDocumentResponse[]> {
+      const body = await request<KbFileDocumentListResponse>(
+        `/api/tenants/${tenantId}/kb/files`,
+        { method: "GET" },
+      );
+      return body.files;
+    },
+    /**
+     * POST /api/tenants/:tenantId/kb/files (multipart) → 201 berkas
+     * terimpor; teksnya menjadi entri dokumen biasa. Error khas:
+     * KB_DOCUMENT_NO_TEXT / KB_DOCUMENT_TYPE_UNSUPPORTED /
+     * KB_DOCUMENT_TOO_LARGE.
+     */
+    uploadFile(
+      tenantId: string,
+      file: File,
+    ): Promise<KbFileDocumentResponse> {
+      const form = new FormData();
+      form.append("file", file);
+      return requestFormData<KbFileDocumentResponse>(
+        `/api/tenants/${tenantId}/kb/files`,
+        form,
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/kb/files/:id → 204; entri + chunk ikut terhapus. */
+    async deleteFile(tenantId: string, fileId: string): Promise<void> {
+      await request<unknown>(`/api/tenants/${tenantId}/kb/files/${fileId}`, {
+        method: "DELETE",
+      });
     },
   },
   products: {
