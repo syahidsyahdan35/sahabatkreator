@@ -5029,3 +5029,144 @@ dan berimplikasi App Review).
   respons Graph-nya) tetap asumsi yang hanya bisa dibuktikan oleh
   connect live pertama; kegagalannya sudah dirancang tidak
   menggagalkan koneksi (warnings).
+
+## Fase 9C — Kedalaman Inbox Tim: Assignment, Catatan Internal, Undangan & Peran (2026-11-02)
+
+Migrasi **0035** teraplikasi di staging (jurnal DB terverifikasi
+**36 entri**; total **41 tabel, 54 policy**; `has_table_privilege`
+sk_app atas `conversation_notes` = true lewat ALTER DEFAULT
+PRIVILEGES). Fondasi yang SUDAH ada dan dipakai apa adanya:
+`conversations.assignee_user_id` (sejak 0004 — fase ini menambah
+endpoint assign + filter + UI + index, BUKAN kolom baru) dan tabel
+`invitations` (sejak 0000, belum pernah punya API — fase ini
+melengkapinya dengan `revoked_at` + seluruh siklus hidupnya).
+
+### Keputusan desain
+
+- **Catatan internal = tabel TERPISAH `conversation_notes`**, bukan
+  penanda di `messages`. Seluruh jalur keluar (poller Telegram/Meta,
+  flush webchat, broadcast, agent) hanya pernah membaca tabel
+  `messages`, jadi catatan tidak bisa bocor ke kontak/provider —
+  bukan difilter, melainkan tidak berada di tabel yang pernah dibaca
+  pengirim mana pun; tabelnya pun tidak punya kolom direction/status.
+  Penulis FK `ON DELETE SET NULL` (pola saved_replies): catatan
+  bertahan walau penulis keluar; penghapusan hanya penulis atau
+  owner/admin. Isi catatan TIDAK masuk meta audit (hanya id).
+- **Undangan hash-only + sekali lihat** (pola kunci API 5A): token
+  mentah 32 byte acak hanya muncul di `inviteUrl` respons PEMBUATAN;
+  server menyimpan SHA-256-nya saja. Mengundang ulang email yang sama
+  mencabut undangan pending lamanya (satu tautan hidup per email).
+  Masa berlaku 7 hari. Status diturunkan dari kolom waktu
+  (pending/accepted/revoked/expired), bukan kolom status.
+- **Lengan RLS `invitation_token_lookup`** (migrasi 0035): penerima
+  belum member di mana pun, jadi pembacaan token berjalan TANPA
+  konteks tenant lewat setting transaksi `app.invitation_token_hash`
+  (SELECT saja, hanya baris pemilik hash persis — pola 0006/0012/
+  0016). Penulisan terima/cabut tetap dalam konteks tenant barisnya.
+- **Invariant owner ditegakkan di core**: peran owner tidak bisa
+  diberikan (skema undangan & ganti peran hanya admin/agent/viewer),
+  diturunkan, atau dikeluarkan (`TEAM_OWNER_PROTECTED`); aksi pada
+  diri sendiri ditolak (`TEAM_SELF_ACTION` — presedensi: bila target
+  adalah owner SEKALIGUS diri sendiri, OWNER_PROTECTED yang
+  dilaporkan, terbukti di rantai). Mengeluarkan member men-NULL-kan
+  `assignee_user_id` percakapannya dalam transaksi yang sama.
+- **Email sungguhan TIDAK dikirim** (belum ada provider email): UI
+  Settings menyatakan apa adanya bahwa tautan disalin & dibagikan
+  manual oleh pengundang. Penerima membuka `/invite/:token` (halaman
+  standalone di dalam AuthProvider; path undangan disimpan sebagai
+  tujuan-kembali 6E saat belum login), email sesi harus sama persis
+  dengan email undangan (selain itu 403 `INVITATION_EMAIL_MISMATCH`).
+- **Assignment TIDAK menyentuh `agent_enabled`**: kolom & perilaku
+  handoff AI persis seperti sebelumnya; audit
+  `conversation.assigned`/`conversation.unassigned` bermeta id saja.
+  Serializer percakapan bersama (dashboard + API v1) kini memuat
+  `assigneeName` (nama ?? email penerima; join users dalam query
+  daftar yang sama).
+- **Audit baru**: `conversation.assigned`, `conversation.unassigned`,
+  `conversation.note_created`, `conversation.note_deleted`,
+  `team.invited`, `team.invitation_revoked`, `team.member_joined`,
+  `team.role_changed`, `team.member_removed` + label viewer dwibahasa
+  + target `invitation`/`member`/`conversation_note`.
+
+### API baru
+
+- `POST /tenants/:tid/conversations/:id/assign` {assigneeUserId|null}
+  (semua member; target harus member tenant ini → 422
+  `ASSIGNEE_NOT_MEMBER`); `GET .../conversations?assignment=mine|
+  unassigned` (mine = penugasan pada pemanggil).
+- `GET|POST /tenants/:tid/conversations/:id/notes`,
+  `DELETE .../notes/:noteId` (204; hapus oleh bukan-penulis
+  non-manajer → 403 FORBIDDEN).
+- `GET /tenants/:tid/team/members` (semua member);
+  `GET|POST /tenants/:tid/team/invitations` + `DELETE
+  .../invitations/:id` (owner/admin);
+  `PATCH|DELETE /tenants/:tid/team/members/:userId` (owner/admin;
+  422 OWNER_PROTECTED / SELF_ACTION).
+- `GET /api/invitations/:token` (pratinjau: workspace, peran, status,
+  emailMatches) + `POST /api/invitations/:token/accept` (422
+  EXPIRED/REVOKED/ALREADY_ACCEPTED; 403 EMAIL_MISMATCH).
+
+### UI
+
+- Inbox: tab filter Semua/Milik saya/Belum ditugaskan di atas daftar;
+  chip `@nama` assignee di item daftar; pemilih assignee di header
+  panel; tab panel Pesan | Catatan — tab catatan menggantikan
+  utas+composer dengan daftar catatan (penulis + waktu, aksen
+  peringatan) + form tambah. Penjagaan: sinkronisasi badge unread
+  hanya berjalan pada filter "all" agar angka nav tidak menyusut
+  saat filter aktif.
+- Settings: seksi **Tim** (daftar member + chip/peran, ganti peran
+  via select, keluarkan member dengan modal konfirmasi; form undang
+  email+peran; panel tautan sekali-lihat dengan tombol salin; daftar
+  undangan + status + cabut). Non-manajer melihat catatan khusus.
+- `/invite/:token`: halaman terima undangan (lihat keputusan di
+  atas). Audit viewer menampilkan 9 aksi baru dwibahasa.
+
+### Verifikasi Fase 9C
+
+- Typecheck SEMUA paket hijau. Catatan lingkungan: typecheck web di
+  VM sempat gagal oleh `Cannot find module '@xyflow/react'` —
+  node_modules VM basi terhadap lockfile (bukan regresi 9C); pulih
+  dengan `pnpm install --frozen-lockfile` di tree utama (berakhir
+  EPERM jinak pada penulisan `.modules.yaml`; paket terpasang &
+  typecheck hijau sesudahnya).
+- PGlite verify: **28/28 seksi LULUS** termasuk [28] baru
+  (conversation_notes terisolasi + insert silang ditolak + tanpa
+  konteks 0 baris; lengan invitation_token_lookup membuka tepat
+  baris pemilik hash & menolak hash lain; hitungan kini 41 tabel /
+  54 policy).
+- Rantai dari server (tenant uji `fase9c5-*@sk.test`, mock Telegram
+  lokal bot 777555114 lewat jendela `TELEGRAM_API_BASE`, env dipulih
+  byte-identik sha `9c1ded2a…` + API restart sesudahnya): **66 PASS /
+  1 FAIL** + 2/2 probe tambahan. Yang terbukti: assign→filter
+  mine/unassigned benar dua arah→unassign; assign non-member 422;
+  assign oleh non-member 404; catatan dibuat & dibaca member lain,
+  TIDAK memicu satu pun `sendMessage` ke mock dan tidak muncul
+  sebagai pesan, hapus oleh bukan-penulis 403, owner bisa menghapus
+  catatan member; balasan manual tetap terkirim ke mock & berstatus
+  sent (regresi inbox sehat); undangan buat→preview→terima berperan
+  agent; token dipakai ulang 422 ALREADY_ACCEPTED; dicabut 422
+  REVOKED; kedaluwarsa (expires_at dimundurkan via DB) 422 EXPIRED;
+  email berbeda 403 EMAIL_MISMATCH; ganti peran berlaku (viewer
+  kehilangan hak mengundang 403); keluarkan member → akses 404 +
+  assignment-nya ter-NULL otomatis; 9 aksi audit baru terbaca dari
+  API audit. Satu FAIL adalah presedensi kode: owner menarget diri
+  sendiri mendapat `TEAM_OWNER_PROTECTED` (bukan `TEAM_SELF_ACTION`)
+  — keduanya 422 tanpa perubahan; probe tambahan membuktikan
+  `TEAM_SELF_ACTION` untuk admin non-owner (PATCH & DELETE diri →
+  422). Isolasi lintas tenant terbukti untuk assign/notes/team.
+- Jendela mock ±7 menit: nol pesan & nol baris integration_log pada
+  tenant asli user selama jendela; channel asli user terverifikasi
+  utuh sesudahnya (Telegram @botaramyid_bot + Page Messenger tetap
+  connected). Berkas mock/rantai di server dihapus; tidak ada
+  kredensial di log rantai (secret webhook uji ditulis sebagai hash
+  langsung ke baris akun uji).
+- Batas jujur: (1) UI 9C (tab catatan, pemilih assignee, seksi Tim,
+  halaman /invite) belum diuji klik — menunggu uji UI user seperti
+  fase-fase sebelumnya; bundle web terverifikasi memuat string baru.
+  (2) Regresi agent tidak dijalankan live fase ini (kode agent tidak
+  disentuh; staging memakai LLM asli dari Panel Admin — tidak
+  dibakar untuk tenant uji). (3) Undangan yang diterima saat penerima
+  SUDAH member lewat jalur lain: undangan ditutup & peran lama
+  dipertahankan (perilaku terpilih di core; tidak diuji rantai).
+  (4) Daftar member/undangan tanpa pagination (skala tim kini kecil).
