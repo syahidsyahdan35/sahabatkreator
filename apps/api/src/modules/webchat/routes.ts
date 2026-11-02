@@ -6,6 +6,7 @@ import {
   WebchatSessionResponseSchema,
 } from "@sahabat-kreator/contracts";
 import {
+  attributeContactToGrowthLink,
   getWebchatChannelAccountStatus,
   listMessages,
   openWebchatSession,
@@ -132,6 +133,23 @@ export function createWebchatRoutes(
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid session payload");
     }
     const session = await openWebchatSession(bundle.db, account, parsed.data);
+    // Fase 13B: sesi yang dibuka dari tautan growth (/go/<slug> →
+    // halaman chat ?src=<slug> → widget meneruskan `src`) mengatribusi-
+    // kan kontak ke tautan itu. Best-effort PENUH: slug asing/nonaktif/
+    // bukan milik channel ini adalah no-op beralasan di core, dan
+    // kegagalan DB di sini tidak pernah menggagalkan sesi pengunjung.
+    if (parsed.data.src) {
+      try {
+        await attributeContactToGrowthLink(bundle.db, {
+          tenantId: account.tenantId,
+          contactId: session.contactId,
+          slug: parsed.data.src,
+          channelAccountId: account.id,
+        });
+      } catch (err) {
+        console.error("[webchat] atribusi growth link gagal", err);
+      }
+    }
     const token = createWebchatVisitorToken(opts.secret, {
       tid: account.tenantId,
       acc: account.id,

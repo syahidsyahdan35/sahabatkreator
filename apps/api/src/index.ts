@@ -41,6 +41,7 @@ import { createWhatsAppTemplatesRoutes } from "./modules/whatsapp-templates/rout
 import { createCommentsRoutes } from "./modules/comments/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
+import { createGrowthRoutes } from "./modules/growth/routes";
 import { createNotesRoutes } from "./modules/notes/routes";
 import { createTeamRoutes } from "./modules/team/routes";
 import { createAnalyticsRoutes } from "./modules/analytics/routes";
@@ -181,6 +182,9 @@ routes.route(
 routes.route("/", createFlowsRoutes(authBundle));
 // Modul saved-replies (Fase 9A) — macro balasan /tenants/:tenantId/saved-replies.
 routes.route("/", createSavedRepliesRoutes(authBundle));
+// Modul growth (Fase 13B) — tautan publik /tenants/:tenantId/growth-links
+// + rute publik /go/:slug (redirect platform & landing picker, tanpa sesi).
+routes.route("/", createGrowthRoutes(authBundle));
 // Modul notes (Fase 9C) — catatan internal /tenants/:tenantId/conversations/:id/notes.
 routes.route("/", createNotesRoutes(authBundle));
 // Modul team (Fase 9C) — member & undangan /tenants/:tenantId/team/*

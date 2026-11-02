@@ -1,9 +1,11 @@
 import {
   applyWhatsAppMessageStatus,
+  attributeContactToGrowthLink,
   decryptChannelSecret,
   fetchAndStoreMetaContactProfile,
   recordMetaComment,
   recordMetaInboundMessage,
+  recordMetaReferralContact,
   recordWhatsAppInboundMessage,
   resolveMetaAccountByExternalId,
   resolveWhatsAppAccountByPhoneNumberId,
@@ -15,6 +17,7 @@ import {
 } from "@sahabat-kreator/core";
 import {
   parseMetaCommentEvents,
+  parseMetaReferralEvents,
   parseMetaWebhookEvents,
 } from "@sahabat-kreator/channel-messenger";
 import {
@@ -282,7 +285,84 @@ export async function processMetaWebhookPayload(
       payload,
     });
   }
-  if (events.length === 0 && commentEvents.length === 0 && !scoped) {
+  // Fase 13B: event REFERRAL (messaging_referrals) — kedatangan lewat
+  // tautan m.me/ig.me ber-ref (ref = slug growth link). Tidak ada
+  // pesan: core find-or-create kontak+percakapan mengikuti pola
+  // inbound, lalu atribusi growth link (sumber + auto-tag + event
+  // konversi). Referral yang ref-nya bukan slug dikenal adalah no-op
+  // atribusi (kontak/percakapan tetap tercatat — orangnya memang
+  // datang). Gerbang akun sama seperti messaging/komentar.
+  const referralEvents = parseMetaReferralEvents(payload);
+  for (const event of referralEvents) {
+    const provider: MetaProvider =
+      event.objectKind === "page" ? "messenger" : "instagram";
+    const account = await resolveAccount(provider, event.entryExternalId);
+    if (!account) {
+      if (scoped) continue;
+      await log({
+        direction: "in",
+        provider,
+        signatureValid: true,
+        outcome: "unresolved_account",
+        summary: `referral for unknown ${provider} account ${event.entryExternalId}`,
+        payload,
+      });
+      continue;
+    }
+    if (scoped && account.tenantId !== deps.tenantScopeId) continue;
+    if (account.status !== "connected") {
+      await log({
+        direction: "in",
+        provider,
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome: "ignored_disconnected",
+        summary: `referral for ${account.status} account`,
+        payload,
+      });
+      continue;
+    }
+    let recorded: Awaited<ReturnType<typeof recordMetaReferralContact>>;
+    try {
+      recorded = await recordMetaReferralContact(deps.db, account, {
+        senderExternalId: event.senderExternalId,
+      });
+      await attributeContactToGrowthLink(deps.db, {
+        tenantId: account.tenantId,
+        contactId: recorded.contactId,
+        slug: event.ref,
+        channelAccountId: account.id,
+      });
+    } catch (err) {
+      await log({
+        direction: "in",
+        provider,
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome: "error",
+        errorCode: "processing_error",
+        summary: `failed to record referral from ${event.senderExternalId}`,
+        payload,
+      });
+      throw err;
+    }
+    await log({
+      direction: "in",
+      provider,
+      tenantId: account.tenantId,
+      channelAccountId: account.id,
+      signatureValid: true,
+      outcome: "recorded",
+      summary: `referral ref=${event.ref} from ${event.senderExternalId}`,
+      payload,
+    });
+    if (recorded.identityCreated) {
+      triggerContactProfile(deps, account, recorded.contactId, event.senderExternalId);
+    }
+  }
+  if (events.length === 0 && commentEvents.length === 0 && referralEvents.length === 0 && !scoped) {
     // Payload sah tanpa event messaging yang dikenal parser (receipt
     // delivery/read murni, postback, objek selain page/instagram):
     // tetap satu baris agregat agar tidak ada hit yang senyap.

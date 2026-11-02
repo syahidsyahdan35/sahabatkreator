@@ -15,6 +15,7 @@ import {
   FlowTemplateListResponseSchema,
   KbDocumentListResponseSchema,
   KbStatsResponseSchema,
+  GrowthLinkListResponseSchema,
   MessageListResponseSchema,
   ProductListResponseSchema,
   PublicMeResponseSchema,
@@ -47,6 +48,8 @@ import {
   listConversations,
   listFlows,
   getFlow,
+  getGrowthLink,
+  listGrowthLinks,
   listKbDocuments,
   listMessages,
   listProducts,
@@ -75,6 +78,7 @@ import {
 } from "../comments/routes";
 import { serializeContact } from "../contacts/routes";
 import { serializeFlow } from "../flows/routes";
+import { serializeGrowthLink } from "../growth/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeDocument } from "../knowledge/routes";
 import { serializeMessage } from "../messages-serialize";
@@ -148,6 +152,9 @@ function extractPresentedKey(headers: Headers): string | null {
  *   GET  /v1/knowledge/documents (knowledge:read)   entri KB
  *   GET  /v1/knowledge/documents/:id (knowledge:read)
  *   GET  /v1/knowledge/stats     (knowledge:read)   cakupan embedding
+ *   --- Fase 13B: growth links — permukaan BACA ---
+ *   GET  /v1/growth-links        (growth_links:read) daftar + statistik
+ *   GET  /v1/growth-links/:id    (growth_links:read) detail
  * Penolakan: tanpa/bukan kunci → 401 API_KEY_INVALID; kunci dicabut → 401
  * API_KEY_REVOKED; scope kurang → 403 API_KEY_SCOPE_DENIED.
  * Registry kanonis permukaan ini: PUBLIC_V1_SURFACE di
@@ -770,6 +777,33 @@ export function createPublicV1Routes(
       }
     }
     return c.json(KbStatsResponseSchema.parse({ ...stats, semanticSearch }));
+  });
+
+  // --- Fase 13B: growth links — permukaan BACA (growth_links:read).
+  // Tulis tetap dashboard-only: slug publik + branding adalah artefak
+  // kurasi UI (lihat docs/COVERAGE-MATRIX.md). Serializer yang sama
+  // persis dengan modul growth dashboard.
+  app.get("/v1/growth-links", async (c) => {
+    const denied = requireScope(c, "growth_links:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const links = await listGrowthLinks(bundle.db, { tenantId: auth.tenantId });
+    return c.json(
+      GrowthLinkListResponseSchema.parse({
+        links: links.map(serializeGrowthLink),
+      }),
+    );
+  });
+
+  app.get("/v1/growth-links/:id", async (c) => {
+    const denied = requireScope(c, "growth_links:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Growth link not found");
+    const auth = c.get("apiKeyAuth");
+    const link = await getGrowthLink(bundle.db, { tenantId: auth.tenantId }, id);
+    if (!link) return apiError(c, 404, "NOT_FOUND", "Growth link not found");
+    return c.json(serializeGrowthLink(link));
   });
 
   return app;

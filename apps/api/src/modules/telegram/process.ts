@@ -1,4 +1,5 @@
 import {
+  attributeContactToGrowthLink,
   decryptChannelSecret,
   fetchAndStoreTelegramProfilePhoto,
   recordTelegramChannelPost,
@@ -261,6 +262,31 @@ export async function processTelegramUpdate(
             tenantId: account.tenantId,
             conversationId: recorded.message.conversationId,
           });
+        }
+        // Fase 13B: payload deep-link "/start <slug>" pada chat privat —
+        // atribusi growth link (sumber kontak + auto-tag + event
+        // konversi, sekali per kontak). Pesan ini SUDAH tercatat &
+        // terbit ke outbox `message.received` di atas, jadi pemicu
+        // keyword/flow/agent tetap melihat teks "/start <slug>" apa
+        // adanya — atribusi berjalan DI SAMPING alur normal, tidak
+        // menelannya. Best-effort: kegagalan atribusi tidak mengubah
+        // outcome log dan tidak menggagalkan webhook.
+        if (event.message.conversationKind !== "group") {
+          const startMatch = /^\/start(?:@[A-Za-z0-9_]+)?\s+([a-z0-9][a-z0-9-]{1,62}[a-z0-9])\s*$/.exec(
+            event.message.text,
+          );
+          if (startMatch) {
+            try {
+              await attributeContactToGrowthLink(deps.db, {
+                tenantId: account.tenantId,
+                contactId: recorded.contactId,
+                slug: startMatch[1]!,
+                channelAccountId: account.id,
+              });
+            } catch (err) {
+              console.error("[telegram] atribusi growth link gagal", err);
+            }
+          }
         }
       }
     }
