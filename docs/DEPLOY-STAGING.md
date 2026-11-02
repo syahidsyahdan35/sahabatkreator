@@ -4688,3 +4688,168 @@ kosong).
   api yang direstart; service lain tidak disentuh. Pembuktian akhir
   adalah retry connect oleh user — OAuth live dengan dialog Meta asli
   tidak bisa dibuktikan dari mock/rantai lokal.
+
+## Fase 9B — Paket Quick-Win II: Dashboard Pemakaian AI, Tiering MCP, Dedup & Merge Kontak (2026-11-02)
+
+Commits: `215d6e7` (9B.1 analytics + fondasi 0034), `122ef17` (9B.2 MCP),
+`2d9dd08` (9B.3 dedup/merge). Migrasi **0034** teraplikasi di staging
+(jurnal DB terverifikasi **35 entri**; kolom `usage_ledger.meta` jsonb
+default `'{}'` terverifikasi via information_schema).
+
+### Fondasi 0034 (sisa agent 9B sebelumnya — DITERUSKAN apa adanya)
+
+Agent 9B pertama mati karena daemon restart ±5 menit setelah spawn dan
+meninggalkan fondasi yang belum ter-commit. Telaah sesi ini terhadap
+keempatnya: migrasi `0034_usage_ledger_meta.sql` konsisten dengan skema
+`usage_ledger` nyata (kolom meta memang belum ada), entri jurnal idx 34
+konsisten, kolom Drizzle di `system.ts` cocok, dan seksi verify **[27]**
+menguji default + agregasi + isolasi. **Diteruskan tanpa perubahan**;
+PGlite verify lulus 27/27 termasuk [27]. Keputusan desain fondasi yang
+dipertahankan: biaya provider disimpan di `meta.costUsd`, BUKAN kolom
+`cost_model` (mata uang baris ledger = IDR; tidak boleh tercampur).
+
+### 9B.1 Dashboard pemakaian AI (`/analytics`)
+
+- **Pencatatan.** `recordUsageAndAudit` (satu-satunya penulis `ai_token`)
+  kini menulis `usage_ledger.meta` = `{agentId, provider, model,
+  tokensIn, tokensOut, costUsd?, costCurrency: 'USD'}`. `qty` tetap
+  sumber total token semua era. Provider: `LlmUsage.costUsd?` baru;
+  OpenRouter memintanya lewat `usage: { include: true }` pada request
+  dan mengurai `usage.cost` dari respons (hanya bila number finite ≥ 0).
+- **KEJUJURAN BIAYA (keputusan fase ini).** Biaya dicatat HANYA bila
+  provider melaporkannya pada respons itu. TIDAK ada tabel harga statis,
+  TIDAK ada estimasi. MockProvider tidak melaporkan biaya (`costUsd`
+  absen — terbukti di rantai). Agregat menampilkan `costUsd` (null bila
+  tak satu pun baris berbiaya) + `costReportedResponses` sebagai cakupan.
+  Baris warisan tanpa rincian token in/out dihitung terpisah sebagai
+  `undetailedResponses` dan hanya menyumbang `responses` + `tokensTotal`
+  (qty) — rinciannya tidak pernah ditebak dari qty.
+- **Backfill.** `pnpm --filter @sahabat-kreator/api backfill:usage-meta`
+  (skrip `apps/api/scripts/backfill-usage-meta.ts`, run-once, idempoten):
+  baris `ai_token` bermeta `'{}'` diisi dari audit `agent.responded`
+  terbaru dengan `meta.triggerMessageId = ref_id` pada tenant yang sama.
+  Biaya TIDAK di-backfill (audit lama tak mencatatnya). Hasil staging:
+  run pertama **38 kandidat → 38 terisi, 0 tanpa pasangan**; run kedua 0;
+  run di tengah rantai 9B: 1 kandidat rantai → 1 terisi.
+- **API & UI.** `GET /tenants/:tenantId/analytics/ai-usage?days=1..90`
+  (default 30; SEMUA member boleh membaca; non-member 404): ringkasan
+  periode, deret harian UTC lengkap tepat `days` titik (hari nol tetap
+  tampil), rincian per agent (nama ter-join dari tabel agents; bucket
+  `agentId: null` = baris warisan), dan cap `{dailyLimit: 200, usedToday,
+  remainingToday}` semantik UTC yang sama dengan runtime. Halaman
+  `/analytics` menggantikan placeholder untuk seksi ini: kartu ringkasan
+  (respons, token masuk, token keluar, biaya terlapor + catatan cakupan),
+  catatan baris warisan bila ada, kartu cap dengan progress bar, tabel
+  per agent, tabel harian; dwibahasa; keadaan kosong yang jujur.
+
+### 9B.2 Tiering keamanan MCP
+
+- Klasifikasi 7 tool yang benar-benar ada — BACA: `whoami`,
+  `list_contacts`, `list_conversations`, `list_messages`,
+  `list_products`; TULIS: `create_contact`, `send_message`.
+- **Default server kini READ-ONLY.** Tool tulis TETAP terdaftar
+  (discoverable) tetapi handler-nya menolak dengan error MCP yang jelas
+  menyebut `MCP_ALLOW_WRITES=1` bila env tidak bernilai persis `"1"`.
+  Penanda tier: `annotations.readOnlyHint` (true baca / false tulis),
+  sufiks `[TIER TULIS …]` pada deskripsi tool tulis, dan baris log
+  startup (stderr) yang menyatakan tier aktif.
+- Lapisan ini independen dari scope API key: tulis berhasil hanya bila
+  env DAN scope sama-sama mengizinkan (terbukti sesi C verify: kunci
+  terbatas + env aktif → tetap `API_KEY_SCOPE_DENIED` dari API).
+  **SDK tidak diubah.** README mcp-server menyatakan default read-only
+  secara eksplisit + tabel tier per tool.
+
+### 9B.3 Dedup & merge kontak
+
+- **Sinyal** (tenant yang sama): telepon ternormalisasi sama (digit
+  saja; awalan `0` → `62`; `+` dibuang; < 7 digit bukan sinyal) ATAU
+  email ternormalisasi sama (trim + lowercase, wajib `@`) ATAU identitas
+  channel sama (`provider + external_user_id`) di DUA kontak — identitas
+  pada satu akun channel tak mungkin ganda (index unik), jadi sinyal
+  identitas menangkap orang yang sama yang menempel lewat dua akun
+  channel berbeda. Kelompok = komponen terhubung (union-find) atas
+  sinyal-sinyal itu.
+- `GET /tenants/:tenantId/contacts/duplicates` (semua member) →
+  `{groups: [{contacts, reasons: [{type, value, contactIds}]}]}`;
+  route didaftarkan sebelum `/:id`.
+- `POST /tenants/:tenantId/contacts/:id/merge` `{mergedId}` — `:id` =
+  survivor; **owner/admin saja** (member 403 `FORBIDDEN`); survivor ==
+  merged → 422 `CONTACT_MERGE_SAME` (kode kontrak baru); salah satu tak
+  ada di tenant → 404. SATU transaksi tenant:
+  identitas channel, percakapan, automation runs, flow runs, saran
+  agent, tautan bayar berpindah; enrollment sequence aktif sumber yang
+  automation-nya juga aktif di survivor DIBATALKAN lebih dulu (index
+  unik parsial `(automation, contact) WHERE active`), sisanya pindah;
+  baris `broadcast_recipients` sumber yang broadcast-nya sudah dimiliki
+  survivor DIHAPUS (unik `(broadcast, contact)`), sisanya pindah; foto
+  profil kontak pindah bila survivor belum punya (bila punya, foto
+  survivor menang, foto sumber dihapus); tags = gabungan; custom_fields
+  survivor menang konflik + kunci kosong terisi dari sumber; phone/email
+  survivor diisi dari sumber bila kosong; stage survivor dipertahankan;
+  **opted_out MENANG** bila salah satu opted_out (consentAt mengikuti);
+  `lastContactedAt` = yang terbaru; kontak sumber dihapus; audit
+  `contact.merged` (meta: contactId survivor, mergedContactId,
+  mergedContactName, reasons, movedCounts) + label viewer dwibahasa.
+  Merge TIDAK mensyaratkan sinyal bersama — keputusan owner/admin;
+  `reasons` dicatat apa adanya (bisa `[]`).
+- UI Contacts: seksi "Kemungkinan duplikat" hanya tampil bila ada
+  kandidat; survivor yang dipertahankan = kontak tertua dalam grup
+  (urutan createdAt dari core); anggota lain punya tombol Gabungkan →
+  dialog konfirmasi dwibahasa berisi konsekuensi (pindah + sumber
+  dihapus + tidak bisa dibatalkan); tombol hanya untuk owner/admin
+  (member melihat catatan gerbang). Sesudah sukses daftar + grup dimuat
+  ulang.
+- Catatan cakupan: `custom_fields` kontak saat ini TIDAK bisa diisi
+  lewat API create/update kontak v1 (kontraknya memang tidak memuat
+  field itu — terisi dari jalur lain); aturan merge-nya tetap diuji
+  rantai dengan penyemaian langsung.
+
+### Verifikasi (tanpa Playwright, sesuai aturan fase)
+
+- Typecheck semua paket hijau (exit 0); build semua dist hijau;
+  PGlite verify **27/27** termasuk [27].
+- Deploy: build di salinan kerja → rsync → migrasi 0034 → jurnal **35**
+  → backfill → restart 4 service → health ok; bundle server memuat
+  `analytics/ai-usage` + duplicates; bundle publik memuat string
+  analytics + duplikat dwibahasa.
+- Rantai dari server (tenant uji + mock; log lengkap
+  `/home/ubuntu/sk9b-chain/chain4.log` di server): **86 PASS / 0 FAIL**.
+  (1) Usage: 4 baris semai deterministik (2 agent, 1 berbiaya ×2, 1
+  warisan) → agregat cocok persis (responses 4, total 1464, in/out
+  310/155, detailed 3/undetailed 1, cost 0.033 cakupan 2, cap 2/200,
+  deret 30 titik, per-agent + nama ter-join); member 200, non-member
+  404, tenant lain 0 & cost null. Backfill atas baris rantai: detailed
+  4/0, in/out 1210/254, biaya TIDAK berubah. Pemicu agent deterministik:
+  `respondToInboundMessage` + MockProvider lewat skrip tsx core di
+  server (mekanisme yang dinyatakan; worker produksi tidak disentuh) →
+  baris usage baru `mock|mock-1|94|27`, qty = in+out, TANPA costUsd.
+  (2) MCP verify:mcp 17/17 dalam 3 sesi (baca jalan; tulis ditolak tanpa
+  env dengan pesan MCP_ALLOW_WRITES; tulis berhasil dengan env; kunci
+  terbatas + env → API_KEY_SCOPE_DENIED). (3) Dedup/merge: kelompok
+  {K1,K2,K3} dengan 3 alasan benar (phone `6281234567890`, email,
+  `webchat:visitor-merged`); member merge 403; merge-ke-kontak-tenant-
+  lain 404; merge K2→K1: tags gabungan, opted_out menang, custom_fields
+  survivor menang + terisi, percakapan + identitas berpindah, sumber
+  404, audit `contact.merged` ber-reasons; merge K3→K1; kandidat habis;
+  kontak tenant lain utuh. (4) Regresi automation keyword lewat mock
+  Telegram: webhook (secret plaintext ditangkap dari payload setWebhook
+  mock — DB hanya menyimpan hash-nya) → balasan ter-render `{name}` →
+  terkirim via mock, status sent.
+- `.env.staging` pulih **byte-identik** (sha256 `9c1ded2a…` sebelum =
+  sesudah); channel asli user `@botaramyid_bot` (akun `8fb9b81c`,
+  tenant user) tetap **connected**; tenant asli user tidak disentuh.
+
+### Batas jujur
+
+- Bukti biaya end-to-end dengan OpenRouter ASLI (baris ber-`costUsd`
+  dari respons live) belum terjadi di rantai ini: pemicu rantai memakai
+  MockProvider demi determinisme (dan tidak membakar kuota free-tier
+  user). Jalur pencatatan biaya terverifikasi pada level provider
+  (parsing `usage.cost`) + agregasi atas baris semai ber-costUsd; bukti
+  live-nya akan muncul sendiri di `/analytics` tenant user dari respons
+  agent asli berikutnya (panel sudah memakai kunci OpenRouter asli).
+- `findDuplicateContacts` memuat seluruh kontak tenant ke memori —
+  wajar pada skala workspace saat ini; kandidat lintas tenant tidak
+  pernah muncul karena semua query dalam konteks RLS tenant.
+- UI/UX (halaman analytics + seksi duplikat) dibuktikan lewat bundle +
+  rantai API; pengujian visual tetap oleh user sesuai pembagian kerja.
