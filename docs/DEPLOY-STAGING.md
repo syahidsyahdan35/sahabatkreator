@@ -2161,3 +2161,81 @@ sesudahnya; tenant uji tertinggal by design seperti fase sebelumnya.
   balapan milidetik antara disconnect dan kirim yang sedang berjalan
   diselesaikan per transaksi (yang commit duluan menang) — perilaku
   standar untuk gerbang status dan dapat diterima.
+
+---
+
+## Update Fase 6H — Channels menjadi kartu + kontrol tema ikon tunggal (2026-11-02)
+
+### Perubahan (commit `7bec747`, web + i18n saja — TANPA perubahan API/kontrak)
+- **Kartu channel** menggantikan daftar baris di `ChannelsPage`, mengikuti
+  referensi UI user (`workspace/user/media_library/image/image-2.png`):
+  grid responsif (1 kolom mobile, 2 di `sm`, 3 di `xl`); per kartu —
+  slot avatar persegi membulat dengan **badge glyph provider** di pojok
+  kanan-bawah (komponen baru `components/ChannelAvatar.tsx`, siap-gambar:
+  prop `imageUrl` dirender `<img>` bila kelak diisi Fase 6D; selama ini
+  inisial nama di atas tint warna merek provider), nama tebal, baris
+  @handle (Telegram `@botUsername`; Webchat siteKey terpotong di tengah —
+  webchat tidak punya @handle), label provider, **pill status**
+  (connected = "Active/Aktif" hijau token `success`; disconnected =
+  abu-abu; error = merah token `danger`) + teks **"Connected/Terhubung
+  {tanggal}"** dari `channel_accounts.created_at` via Intl
+  (`utils/format.ts` `formatDate` baru), dan **chip tautan publik +
+  tombol salin** (Telegram `https://t.me/<botUsername>`; Webchat tautan
+  demo `<origin>/webchat-demo?key=<siteKey>` — hanya saat connected,
+  karena channel terputus menolak sesi baru). Snippet embed webchat
+  dipertahankan di dalam kartu webchat connected sebagai blok detail.
+  `createdAt` ternyata SUDAH ada di kontrak + serializer sejak Fase 1F —
+  tidak ada perubahan API.
+- **Aksi kartu**: ikon power (kanan atas) memakai alur & dialog
+  Disconnect yang SUDAH ada (tanpa logika baru); Telegram terputus
+  mendapat tombol "Hubungkan lagi" yang menggulir + memfokuskan form
+  Telegram yang ada (alur revive akun yang sama); Webchat terputus
+  tampil redup tanpa aksi hubungkan-lagi (menghubungkan webchat =
+  channel baru lewat form — jujur secara produk). **Ikon sampah
+  SENGAJA belum dipasang** — fungsinya dibangun Fase 6I (hapus
+  berpenjaga); tidak ada tombol tanpa fungsi.
+- **Provider belum live** (whatsapp, instagram, messenger) kini kartu
+  redup berbahasa sama (slot glyph provider + pill "Segera"), bukan
+  daftar terpisah.
+- **Kontrol tema jadi ikon tunggal** (permintaan tambahan user, butir
+  terpisah): tiga tombol teks Light/Dark/System di `App.tsx` diganti
+  SATU tombol ikon kompak sebaris dengan kontrol bahasa — klik memutar
+  light → dark → system → light memakai `cycle()` yang sudah ada di
+  `useTheme` (logika tema TIDAK berubah); ikon mencerminkan mode aktif
+  (matahari/bulan/monitor, gaya stroke NavIcon); `title` + `aria-label`
+  = nama mode aktif (`common.themeLight/themeDark/themeSystem`); tinggi
+  tombol 28px, sama dengan tombol bahasa.
+- String baru semua lewat i18n en+id (`channels.listTitle`,
+  `statusActive`, `connectedSince`, `copyLink`, `reconnectButton`).
+
+### Deploy
+Build semua proyek di VM hijau → commit `7bec747` → push → rsync repo
+(`.env.staging` dikecualikan & utuh) → proses Vite preview milik
+`ubuntu` dihentikan → systemd `Restart=always` mengangkat PID baru
+dengan dist baru (bundle web **`index-DM20WHCd.js`**). Tanpa migrasi
+DB; tanpa perubahan `.env.staging`; service api/worker/realtime tidak
+di-restart (tidak tersentuh).
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+- Typecheck SEMUA proyek hijau; build hijau.
+- Bundle publik `index-DM20WHCd.js` **identik byte-per-byte** dengan
+  build lokal dan memuat string khas kartu dua bahasa ("Connected
+  channels", "Channel terhubung", "Salin tautan", "Hubungkan lagi",
+  `https://t.me/`, `webchat-demo?key=`).
+- Publik: `GET /channels` 200; `GET /api/health` ok; service web active
+  dengan PID baru.
+- **Rantai API dari server 16/16 PASS** (akun uji `fase6h-*@sk.test`):
+  sign-up → tenant → buat webchat → respons create & list memuat
+  `createdAt` ISO valid + `status` + `externalId` siteKey +
+  `botUsername: null` + `displayName` (persis field yang dikonsumsi
+  kartu) → DELETE disconnect 204 → list memuat status `disconnected`
+  dengan `createdAt` yang sama. Skrip rantai dihapus dari server
+  sesudahnya; tenant uji tertinggal by design.
+
+### Batas jujur
+- Pembuktian visual (tampilan kartu di browser, kontras pill/chip di
+  tema gelap & terang, perilaku salin) menunggu uji user — sesuai
+  pembagian kerja saat ini; yang terbukti di sini adalah data API,
+  bundle tersaji, dan typecheck/build.
+- Slot avatar masih glyph/inisial sampai Fase 6D mengisi foto asli;
+  ikon sampah menyusul di Fase 6I.
