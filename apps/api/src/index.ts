@@ -39,6 +39,8 @@ import { createAuditRoutes } from "./modules/audit/routes";
 import { createBroadcastsRoutes } from "./modules/broadcasts/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
+import { createNotesRoutes } from "./modules/notes/routes";
+import { createTeamRoutes } from "./modules/team/routes";
 import { createAnalyticsRoutes } from "./modules/analytics/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
@@ -154,6 +156,15 @@ routes.route("/", createBroadcastsRoutes(authBundle));
 routes.route("/", createFlowsRoutes(authBundle));
 // Modul saved-replies (Fase 9A) — macro balasan /tenants/:tenantId/saved-replies.
 routes.route("/", createSavedRepliesRoutes(authBundle));
+// Modul notes (Fase 9C) — catatan internal /tenants/:tenantId/conversations/:id/notes.
+routes.route("/", createNotesRoutes(authBundle));
+// Modul team (Fase 9C) — member & undangan /tenants/:tenantId/team/*
+// + penerimaan undangan /invitations/:token/*. Basis URL publik sama
+// dengan tautan bayar (BETTER_AUTH_URL = origin web publik).
+routes.route(
+  "/",
+  createTeamRoutes(authBundle, { publicBaseUrl: env.BETTER_AUTH_URL }),
+);
 // Modul analitik (Fase 9B) — pemakaian AI /tenants/:tenantId/analytics/ai-usage.
 routes.route("/", createAnalyticsRoutes(authBundle));
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.

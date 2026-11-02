@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  AssignConversationRequestSchema,
   ConversationListResponseSchema,
   ConversationResponseSchema,
   ConversationStatusSchema,
@@ -9,6 +10,7 @@ import {
   type ConversationResponse,
 } from "@sahabat-kreator/contracts";
 import {
+  assignConversation,
   listConversations,
   listMessages,
   listProfilePhotoOwnerIds,
@@ -40,6 +42,7 @@ export function serializeConversation(
     provider: row.provider,
     status: row.status,
     assigneeUserId: row.assigneeUserId,
+    assigneeName: row.assigneeName,
     agentEnabled: row.agentEnabled,
     unreadCount: row.unreadCount,
     lastMessageAt: row.lastMessageAt?.toISOString() ?? null,
@@ -52,6 +55,8 @@ export function serializeConversation(
 
 const ListConversationsQuerySchema = z.object({
   status: ConversationStatusSchema.optional(),
+  // Fase 9C: filter penugasan — mine (milik user sesi) | unassigned.
+  assignment: z.enum(["mine", "unassigned"]).optional(),
 });
 
 const ListMessagesQuerySchema = z.object({
@@ -60,9 +65,10 @@ const ListMessagesQuerySchema = z.object({
 
 /**
  * Modul inbox (Fase 1D) — route bersarang di workspace:
- *   GET  /tenants/:tenantId/conversations                 daftar + nama kontak + cuplikan pesan terakhir (?status=)
+ *   GET  /tenants/:tenantId/conversations                 daftar + nama kontak + cuplikan pesan terakhir (?status=, ?assignment=mine|unassigned)
  *   GET  /tenants/:tenantId/conversations/:id/messages    pesan kronologis (?limit=)
  *   POST /tenants/:tenantId/conversations/:id/messages    balasan manual → pesan outbound status `queued`
+ *   POST /tenants/:tenantId/conversations/:id/assign      tetapkan/lepas penerima tugas (Fase 9C)
  * POST adalah fondasi inbox manual: pesan diantrekan + diaudit
  * (message.queued). Pengiriman sungguhannya: Telegram lewat poller Bot
  * API; webchat sejak Fase 6G lewat apps/realtime — route ini cukup
@@ -82,6 +88,7 @@ export function createInboxRoutes(
     app.get(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.get(`${base}/:id/messages`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.post(`${base}/:id/messages`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.post(`${base}/:id/assign`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     return app;
   }
 
@@ -95,7 +102,14 @@ export function createInboxRoutes(
     if (!query.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
     }
-    const rows = await listConversations(bundle.db, { tenantId: tenant.id }, query.data);
+    const rows = await listConversations(
+      bundle.db,
+      { tenantId: tenant.id },
+      {
+        ...query.data,
+        assignmentUserId: c.get("appUser").id,
+      },
+    );
     // Fase 6D: foto kontak jangkar tiap percakapan (endpoint avatar kita
     // sendiri) — himpunan pemilik berfoto dihitung sekali per daftar.
     const withPhoto = await listProfilePhotoOwnerIds(
@@ -192,6 +206,75 @@ export function createInboxRoutes(
       });
     }
     return c.json(serializeMessage(queued), 201);
+  });
+
+  // Fase 9C: tetapkan / lepas penerima tugas. Semua member boleh
+  // menugaskan (ke member mana pun, termasuk diri sendiri); penerima
+  // yang bukan member → 422 ASSIGNEE_NOT_MEMBER dari core. Respons =
+  // percakapan terbarui dalam bentuk serializer daftar yang sama (baris
+  // tunggal diambil ulang lewat getConversation + resolusi nama kontak/
+  // penerima agar bentuknya identik dengan item daftar).
+  app.post(`${base}/:id/assign`, async (c) => {
+    const appUser = c.get("appUser");
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), appUser.id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = AssignConversationRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid assignment payload");
+    }
+    const result = await assignConversation(
+      bundle.db,
+      { tenantId: tenant.id, userId: appUser.id },
+      id,
+      parsed.data.assigneeUserId,
+    );
+    if (result.kind === "conversation_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    if (result.kind === "assignee_not_member") {
+      return apiError(
+        c,
+        422,
+        "ASSIGNEE_NOT_MEMBER",
+        "Assignee must be a member of this workspace",
+      );
+    }
+    const rows = await listConversations(
+      bundle.db,
+      { tenantId: tenant.id },
+      { assignmentUserId: appUser.id },
+    );
+    const updated = rows.find((row) => row.id === id);
+    if (!updated) {
+      // Hanya terjadi bila channel percakapan ini berada di Sampah —
+      // permukaan inbox memang tidak menampilkannya (pola Fase 6I),
+      // jadi bagi inbox percakapan itu tidak ada.
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: tenant.id },
+      "contact",
+      [updated.contactId],
+    );
+    return c.json(
+      serializeConversation(
+        updated,
+        withPhoto.has(updated.contactId)
+          ? contactAvatarUrl(tenant.id, updated.contactId)
+          : null,
+      ),
+    );
   });
 
   return app;
