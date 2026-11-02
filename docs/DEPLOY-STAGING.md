@@ -4853,3 +4853,179 @@ dipertahankan: biaya provider disimpan di `meta.costUsd`, BUKAN kolom
   pernah muncul karena semua query dalam konteks RLS tenant.
 - UI/UX (halaman analytics + seksi duplikat) dibuktikan lewat bundle +
   rantai API; pengujian visual tetap oleh user sesuai pembagian kerja.
+
+## Fase 7D.3 — Koneksi Instagram via System User Token + Rantai Penemuan OAuth Multi-Tepi (2026-11-02)
+
+Konteks: wiring live membuktikan aplikasi Meta user ("Botara Dev") dan
+akun IG user (@syahidsyahdansaja) berada di portofolio bisnis yang SAMA
+(SHD Store). Untuk kasus satu-portofolio, wizard Unified Login
+menciptakan "business integration system user" tersembunyi yang tidak
+menerima aset portofolio itu sendiri, sehingga penemuan 7D
+(`/me/assigned_instagram_accounts` saja) selalu kosong bagi akun
+pemilik — padahal dialognya sendiri sah dan tetap menjadi jalur yang
+benar untuk klien dari portofolio LAIN. Fase ini membuka dua jalan
+sekaligus: jalur manual SUAT untuk kasus portofolio-sama, dan rantai
+penemuan multi-tepi (adopsi pendekatan kode referensi yang diberikan
+user dan terbukti menghubungkan IG-nya; implementasi ditulis ulang
+penuh dengan pola klien Graph kita, tanpa menyalin kode referensi).
+
+### 1. Varian manual Instagram via System User Token
+
+- Kontrak: `CreateChannelRequest.tokenType` —
+  `"page_access_token"` (bawaan bila absen; perilaku 7A persis) atau
+  `"system_user_token"` (baru; hanya bermakna untuk instagram). Token
+  tetap masuk lewat field `pageAccessToken` yang sama.
+- Varian SUAT: field = ID akun IG + SUAT, TANPA Page ID. Validasi
+  server `GET /{ig-id}?fields=id,username` dengan SUAT
+  (`MetaGraphClient.getInstagramAccountProfile`); ditolak Graph → 422
+  `META_TOKEN_INVALID` (kode yang sama seperti jalur Page);
+  `public_handle` dari username. `parent_external_id` diisi dari
+  `GET /me?fields=client_business_id` secara best-effort (gagal →
+  null, tidak menggagalkan koneksi).
+- Simpan lewat jalur create/revive 7A yang sama persis (penjaga
+  satu-akun 409 `META_ACCOUNT_ALREADY_CONNECTED`, enkripsi envelope
+  yang sama). Menghubungkan ulang akun yang sudah 'connected' tetap
+  idempoten mengembalikan baris lama (kredensial tidak ditimpa).
+- Sesudah tersimpan (create & revive), subscribe
+  `POST /{ig-id}/subscribed_apps` (field messages) dicoba dengan SUAT;
+  kegagalan TIDAK menggagalkan koneksi — respons connect menyertakan
+  field tambahan `warnings: ["META_SUBSCRIBE_FAILED"]` (konsisten
+  dengan complete OAuth 7D; jalur non-SUAT tidak berubah sama sekali,
+  termasuk tidak adanya panggilan subscribe seperti sebelumnya).
+- Pengiriman keluar: poller Meta memakai token tersimpan apa adanya
+  sebagai Bearer ke `POST /{ig-id}/messages` — terverifikasi tidak ada
+  asumsi "token = Page token" di jalur kirim IG, jadi SUAT bekerja
+  tanpa perubahan poller.
+- UI: form manual Instagram mendapat radio "Jenis token" (Page access
+  token / Token System User). Varian SUAT menyembunyikan field Page
+  ID; label + placeholder + petunjuk dwibahasa (`channels.suat*`)
+  menjelaskan dengan jujur kapan varian ini dipakai (akun satu
+  portofolio dengan aplikasi; buat System User di Pengaturan Bisnis,
+  tetapkan aplikasi + akun IG, generate token tak-kedaluwarsa berizin
+  instagram_basic + instagram_manage_messages). Field token tetap
+  `PasswordInput` berikon mata. Peringatan subscribe dari respons
+  ditampilkan pada banner peringatan yang sama seperti alur OAuth.
+
+### 2. Rantai penemuan OAuth (callback) + probe profil token
+
+Penemuan Instagram bukan lagi satu tepi. `MetaGraphClient.
+discoverInstagramAccounts(trace)` mencoba berurutan dan menggabungkan
+(dedupe by ID akun IG; username terisi dari tepi mana pun; Page token
+menang atas kandidat tanpa token):
+
+- (a) `assigned_instagram_accounts` — `GET /me/assigned_instagram_accounts?fields=id,username` (jalur SUAT murni).
+- (b) `accounts_instagram_business_account` — `GET /me/accounts?fields=id,access_token,instagram_business_account{id,username}`: IG yang menempel pada Page; kandidat membawa Page token Page itu. Menurut komentar kode referensi, dialog Unified Login pada praktiknya menyerahkan PAGE sebagai aset dan IG menumpang padanya — tepi inilah yang menemukan akun pada implementasi referensi.
+- (c) `businesses_instagram_accounts` — `GET /me/businesses?fields=id,instagram_accounts{id,username}`: IG MILIK portofolio yang terlihat token. Tepi kritis untuk akun aset portofolio yang tidak tertaut ke Page mana pun (persis kasus user). Tepi ini dapat menolak dengan error izin (graph_200) bila konfigurasi Login untuk Bisnis tidak memuat `business_management`.
+- (d) `page_instagram_business_account` — per-Page (maks 10) via rantai daftar Page di bawah: IG tertaut tiap Page (`GET /{page-id}?fields=instagram_business_account{id,username}` bila belum diketahui dari daftar); kandidat membawa token Page itu bila ada.
+
+Setiap tepi meninggalkan jejak `{label, count, error}`; callback
+menulis SATU baris log
+`[meta-oauth] discovery provider=instagram <label>=<n|ERR:kelas> ... total=<n> token=<system_user|user|unknown>`.
+Kegagalan satu tepi tidak menggagalkan tepi lain. Rancangan awal fase
+ini (union `/{client_business_id}/assigned_instagram_accounts`)
+digantikan rantai ini — semangat tepi bisnisnya tercakup oleh (c).
+
+Probe profil token: `GET /me?fields=id,client_business_id`
+best-effort di callback IG. `client_business_id` terisi = SUAT.
+Hasilnya (tanpa token) disimpan di sesi OAuth dan menentukan
+petunjuk keadaan kosong picker (`MetaOAuthSessionResponse.emptyHint`,
+hanya untuk instagram ber-aset kosong):
+
+- `business_permission_missing` — tepi (c) menolak graph_200/graph_10
+  → picker menyebut kemungkinan izin `business_management` belum ada
+  di konfigurasi Login untuk Bisnis. (Prioritas tertinggi: paling
+  bisa ditindak.)
+- `not_system_user` — token bukan SUAT → periksa jenis token pada
+  konfigurasi Facebook Login untuk Bisnis.
+- `no_accounts_shared` — SUAT sah tetapi semua tepi kosong → akun
+  belum dibagikan / kasus portofolio-sama; arahkan ke jalur manual
+  System User Token.
+- `null` — probe/jejak tak memberi kesimpulan → pesan generik lama.
+
+Complete OAuth: token per aset (`pageTokens`) kini berlaku juga untuk
+Instagram — kandidat lewat Page disimpan dengan Page token-nya
+(semantik sama seperti connect manual IG via Page), kandidat lain
+dengan SUAT alur. Subscribe complete memakai token terpilih itu.
+
+Rantai daftar Page bersama (`listPageCandidates`, jejak
+`pages_accounts`/`pages_assigned_pages`/`pages_businesses`/
+`pages_backfill`): `/me/accounts` (fields penuh) →
+`/me/assigned_pages?fields=id,name` →
+`/me/businesses?fields=owned_pages,client_pages`; dedupe first-wins;
+token Page yang kosong diisi best-effort lewat
+`GET /{page-id}?fields=id,name,username,access_token,instagram_business_account{id,username}`.
+Discovery Messenger memakai rantai yang sama (`getManagedPages`
+menyaring kandidat bertoken): exchange tidak berubah; untuk token
+user klasik himpunan Page dari /me/accounts dipertahankan persis
+(kemunculan pertama menang; rantai hanya menambah). Discovery
+WhatsApp tidak berubah; log jumlahnya diseragamkan
+(`me=<WABA> business=null total=<nomor>`).
+
+### 3. Pemeriksaan satu kali Page asli user (konfirmasi, bukan pembuktian)
+
+Sesuai brief, token Page Messenger ASLI user (tenant "Mas Romo WS
+Baru", Page "Sahabat Kreator Indonesia", external_id 1272001186005103)
+dipakai satu kali di server untuk `GET /{pageId}?fields=
+instagram_business_account{id,username}` ke Graph asli (token tidak
+pernah dicetak). Hasil: Graph MENOLAK dengan error 100 — endpoint
+meminta izin `pages_read_engagement` (atau fitur Page Public Content/
+Metadata Access), yang TIDAK termasuk scope OAuth Messenger kita
+(pages_show_list, pages_messaging, pages_manage_metadata). Jadi
+keterkaitan IG tidak bisa dikonfirmasi maupun disangkal lewat token
+tersimpan itu; pernyataan user sendiri (IG adalah aset portofolio
+SHD Store, tidak tertaut ke Page tersebut) tetap menjadi dasar —
+tepi (c) adalah jalur kritisnya, dan tepi (b)/(d) untuk akun user ini
+memang diperkirakan kosong. Scope Messenger SENGAJA tidak diperluas
+di fase ini (mengubah scope menyentuh alur yang sudah terbukti live
+dan berimplikasi App Review).
+
+### Verifikasi (TANPA Playwright)
+
+- Typecheck: contracts, channel-messenger, i18n, api hijau di tree
+  utama; web hijau penuh di salinan build. (Di tree utama VM,
+  typecheck web menampilkan 35 error lama di FlowBuilderPage.tsx —
+  terkonfirmasi pra-ada di HEAD 47701a8 dan disebabkan paket
+  `@xyflow/react` yang belum ter-install di node_modules tree utama;
+  salinan build `/var/tmp/sk7d3-build` dengan install `--frozen-lockfile`
+  lengkap membuktikan keduanya hijau. Catatan lingkungan: `pnpm install`
+  di direktori salinan yang node_modules-nya hasil rsync akan menunggu
+  prompt interaktif — jalankan dengan `CI=true` sesudah menghapus
+  node_modules salinan.)
+- PGlite verify db: 27/27 SEMUA LULUS (fase ini TANPA migrasi —
+  tidak ada perubahan skema; parent_external_id & kolom lain sudah
+  ada sejak 0026/0027).
+- Build semua paket hijau di salinan; bundle API memuat
+  `discoverInstagramAccounts`/`businesses_instagram_accounts`/
+  `system_user_token`; bundle web memuat kunci SUAT + petunjuk picker.
+- Rantai mock Graph dari server (mock di 127.0.0.1:4719, jendela
+  META_API_BASE): **44/44 PASS** — connect SUAT sukses (handle +
+  parent terisi, subscribe terpanggil dengan SUAT), token buruk 422,
+  subscribe gagal → 201 + warnings, poller mengirim dengan SUAT
+  tersimpan; regresi jalur Page token (201, tanpa subscribe);
+  penemuan hanya-(b) / hanya-(c) / hanya-(d) (termasuk backfill
+  token Page), dedupe lintas tepi dengan Page token menang, tiga
+  petunjuk kosong spesifik + trace `ERR:graph_200`; Messenger persis
+  himpunan /me/accounts klasik + kirim dengan Page token; WhatsApp +
+  log discovery; channel asli user (Telegram + Messenger) tetap
+  connected. Driver memurge artefak tenant rantai sebelumnya di awal
+  agar penjaga satu-akun tidak menabrak antar-run.
+- Deploy: rsync salinan build (tanpa `--delete`, `.env.staging`
+  dikecualikan) → restart api/web/worker via MainPID; health lokal +
+  publik ok. `.env.staging` pulih byte-identik sesudah jendela mock
+  (sha256 `9c1ded2a5a69…` sebelum = sesudah).
+
+### Batas jujur
+
+- Bukti LIVE penuh menunggu user: (1) membuat System User eksplisit
+  di SHD Store + SUAT tak-kedaluwarsanya lalu connect manual varian
+  System User Token (jalur yang dirancang persis untuk kasusnya);
+  (2) retry OAuth IG untuk melihat rantai penemuan + jejak log pada
+  token nyata — khususnya apakah tepi (c) mengembalikan
+  @syahidsyahdansaja dan apakah konfigurasinya memuat
+  business_management. Mock membuktikan perilaku kode terhadap
+  bentuk-bentuk respons Graph, bukan kebijakan delegasi Meta yang
+  sebenarnya.
+- Subscribe `subscribed_apps` untuk akun IG dengan SUAT (bentuk
+  respons Graph-nya) tetap asumsi yang hanya bisa dibuktikan oleh
+  connect live pertama; kegagalannya sudah dirancang tidak
+  menggagalkan koneksi (warnings).
