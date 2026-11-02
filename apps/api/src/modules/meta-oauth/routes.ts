@@ -550,6 +550,15 @@ export function createMetaOAuthRoutes(
         "config_id",
         provider === "instagram" ? config.igConfigId! : config.waConfigId!,
       );
+      if (provider === "instagram") {
+        // Unified Login (dokumen terverifikasi): prompt=login memaksa
+        // dialog SELALU menampilkan pemilih akun, termasuk opsi login
+        // Instagram — konfigurasi IG user berlabel Instagram Login
+        // Compatible. Tanpa parameter ini, pengguna yang sudah login
+        // Facebook diteruskan sebagai akun itu tanpa pilihan. WhatsApp
+        // (Embedded Signup) SENGAJA tidak diubah.
+        params.set("prompt", "login");
+      }
       dialogUrl = `${FACEBOOK_DIALOG_BASE}/dialog/oauth?${params.toString()}`;
     }
 
