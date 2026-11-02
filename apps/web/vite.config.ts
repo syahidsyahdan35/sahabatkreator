@@ -18,6 +18,16 @@ export default defineConfig({
   preview: {
     port: 5173,
     host: true,
+    // CORS bawaan Vite preview DIMATIKAN (hotfix webchat 2026-11-02):
+    // middleware CORS Vite menjawab preflight OPTIONS /api/* SENDIRI
+    // (allow-methods/headers generik TANPA Access-Control-Allow-Origin)
+    // sehingga browser memblokir widget webchat yang dipasang di situs
+    // lain, walau API sudah benar. Dengan cors:false, preflight
+    // diteruskan proxy ke API Hono yang menerapkan CORS permisif HANYA
+    // untuk endpoint publik /api/webchat/* (lihat
+    // apps/api/src/modules/webchat/routes.ts). Dashboard tetap
+    // satu-origin; tidak ada CORS permisif di lapisan ini.
+    cors: false,
     // Vite preview menolak Host yang tidak dikenal (proteksi DNS rebinding).
     // Domain staging publik wajib didaftarkan eksplisit, kalau tidak semua
     // request lewat Cloudflare Tunnel (Host: botara.my.id) dijawab 403.
