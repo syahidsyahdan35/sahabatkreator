@@ -2815,3 +2815,142 @@ wiring live menunggu artefak Meta App user).
   menghapus nilai panel setelah mengisi yang asli, secret efektif
   kembali ke placeholder dan webhook live Meta akan 401 sampai panel
   diisi lagi — perilaku fail-closed yang memang dirancang begitu.
+
+---
+
+## Update Fase 7B — Channel WhatsApp (Cloud API) + status pengiriman (2026-11-02)
+
+WhatsApp adalah channel Meta ketiga, menumpang rel 7A persis: Graph
+v26.0 ter-pin, webhook TUNGGAL platform yang sama, tanda tangan app
+secret yang sama (resolver panel→env 7A.1 — TIDAK ada pembacaan env
+mentah baru), token terenkripsi envelope yang sama, poller Meta yang
+sama. Commit fitur `90ad600`.
+
+### Model & migrasi 0027
+
+- **Model akun**: external_id = **phone_number_id** (kunci resolusi
+  webhook + penjaga); WABA ID disimpan di kolom baru
+  **`parent_external_id`** (migrasi 0027, generik — provider lain NULL)
+  sebagai konteks induk; `public_handle` (0026) = `display_phone_number`
+  terformat dari Graph; displayName = verified_name (atau nama form).
+- **0027 juga membuat ulang 4 policy `meta_delivery_scan`** dengan
+  provider `('messenger','instagram','whatsapp')` di bawah flag
+  `app.system_delivery='meta'` yang sama — jumlah policy TIDAK berubah
+  (**41**). Resolusi webhook memakai ulang lengan generik
+  `provider_external_lookup` (0020) — tanpa lengan baru. Migrasi
+  diterapkan bersih lewat `drizzle-kit migrate` (jurnal kini 28 baris;
+  gotcha jurnal 6D sudah tidak berulang).
+
+### Connect (form WhatsApp menggantikan kartu "Segera" terakhir)
+
+- Field: WABA ID + Phone Number ID + Access Token. Label token di UI
+  menyebut pola resminya: **token System User permanen** dari Meta
+  Business Settings. Validasi `GET /{phone_number_id}?fields=verified_name,display_phone_number`
+  → 422 `META_TOKEN_INVALID` / 503 tak terjangkau. Penjaga satu-nomor-
+  satu-koneksi: 409 `META_ACCOUNT_ALREADY_CONNECTED` per
+  phone_number_id; **WABA yang sama di nomor/tenant lain BUKAN
+  konflik** (satu WABA menaungi banyak nomor — terbukti di rantai).
+  Workspace sama: connected → idempoten; disconnected/error → revive.
+- Foto profil bisnis: best-effort lewat
+  `whatsapp_business_profile.profile_picture_url` → diunduh → byte
+  disimpan `profile_photos` (pola 6D). Kosong/gagal TIDAK menghalangi
+  connect; kartu jatuh ke inisial. **Foto profil kontak WhatsApp TIDAK
+  ADA di API (privasi)** → kontak WA inisial berwarna BY DESIGN.
+- UI: chip kartu `https://wa.me/<digit nomor>` hanya saat connected
+  (digit dari display_phone_number; tanpa nomor tampil tidak ada chip
+  — phone_number_id bukan nomor telepon). Panel Webhook Meta kini
+  berpetunjuk subscribe WABA field `messages`. Seksi kartu "Segera"
+  di halaman Channels HILANG (semua provider sudah bisa dihubungkan).
+
+### Webhook & status pengiriman (ciri khas fase ini)
+
+- Objek ketiga `whatsapp_business_account` di `POST /api/meta/webhook`
+  yang sama, cabang terpisah penuh (`handleWhatsAppWebhook` + parser
+  `channel-whatsapp`). Resolusi akun dari
+  **`value.metadata.phone_number_id`**, BUKAN `entry.id` (WABA) —
+  terbukti: satu entry WABA yang sama mengantar pesan dua nomor ke dua
+  tenant yang benar.
+- Inbound: nama kontak dari `value.contacts[].profile.name` (kontak
+  lahir bernama; label cadangan "WhatsApp user" hanya diganti bila
+  belum disunting pemilik). Dedup wamid majemuk
+  `meta:<phoneNumberId>:<wamid>` ON CONFLICT DO NOTHING. **Non-teks
+  dicatat bertipe** (image/audio/video/document/sticker; caption
+  menjadi contentText bila ada; tipe tak dikenal → `other`) — media
+  TIDAK diunduh di v1, linimasa inbox tetap jujur.
+- **Statuses** (`value.statuses[]`) memperbarui pesan keluar kita via
+  wamid: sent → delivered → read **HANYA maju** (status basi/duplikat
+  diabaikan tanpa perubahan — terbukti sent-sesudah-read tidak
+  menurunkan); **failed terminal** dari queued/sent/delivered dengan
+  `messages.error_code = meta_graph_<kode>` (format sama seperti
+  kegagalan poller Meta; terverifikasi DB `meta_graph_131047`). Label
+  status per pesan di utas Inbox sudah generik sejak sebelumnya
+  (`inbox.messageStatus.*`: queued/sent/delivered/read/failed dua
+  bahasa) — delivered/read WhatsApp langsung tampil tanpa ubahan UI.
+- Outbound: poller Meta diperluas — antrean `listQueuedMetaDeliveries`
+  kini mencakup whatsapp; cabang kirim memakai Cloud API
+  `POST /v26.0/{phone_number_id}/messages`
+  `{messaging_product:"whatsapp", recipient_type:"individual", to, type:"text", text:{body}}`
+  → `sent` + wamid majemuk tersimpan (yang dicocokkan statuses). Di
+  luar jendela layanan 24 jam Graph menolak (mis. 131047) → `failed`
+  berkode, SATU percobaan, tanpa retry membabi buta. **Template
+  message TIDAK di fase ini** (milik fase broadcast 7C).
+
+### Langkah wiring LIVE WhatsApp untuk user (di luar fase ini)
+
+1. Meta App yang sama seperti 7A; pastikan App Secret asli terisi di
+   Panel Admin dan webhook app sudah terdaftar (Callback URL + Verify
+   Token dari panel "Webhook Meta").
+2. Di Meta Business: buat/pilih **WhatsApp Business Account (WABA)**,
+   daftarkan nomor (display name terverifikasi), dan **subscribe WABA
+   ke webhook aplikasi** dengan field **`messages`** (pengaturan
+   WhatsApp di app / Business Settings) — tanpa ini tidak ada pesan
+   masuk maupun status pengiriman yang tiba.
+3. Buat **System User** di Business Settings, beri peran kelola
+   WhatsApp pada WABA, hasilkan **token permanen** dengan izin
+   `whatsapp_business_messaging` (+ `whatsapp_business_management`
+   untuk membaca profil nomor).
+4. Hubungkan dari halaman Channels: WABA ID + Phone Number ID + token
+   System User itu. Catatan dev-mode/App Review berlaku seperti 7A:
+   nomor uji Meta terbatas; produksi penuh butuh akses lanjutan
+   (`whatsapp_business_messaging` lolos App Review) dan nomor
+   terdaftar permanen.
+
+### Deploy & verifikasi (TANPA Playwright)
+
+- Typecheck SEMUA proyek hijau; PGlite verify lulus termasuk seksi
+  baru **[20]** (kolom parent_external_id terisi WABA; pindai 'meta'
+  membuka akun whatsapp + antrean queued WA teresolusi ke wa_id;
+  flag 'telegram' tetap tertutup untuk WA). Build semua → commit
+  `90ad600` → push → rsync → migrasi 0027 (drizzle-kit) → restart
+  api/web/worker/realtime. Bundle publik **`index-BWF7-RQA.js`**
+  identik build lokal dan memuat form WhatsApp.
+- **Rantai mock Graph dari server: 38/38 PASS** (tenant uji
+  `fase7b-*@sk.test`; jendela mock singkat `META_API_BASE` lokal, lalu
+  `.env.staging` dipulihkan byte-identik + mock dimatikan + API
+  restart): handshake; token buruk 422 berkode; connect dua nomor di
+  bawah satu WABA (201 + 201, nama/handle Graph persis); nomor sama
+  lintas tenant 409; foto bisnis byte-identik mock untuk nomor
+  berfoto dan avatarUrl null untuk nomor tanpa foto; pesan masuk
+  bernama kontak dari profil webhook; wamid duplikat ter-dedup;
+  gambar ber-caption tercatat type=image; routing per phone_number_id
+  lintas tenant tepat; balasan queued → poller → mock menerima POST
+  bentuk Cloud API yang benar → sent + wamid majemuk; statuses
+  delivered → read; status basi tidak menurunkan; failed → failed +
+  `error_code` DB `meta_graph_131047`; tanda tangan salah 401;
+  disconnect → pesan masuk berikutnya diabaikan. Channel asli user
+  terverifikasi DB tidak tersentuh (dua baris Telegram user utuh).
+
+### Batas jujur
+
+- Semua bukti lewat mock Graph lokal; wiring live menunggu langkah
+  user di atas (WABA + nomor terdaftar + subscribe + token System
+  User + App Review untuk produksi).
+- Jendela layanan 24 jam berlaku: balasan bebas di luar jendela
+  ditolak Graph → pesan `failed` berkode; jalan keluar resminya
+  (template message) adalah fase broadcast, bukan fase ini.
+- Media masuk hanya dicatat tipe + caption; berkasnya tidak diunduh
+  (pipeline media/R2 belum menjadi konsumen) — UI menampilkan penanda
+  "Pesan media" seperti channel lain.
+- Foto kontak WhatsApp tidak akan pernah tampil (API tidak
+  menyediakannya) — inisial berwarna adalah keadaan permanen yang
+  benar untuk provider ini.
