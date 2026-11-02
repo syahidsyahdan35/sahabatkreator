@@ -4,6 +4,7 @@ import {
   decryptChannelSecret,
   fetchAndStoreMetaContactProfile,
   getProviderSecret,
+  recordIntegrationLog,
   recordMetaInboundMessage,
   recordWhatsAppInboundMessage,
   resolveMetaAccountByExternalId,
@@ -11,6 +12,7 @@ import {
   type MetaAccountRef,
   type MetaProvider,
   type PlatformSettingsOptions,
+  type RecordIntegrationLogInput,
   type WhatsAppAccountRef,
 } from "@sahabat-kreator/core";
 import {
@@ -56,6 +58,12 @@ import { apiError, type AppVariables } from "../../http";
  * transaksi) — automation/agent bekerja di worker lewat relay outbox.
  * Identitas yang BARU pertama kali terlihat memicu pengambilan profil
  * Graph kontaknya (nama + foto, pola Fase 6D) secara fire-and-forget.
+ *
+ * Fase 7B.1: setiap hit & event menulis baris `integration_log` dengan
+ * outcome jujur per titik keluar (termasuk 503 belum terkonfigurasi &
+ * 401 tanda tangan salah di gerbang bersama, provider 'meta'); payload
+ * per baris event = seluruh payload hit (dibatasi ±32KB di core).
+ * Handshake GET yang SUKSES sengaja tidak dicatat (bukan event).
  */
 export interface MetaModuleOptions {
   /**
@@ -87,8 +95,32 @@ export function createMetaRoutes(
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
-  app.get("/meta/webhook", (c) => {
+  /**
+   * Fase 7B.1: pencatatan log integrasi untuk hit webhook Meta —
+   * best-effort murni (tidak pernah mengubah respons). Baris pra-rute
+   * (handshake gagal, secret belum terpasang, tanda tangan buruk)
+   * memakai provider 'meta' dan tenant NULL; baris per event memakai
+   * provider konkret sesudah resolusi akun.
+   */
+  const logIntegration = async (
+    entry: RecordIntegrationLogInput,
+  ): Promise<void> => {
+    if (!bundle) return;
+    try {
+      await recordIntegrationLog(bundle.db, entry);
+    } catch {
+      // Sengaja ditelan: log tidak boleh menjatuhkan webhook.
+    }
+  };
+
+  app.get("/meta/webhook", async (c) => {
     if (!opts.verifyToken) {
+      await logIntegration({
+        direction: "in",
+        provider: "meta",
+        outcome: "rejected_unconfigured",
+        summary: "GET handshake rejected: verify token not configured",
+      });
       return apiError(
         c,
         503,
@@ -100,8 +132,18 @@ export function createMetaRoutes(
     const token = c.req.query("hub.verify_token");
     const challenge = c.req.query("hub.challenge");
     if (mode === "subscribe" && token === opts.verifyToken && challenge) {
+      // Handshake sukses SENGAJA tidak dicatat (bukan event; menghindari
+      // derau dari pemeriksaan berkala Meta) — yang dicatat hanya
+      // penolakannya.
       return c.text(challenge, 200);
     }
+    await logIntegration({
+      direction: "in",
+      provider: "meta",
+      signatureValid: false,
+      outcome: "rejected_signature",
+      summary: "GET handshake rejected: verify token mismatch",
+    });
     return apiError(c, 403, "FORBIDDEN", "Webhook verification failed");
   });
 
@@ -116,6 +158,12 @@ export function createMetaRoutes(
       ? await getProviderSecret(bundle.db, "meta_app_secret", opts.platform)
       : opts.appSecret;
     if (!appSecret) {
+      await logIntegration({
+        direction: "in",
+        provider: "meta",
+        outcome: "rejected_unconfigured",
+        summary: "POST rejected: meta app secret not configured",
+      });
       return apiError(
         c,
         503,
@@ -126,6 +174,22 @@ export function createMetaRoutes(
     const rawBody = await c.req.text();
     const signature = c.req.header("x-hub-signature-256");
     if (!verifyMetaWebhookSignature(rawBody, signature, appSecret)) {
+      // Payload untuk log dibaca best-effort dari body mentah (JSON
+      // rusak → null). Nilai tanda tangan TIDAK PERNAH ditulis.
+      let rawForLog: unknown = null;
+      try {
+        rawForLog = JSON.parse(rawBody);
+      } catch {
+        rawForLog = null;
+      }
+      await logIntegration({
+        direction: "in",
+        provider: "meta",
+        signatureValid: false,
+        outcome: "rejected_signature",
+        summary: "POST rejected: signature verification failed",
+        payload: rawForLog,
+      });
       return apiError(
         c,
         401,
@@ -140,6 +204,14 @@ export function createMetaRoutes(
     } catch {
       // Body rusak dari pengirim yang lolos tanda tangan: jawab 200 agar
       // Meta tidak me-retry selamanya; tidak ada yang disimpan.
+      await logIntegration({
+        direction: "in",
+        provider: "meta",
+        signatureValid: true,
+        outcome: "error",
+        errorCode: "invalid_json",
+        summary: "POST body is not valid JSON",
+      });
       return c.json({ ok: true });
     }
 
@@ -147,7 +219,7 @@ export function createMetaRoutes(
     // payload-nya berbeda total dari messaging Page/IG, jadi jalurnya
     // terpisah penuh di bawah (parser + core whatsapp.ts).
     if (isWhatsAppWebhookPayload(payload)) {
-      await handleWhatsAppWebhook(bundle, publisher, payload);
+      await handleWhatsAppWebhook(bundle, publisher, payload, logIntegration);
       return c.json({ ok: true });
     }
 
@@ -172,20 +244,97 @@ export function createMetaRoutes(
     };
 
     for (const event of events) {
-      // Echo = pantulan pesan yang kita kirim sendiri (sudah tercatat
-      // sebagai outbound saat dikirim poller) — jangan jadi pesan masuk.
-      if (event.isEcho) continue;
-      // v1 hanya pesan teks (lampiran/stiker/like belum dicatat).
-      if (!event.text || !event.text.trim()) continue;
       const provider: MetaProvider =
         event.objectKind === "page" ? "messenger" : "instagram";
+      // Fase 7B.1: resolusi akun didahulukan dari saringan echo/teks
+      // agar SETIAP event berjejak dengan tenant yang benar; perilaku
+      // pencatatan pesan tidak berubah (echo & non-teks tetap dilewati).
       const account = await resolveAccount(provider, event.entryExternalId);
-      if (!account || account.status !== "connected") continue;
+      if (!account) {
+        await logIntegration({
+          direction: "in",
+          provider,
+          signatureValid: true,
+          outcome: "unresolved_account",
+          summary: `unknown ${provider} account ${event.entryExternalId}`,
+          payload,
+        });
+        continue;
+      }
+      if (account.status !== "connected") {
+        await logIntegration({
+          direction: "in",
+          provider,
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_disconnected",
+          summary: `event for ${account.status} account`,
+          payload,
+        });
+        continue;
+      }
+      // Echo = pantulan pesan yang kita kirim sendiri (sudah tercatat
+      // sebagai outbound saat dikirim poller) — jangan jadi pesan masuk.
+      if (event.isEcho) {
+        await logIntegration({
+          direction: "in",
+          provider,
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_echo",
+          summary: "echo of own outbound message",
+          payload,
+        });
+        continue;
+      }
+      // v1 hanya pesan teks (lampiran/stiker/like belum dicatat).
+      if (!event.text || !event.text.trim()) {
+        await logIntegration({
+          direction: "in",
+          provider,
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_status_only",
+          summary: "non-text message event",
+          payload,
+        });
+        continue;
+      }
 
-      const recorded = await recordMetaInboundMessage(bundle.db, account, {
-        senderExternalId: event.senderExternalId,
-        providerMessageId: event.providerMessageId,
-        text: event.text,
+      let recorded: Awaited<ReturnType<typeof recordMetaInboundMessage>>;
+      try {
+        recorded = await recordMetaInboundMessage(bundle.db, account, {
+          senderExternalId: event.senderExternalId,
+          providerMessageId: event.providerMessageId,
+          text: event.text,
+        });
+      } catch (err) {
+        await logIntegration({
+          direction: "in",
+          provider,
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "error",
+          errorCode: "processing_error",
+          summary: `failed to record message from ${event.senderExternalId}`,
+          payload,
+        });
+        throw err;
+      }
+      await logIntegration({
+        direction: "in",
+        provider,
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome:
+          recorded === null || recorded.duplicate ? "duplicate" : "recorded",
+        summary: `text message from ${event.senderExternalId}`,
+        payload,
       });
       if (!recorded) continue;
 
@@ -199,6 +348,19 @@ export function createMetaRoutes(
           conversationId: recorded.message.conversationId,
         });
       }
+    }
+    if (events.length === 0) {
+      // Payload sah tanpa event messaging yang dikenal parser (receipt
+      // delivery/read murni, postback, objek selain page/instagram):
+      // tetap satu baris agregat agar tidak ada hit yang senyap.
+      await logIntegration({
+        direction: "in",
+        provider: "meta",
+        signatureValid: true,
+        outcome: "ignored_status_only",
+        summary: "payload without messaging events (receipts/postbacks)",
+        payload,
+      });
     }
     return c.json({ ok: true });
   });
@@ -225,63 +387,208 @@ async function handleWhatsAppWebhook(
   bundle: AuthBundle,
   publisher: RealtimePublisher | null,
   payload: unknown,
+  logIntegration: (entry: RecordIntegrationLogInput) => Promise<void>,
 ): Promise<void> {
-  const parsed = parseWhatsAppWebhookEvents(payload);
-  if (parsed.messages.length === 0 && parsed.statuses.length === 0) return;
-
-  const accountCache = new Map<string, WhatsAppAccountRef | null>();
-  const resolveAccount = async (
-    phoneNumberId: string,
-  ): Promise<WhatsAppAccountRef | null> => {
-    const cached = accountCache.get(phoneNumberId);
-    if (cached !== undefined) return cached;
-    const account = await resolveWhatsAppAccountByPhoneNumberId(
-      bundle.db,
-      phoneNumberId,
-    );
-    accountCache.set(phoneNumberId, account);
-    return account;
-  };
-
-  for (const message of parsed.messages) {
-    // Pesan teks tanpa isi adalah anomali payload — lewati seperti
-    // jalur Meta; non-teks tetap dicatat bertipe (linimasa jujur).
-    if (message.type === "text" && (!message.text || !message.text.trim())) {
-      continue;
-    }
-    const account = await resolveAccount(message.phoneNumberId);
-    if (!account || account.status !== "connected") continue;
-    const recorded = await recordWhatsAppInboundMessage(bundle.db, account, {
-      senderWaId: message.senderWaId,
-      contactName: message.contactName,
-      providerMessageId: message.providerMessageId,
-      type: message.type,
-      text: message.text,
+  // Fase 7B.1: error per event dicatat di titiknya lalu dilempar ulang
+  // (respons webhook tidak berubah); error lain (parser/resolusi)
+  // dicatat agregat oleh pembungkus di bawah. `errorLogged` mencegah
+  // pencatatan ganda untuk error yang sama.
+  let errorLogged = false;
+  const logErrorOnce = async (summary: string): Promise<void> => {
+    if (errorLogged) return;
+    errorLogged = true;
+    await logIntegration({
+      direction: "in",
+      provider: "whatsapp",
+      signatureValid: true,
+      outcome: "error",
+      errorCode: "processing_error",
+      summary,
+      payload,
     });
-    if (!recorded) continue;
-    if (publisher) {
-      await publisher.publishNudge({
-        kind: "message.received",
+  };
+  try {
+    const parsed = parseWhatsAppWebhookEvents(payload);
+    if (parsed.messages.length === 0 && parsed.statuses.length === 0) {
+      await logIntegration({
+        direction: "in",
+        provider: "whatsapp",
+        signatureValid: true,
+        outcome: "ignored_status_only",
+        summary: "whatsapp payload without messages or statuses",
+        payload,
+      });
+      return;
+    }
+
+    const accountCache = new Map<string, WhatsAppAccountRef | null>();
+    const resolveAccount = async (
+      phoneNumberId: string,
+    ): Promise<WhatsAppAccountRef | null> => {
+      const cached = accountCache.get(phoneNumberId);
+      if (cached !== undefined) return cached;
+      const account = await resolveWhatsAppAccountByPhoneNumberId(
+        bundle.db,
+        phoneNumberId,
+      );
+      accountCache.set(phoneNumberId, account);
+      return account;
+    };
+
+    for (const message of parsed.messages) {
+      // Pesan teks tanpa isi adalah anomali payload — lewati seperti
+      // jalur Meta; non-teks tetap dicatat bertipe (linimasa jujur).
+      if (message.type === "text" && (!message.text || !message.text.trim())) {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          signatureValid: true,
+          outcome: "ignored_status_only",
+          summary: "empty text message",
+          payload,
+        });
+        continue;
+      }
+      const account = await resolveAccount(message.phoneNumberId);
+      if (!account) {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          signatureValid: true,
+          outcome: "unresolved_account",
+          summary: `unknown phone_number_id ${message.phoneNumberId}`,
+          payload,
+        });
+        continue;
+      }
+      if (account.status !== "connected") {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_disconnected",
+          summary: `message for ${account.status} account`,
+          payload,
+        });
+        continue;
+      }
+      let recorded: Awaited<ReturnType<typeof recordWhatsAppInboundMessage>>;
+      try {
+        recorded = await recordWhatsAppInboundMessage(bundle.db, account, {
+          senderWaId: message.senderWaId,
+          contactName: message.contactName,
+          providerMessageId: message.providerMessageId,
+          type: message.type,
+          text: message.text,
+        });
+      } catch (err) {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "error",
+          errorCode: "processing_error",
+          summary: `failed to record message from ${message.senderWaId}`,
+          payload,
+        });
+        errorLogged = true;
+        throw err;
+      }
+      await logIntegration({
+        direction: "in",
+        provider: "whatsapp",
         tenantId: account.tenantId,
-        conversationId: recorded.message.conversationId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome:
+          recorded === null || recorded.duplicate ? "duplicate" : "recorded",
+        summary: `${message.type} message from ${message.senderWaId}`,
+        payload,
+      });
+      if (!recorded) continue;
+      if (publisher) {
+        await publisher.publishNudge({
+          kind: "message.received",
+          tenantId: account.tenantId,
+          conversationId: recorded.message.conversationId,
+        });
+      }
+    }
+
+    for (const status of parsed.statuses) {
+      const account = await resolveAccount(status.phoneNumberId);
+      if (!account) {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          signatureValid: true,
+          outcome: "unresolved_account",
+          summary: `delivery status for unknown phone_number_id ${status.phoneNumberId}`,
+          payload,
+        });
+        continue;
+      }
+      if (account.status !== "connected") {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_disconnected",
+          summary: `delivery status for ${account.status} account`,
+          payload,
+        });
+        continue;
+      }
+      const applied = await applyWhatsAppMessageStatus(bundle.db, account, {
+        providerMessageId: status.providerMessageId,
+        status: status.status,
+        graphErrorCode: status.errorCode,
+      });
+      if (!applied) {
+        await logIntegration({
+          direction: "in",
+          provider: "whatsapp",
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          signatureValid: true,
+          outcome: "ignored_status_only",
+          summary: `delivery status ${status.status} for unknown message`,
+          payload,
+        });
+        continue;
+      }
+      await logIntegration({
+        direction: "in",
+        provider: "whatsapp",
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome: applied.applied ? "recorded" : "ignored_status_only",
+        errorCode:
+          status.status === "failed" && status.errorCode
+            ? `meta_graph_${status.errorCode}`
+            : null,
+        summary: applied.applied
+          ? `delivery status ${status.status} applied`
+          : `stale delivery status ${status.status} ignored`,
+        payload,
+      });
+      if (!applied?.applied || !publisher) continue;
+      await publisher.publishNudge({
+        kind: applied.status === "failed" ? "message.failed" : "conversation.updated",
+        tenantId: account.tenantId,
+        conversationId: applied.conversationId,
       });
     }
-  }
-
-  for (const status of parsed.statuses) {
-    const account = await resolveAccount(status.phoneNumberId);
-    if (!account || account.status !== "connected") continue;
-    const applied = await applyWhatsAppMessageStatus(bundle.db, account, {
-      providerMessageId: status.providerMessageId,
-      status: status.status,
-      graphErrorCode: status.errorCode,
-    });
-    if (!applied?.applied || !publisher) continue;
-    await publisher.publishNudge({
-      kind: applied.status === "failed" ? "message.failed" : "conversation.updated",
-      tenantId: account.tenantId,
-      conversationId: applied.conversationId,
-    });
+  } catch (err) {
+    await logErrorOnce("whatsapp webhook processing failed");
+    throw err;
   }
 }
 

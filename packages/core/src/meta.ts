@@ -236,6 +236,8 @@ export interface RecordMetaInboundResult {
   message: Message;
   contactId: string;
   identityCreated: boolean;
+  /** Fase 7B.1: true bila mid ini kembaran yang sudah tercatat. */
+  duplicate: boolean;
 }
 
 export interface RecordMetaInboundInput {
@@ -345,7 +347,8 @@ export async function recordMetaInboundMessage(
       .from(messages)
       .where(eq(messages.providerMessageId, compositeId))
       .limit(1);
-    if (dupe) return { message: dupe, contactId, identityCreated: false };
+    if (dupe)
+      return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
     // ON CONFLICT DO NOTHING: SELECT dedup berjalan dalam konteks RLS
     // tenant ini sedangkan index-nya GLOBAL — kembaran milik tenant lain
@@ -389,7 +392,7 @@ export async function recordMetaInboundMessage(
       },
     });
 
-    return { message, contactId, identityCreated };
+    return { message, contactId, identityCreated, duplicate: false };
   });
 }
 

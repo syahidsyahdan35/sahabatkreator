@@ -55,7 +55,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 2 tabel Fase 2C (automation_steps, sequence_enrollments)
 // + 1 tabel Fase 6C (platform_settings)
 // + 1 tabel Fase 6D (profile_photos)
-assert.equal(Number(tablesRes.rows[0].count), 33);
+// + 1 tabel Fase 7B.1 (integration_log)
+assert.equal(Number(tablesRes.rows[0].count), 34);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -129,8 +130,11 @@ const policies = await db.query<{ count: string }>(
 //   (Fase 6I, migrasi 0023)
 // + `tenant_isolation` pada profile_photos (Fase 6D, migrasi 0025)
 // + 4 policy `meta_delivery_scan` (Fase 7A, migrasi 0026; migrasi 0027
-//   membuatnya ulang termasuk provider whatsapp — jumlah tetap) = 41.
-assert.equal(Number(policies.rows[0].count), 41);
+//   membuatnya ulang termasuk provider whatsapp — jumlah tetap)
+// + 4 policy integration_log (Fase 7B.1, migrasi 0028: tenant_isolation,
+//   integration_log_ingest, platform_integration_log,
+//   integration_log_prune) = 45.
+assert.equal(Number(policies.rows[0].count), 45);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -144,7 +148,7 @@ await db.exec(`
     agents, kb_documents, kb_chunks, agent_suggestions,
     products, payment_links,
     automation_steps, sequence_enrollments,
-    platform_settings, profile_photos
+    platform_settings, profile_photos, integration_log
   TO app_user;
 `);
 
@@ -1179,6 +1183,98 @@ assert.deepEqual(
 );
 console.log(
   "[20] Fase 7B: kolom parent_external_id (WABA) ada & terisi; pindai app.system_delivery='meta' membuka akun whatsapp lintas tenant dan antrean queued WhatsApp teresolusi ke wa_id penerima; flag 'telegram' tidak membuka baris WhatsApp: OK",
+);
+
+// ---------- 21. Fase 7B.1: integration_log — RLS berlapis ----------
+// Log integrasi ditulis dari konteks tanpa tenant (webhook/poller) dan
+// dibaca dari konteks tenant + platform. Ditanam sebagai superuser:
+// baris bertenant A & B, baris platform (tenant NULL) segar, dan satu
+// baris platform kedaluwarsa (31 hari) untuk prune. Sebagai app_user:
+// (a) tanpa konteks apa pun terlihat 0 baris;
+// (b) insert TANPA flag ingest ditolak; dengan flag ingest diterima
+//     (termasuk untuk tenant lain — penulis memang lintas tenant);
+// (c) konteks tenant A hanya melihat baris A (bukan B, bukan platform);
+// (d) flag platform admin hanya melihat baris tenant NULL;
+// (e) DELETE di bawah flag prune hanya menghapus baris kedaluwarsa.
+await db.query(
+  `INSERT INTO integration_log (direction, provider, tenant_id, outcome, summary)
+   VALUES ('in', 'telegram', $1, 'recorded', 'text message from Verify A'),
+          ('in', 'telegram', $2, 'recorded', 'text message from Verify B'),
+          ('in', 'meta', NULL, 'unresolved_account', 'unknown account'),
+          ('in', 'meta', NULL, 'unresolved_account', 'old unresolved')`,
+  [TENANT_A, TENANT_B],
+);
+await db.query(
+  `UPDATE integration_log SET created_at = now() - interval '31 days'
+    WHERE summary = 'old unresolved'`,
+);
+const logViews = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noContext = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM integration_log`,
+  );
+  let bareInsertBlocked = false;
+  await tx.query(`SAVEPOINT sp_log_bare`);
+  try {
+    await tx.query(
+      `INSERT INTO integration_log (direction, provider, tenant_id, outcome)
+       VALUES ('in', 'telegram', $1, 'recorded')`,
+      [TENANT_A],
+    );
+  } catch (err) {
+    bareInsertBlocked = /row-level security/i.test(String(err));
+  }
+  await tx.query(`ROLLBACK TO SAVEPOINT sp_log_bare`);
+  await tx.query(`SELECT set_config('app.integration_log', 'ingest', true)`);
+  await tx.query(
+    `INSERT INTO integration_log (direction, provider, tenant_id, outcome, summary)
+     VALUES ('out', 'telegram', $1, 'sent', 'ingested by verify')`,
+    [TENANT_B],
+  );
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  const tenantA = await tx.query<{ summary: string }>(
+    `SELECT summary FROM integration_log ORDER BY summary`,
+  );
+  await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+  await tx.query(
+    `SELECT set_config('app.platform_settings', 'admin', true)`,
+  );
+  const platform = await tx.query<{ summary: string }>(
+    `SELECT summary FROM integration_log ORDER BY summary`,
+  );
+  await tx.query(
+    `SELECT set_config('app.platform_settings', '', true)`,
+  );
+  await tx.query(`SELECT set_config('app.integration_log', 'prune', true)`);
+  await tx.query(
+    `DELETE FROM integration_log WHERE created_at < now() - interval '30 days'`,
+  );
+  await tx.query(`SELECT set_config('app.integration_log', '', true)`);
+  const remaining = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM integration_log`,
+  );
+  return { noContext, bareInsertBlocked, tenantA, platform, remaining };
+});
+assert.equal(logViews.noContext.rows[0].n, "0");
+assert.equal(logViews.bareInsertBlocked, true);
+assert.deepEqual(
+  logViews.tenantA.rows.map((r) => r.summary),
+  ["text message from Verify A"],
+);
+assert.deepEqual(
+  logViews.platform.rows.map((r) => r.summary),
+  ["old unresolved", "unknown account"],
+);
+// 5 baris ditanam/ditulis (A, B, platform segar, platform lama, ingest B);
+// prune membuang tepat 1 (yang kedaluwarsa). Sisa terlihat 0 karena
+// konteks sudah bersih — hitungan dicek sebagai superuser di bawah.
+assert.equal(logViews.remaining.rows[0].n, "0");
+const logTotal = await db.query<{ n: string }>(
+  `SELECT count(*)::text AS n FROM integration_log`,
+);
+assert.equal(logTotal.rows[0].n, "4");
+console.log(
+  "[21] Fase 7B.1: integration_log — tanpa konteks 0 baris; insert tanpa flag ingest ditolak, dengan flag diterima lintas tenant; konteks A hanya baris A; flag platform hanya baris tenant NULL; prune ber-flag hanya membuang baris >30 hari: OK",
 );
 
 await db.close();

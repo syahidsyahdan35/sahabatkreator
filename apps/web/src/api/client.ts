@@ -23,6 +23,8 @@ import type {
   CreateKbDocumentRequest,
   CreatePaymentLinkRequest,
   CreateProductRequest,
+  IntegrationLogDetailResponse,
+  IntegrationLogListResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   MessageListResponse,
@@ -646,6 +648,81 @@ export const api = {
       return request<PlatformSettingTestResult>(
         `/api/admin/settings/${key}/test`,
         { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  logs: {
+    /**
+     * GET /api/tenants/:tenantId/logs — daftar log integrasi workspace
+     * (Fase 7B.1; owner/admin saja, anggota biasa 403). Query dibangun
+     * dari filter yang terisi saja.
+     */
+    list(
+      tenantId: string,
+      query: {
+        provider?: string;
+        direction?: string;
+        outcome?: string;
+        channelAccountId?: string;
+        cursor?: string;
+        limit?: number;
+      } = {},
+    ): Promise<IntegrationLogListResponse> {
+      const params = new URLSearchParams();
+      if (query.provider) params.set("provider", query.provider);
+      if (query.direction) params.set("direction", query.direction);
+      if (query.outcome) params.set("outcome", query.outcome);
+      if (query.channelAccountId) {
+        params.set("channelAccountId", query.channelAccountId);
+      }
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<IntegrationLogListResponse>(
+        `/api/tenants/${tenantId}/logs${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/logs/:logId — detail + payload tersimpan. */
+    get(
+      tenantId: string,
+      logId: string,
+    ): Promise<IntegrationLogDetailResponse> {
+      return request<IntegrationLogDetailResponse>(
+        `/api/tenants/${tenantId}/logs/${logId}`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * GET /api/logs/unresolved — baris platform (tenant NULL) untuk sesi
+     * platform admin; sesi biasa menerima 404 dari API.
+     */
+    listUnresolved(
+      query: {
+        provider?: string;
+        direction?: string;
+        outcome?: string;
+        cursor?: string;
+        limit?: number;
+      } = {},
+    ): Promise<IntegrationLogListResponse> {
+      const params = new URLSearchParams();
+      if (query.provider) params.set("provider", query.provider);
+      if (query.direction) params.set("direction", query.direction);
+      if (query.outcome) params.set("outcome", query.outcome);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<IntegrationLogListResponse>(
+        `/api/logs/unresolved${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/logs/unresolved/:logId — detail baris platform + payload. */
+    getUnresolved(logId: string): Promise<IntegrationLogDetailResponse> {
+      return request<IntegrationLogDetailResponse>(
+        `/api/logs/unresolved/${logId}`,
+        { method: "GET" },
       );
     },
   },

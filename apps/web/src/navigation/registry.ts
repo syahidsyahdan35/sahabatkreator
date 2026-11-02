@@ -11,7 +11,8 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
  */
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
-  | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more";
+  | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more"
+  | "list";
 
 export interface NavItem {
   id: string;
@@ -38,10 +39,14 @@ export const NAV_REGISTRY: NavItem[] = [
   { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
   { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
   { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
+  // Log integrasi (Fase 7B.1): jejak webhook & pengiriman per workspace —
+  // grup utilitas bersama Settings/Admin di "More" (tab utama mobile
+  // tetap 4 sesuai keputusan desain).
+  { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
   // Panel Admin Platform (Fase 6C): `permission: "platformAdmin"` — item
   // hanya dirender untuk user ber-flag isPlatformAdmin (lihat
   // filterNavItems); gerbang sesungguhnya ada di API (non-admin → 404).
-  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
+  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
 ];
 
 /**

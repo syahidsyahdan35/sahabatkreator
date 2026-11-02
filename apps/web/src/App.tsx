@@ -39,6 +39,7 @@ import { ChannelsPage } from "./pages/ChannelsPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AdminPage } from "./pages/AdminPage";
+import { LogsPage } from "./pages/LogsPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
@@ -230,6 +231,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <ProductsPage t={t} locale={locale} />
         ) : activeId === "settings" ? (
           <SettingsPage t={t} locale={locale} />
+        ) : activeId === "logs" ? (
+          <LogsPage t={t} locale={locale} isPlatformAdmin={isPlatformAdmin} />
         ) : activeId === "admin" && isPlatformAdmin ? (
           <AdminPage t={t} locale={locale} />
         ) : (

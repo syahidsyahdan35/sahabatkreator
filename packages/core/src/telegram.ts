@@ -168,6 +168,12 @@ export interface RecordTelegramInboundResult {
   message: Message;
   contactId: string;
   identityCreated: boolean;
+  /**
+   * Fase 7B.1: true bila pesan ini KEMBARAN yang sudah tercatat
+   * (retry webhook) — route webhook mencatatnya ke log integrasi
+   * sebagai outcome `duplicate`, bukan `recorded`.
+   */
+  duplicate: boolean;
 }
 
 export interface RecordTelegramInboundInput {
@@ -332,7 +338,8 @@ export async function recordTelegramInboundMessage(
       .from(messages)
       .where(eq(messages.providerMessageId, input.providerMessageId))
       .limit(1);
-    if (dupe) return { message: dupe, contactId, identityCreated: false };
+    if (dupe)
+      return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
     // ON CONFLICT DO NOTHING (tanpa target = semua index unik; satu-
     // satunya index unik di messages adalah provider_message_id):
@@ -388,7 +395,7 @@ export async function recordTelegramInboundMessage(
       },
     });
 
-    return { message, contactId, identityCreated };
+    return { message, contactId, identityCreated, duplicate: false };
   });
 }
 
@@ -508,6 +515,16 @@ export interface RecordTelegramChannelPostInput {
 }
 
 /**
+ * Hasil pencatatan channel_post (Fase 7B.1): `duplicate` menandai
+ * pantulan/retry yang menemukan baris yang sudah ada, agar route
+ * webhook bisa mencatat outcome log integrasi yang jujur.
+ */
+export interface RecordTelegramChannelPostResult {
+  message: Message;
+  duplicate: boolean;
+}
+
+/**
  * Mencatat satu `channel_post` Telegram ke linimasa percakapan channel
  * (Fase 6A.2). Semantik BERBEDA dari pesan percakapan biasa, disengaja:
  *
@@ -529,7 +546,7 @@ export async function recordTelegramChannelPost(
   db: Database,
   account: Pick<TelegramAccountRef, "id" | "tenantId">,
   input: RecordTelegramChannelPostInput,
-): Promise<Message | null> {
+): Promise<RecordTelegramChannelPostResult | null> {
   return withTenantDb(db, account.tenantId, async (tx) => {
     // (1) Dedup: pantulan postingan sendiri / retry update yang sama.
     const [dupe] = await tx
@@ -537,7 +554,7 @@ export async function recordTelegramChannelPost(
       .from(messages)
       .where(eq(messages.providerMessageId, input.providerMessageId))
       .limit(1);
-    if (dupe) return dupe;
+    if (dupe) return { message: dupe, duplicate: true };
 
     const { conversationId } = await ensureTelegramChannelConversation(
       tx,
@@ -572,7 +589,7 @@ export async function recordTelegramChannelPost(
       .set({ lastMessageAt: now, updatedAt: now })
       .where(eq(conversations.id, conversationId));
 
-    return message;
+    return { message, duplicate: false };
   });
 }
 

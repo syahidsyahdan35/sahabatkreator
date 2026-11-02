@@ -29,7 +29,8 @@
     "verify:agent-tools": "tsx scripts/verify-agent-tools.ts",
     "verify:sequences": "tsx scripts/verify-sequences.ts",
     "verify:platform-settings": "tsx scripts/verify-platform-settings.ts",
-    "purge:channels": "tsx scripts/purge-trashed-channels.ts"
+    "purge:channels": "tsx scripts/purge-trashed-channels.ts",
+    "prune:logs": "tsx scripts/prune-integration-logs.ts"
   },
   "type": "module",
   "types": "./src/index.ts",

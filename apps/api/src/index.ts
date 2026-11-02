@@ -33,6 +33,7 @@ import { createMetaRoutes } from "./modules/meta/routes";
 import { startMetaDeliveryPoller } from "./modules/meta/poller";
 import { createAvatarsRoutes } from "./modules/avatars/routes";
 import { createAdminRoutes } from "./modules/admin/routes";
+import { createLogsRoutes } from "./modules/logs/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -109,6 +110,14 @@ const platformOptions: PlatformSettingsOptions = {
   },
 };
 
+// Modul log integrasi (Fase 7B.1) — pembacaan integration_log:
+// /tenants/:tenantId/logs (owner/admin) + /logs/unresolved (platform admin).
+routes.route(
+  "/",
+  createLogsRoutes(authBundle, {
+    platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
+  }),
+);
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...

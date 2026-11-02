@@ -159,6 +159,7 @@ export {
   type RecordTelegramInboundInput,
   type RecordTelegramInboundResult,
   type RecordTelegramChannelPostInput,
+  type RecordTelegramChannelPostResult,
   type TelegramQueuedDelivery,
   type TelegramMyChatMemberInput,
 } from "./telegram";
@@ -260,6 +261,24 @@ export {
   type CreatedApiKey,
   type GeneratedApiKey,
 } from "./api-keys";
+export {
+  INTEGRATION_LOG_PAYLOAD_MAX_CHARS,
+  INTEGRATION_LOG_RETENTION_DAYS,
+  capIntegrationLogPayload,
+  recordIntegrationLog,
+  listIntegrationLogs,
+  getIntegrationLog,
+  listUnresolvedIntegrationLogs,
+  getUnresolvedIntegrationLog,
+  pruneIntegrationLogs,
+  type IntegrationLogDirection,
+  type IntegrationLogInboundOutcome,
+  type IntegrationLogOutboundOutcome,
+  type IntegrationLogOutcome,
+  type RecordIntegrationLogInput,
+  type ListIntegrationLogsInput,
+  type IntegrationLogPage,
+} from "./integration-log";
 export {
   PLATFORM_SETTING_KEYS,
   PLATFORM_SETTINGS_CACHE_TTL_MS,

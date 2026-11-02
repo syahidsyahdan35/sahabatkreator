@@ -3,6 +3,8 @@ import {
   listQueuedMetaDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
+  recordIntegrationLog,
+  type MetaQueuedDelivery,
 } from "@sahabat-kreator/core";
 import {
   MetaGraphClient,
@@ -66,6 +68,35 @@ export function startMetaDeliveryPoller(
   let running = false;
   let warnedNoSecret = false;
 
+  /**
+   * Fase 7B.1: setiap percobaan kirim (termasuk gagal pra-kirim)
+   * meninggalkan baris log integrasi arah 'out' dengan provider konkret
+   * delivery (messenger/instagram/whatsapp) — best-effort.
+   */
+  const logOut = async (
+    delivery: MetaQueuedDelivery,
+    outcome: "sent" | "failed",
+    errorCode: string | null,
+  ): Promise<void> => {
+    try {
+      await recordIntegrationLog(bundle.db, {
+        direction: "out",
+        provider: delivery.provider,
+        tenantId: delivery.tenantId,
+        channelAccountId: delivery.channelAccountId,
+        messageId: delivery.messageId,
+        outcome,
+        errorCode,
+        summary:
+          outcome === "sent"
+            ? `message sent to ${delivery.recipientExternalId}`
+            : `send to ${delivery.recipientExternalId} failed`,
+      });
+    } catch {
+      // Sengaja ditelan: log tidak boleh menjatuhkan poller.
+    }
+  };
+
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
@@ -100,6 +131,7 @@ export function startMetaDeliveryPoller(
             "meta-poller",
             "meta_empty_text",
           );
+          await logOut(delivery, "failed", "meta_empty_text");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -111,6 +143,7 @@ export function startMetaDeliveryPoller(
             "meta-poller",
             "meta_missing_credentials",
           );
+          await logOut(delivery, "failed", "meta_missing_credentials");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -126,6 +159,7 @@ export function startMetaDeliveryPoller(
             "meta-poller",
             "meta_token_undecryptable",
           );
+          await logOut(delivery, "failed", "meta_token_undecryptable");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -186,6 +220,7 @@ export function startMetaDeliveryPoller(
               "meta-poller",
             );
           }
+          await logOut(delivery, "sent", null);
           await nudgeStatus("message.sent");
         } catch (err) {
           const graphErr =
@@ -209,6 +244,7 @@ export function startMetaDeliveryPoller(
             "meta-poller",
             code,
           );
+          await logOut(delivery, "failed", code);
           await nudgeStatus("message.failed");
         }
       }

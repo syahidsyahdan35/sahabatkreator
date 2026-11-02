@@ -3,8 +3,10 @@ import { loadEnv } from "@sahabat-kreator/config";
 import { createDb } from "@sahabat-kreator/db";
 import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
 import {
+  INTEGRATION_LOG_RETENTION_DAYS,
   evaluateInboundMessageForAutomations,
   executeSequenceStep,
+  pruneIntegrationLogs,
   purgeExpiredTrashedChannels,
   relayUnpublishedOutboxEvents,
   resolveOpenRouterConfig,
@@ -361,6 +363,34 @@ async function purgeTick(): Promise<void> {
 const purgeTimer = setInterval(() => void purgeTick(), PURGE_INTERVAL_MS);
 void purgeTick();
 
+// ---------------------------------------------------------------------------
+// Prune log integrasi (Fase 7B.1): baris `integration_log` lebih tua dari
+// retensi (30 hari) dihapus oleh core `pruneIntegrationLogs` di bawah
+// flag RLS prune. Pola poller yang sama seperti purge Sampah: sekali
+// saat boot lalu tiap jam, penjaga anti-tumpang-tindih, tanpa BullMQ.
+// Jalan run-once untuk pengujian/operasi: `pnpm prune:logs` (skrip
+// scripts/prune-integration-logs.ts).
+const LOG_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+let logPruneRunning = false;
+async function logPruneTick(): Promise<void> {
+  if (logPruneRunning) return;
+  logPruneRunning = true;
+  try {
+    const result = await pruneIntegrationLogs(db);
+    if (result.deleted > 0) {
+      console.log(
+        `[worker] integration log prune: ${result.deleted} baris >${INTEGRATION_LOG_RETENTION_DAYS} hari terhapus`,
+      );
+    }
+  } catch (err) {
+    console.error("[worker] integration log prune gagal (akan dicoba lagi):", err);
+  } finally {
+    logPruneRunning = false;
+  }
+}
+const logPruneTimer = setInterval(() => void logPruneTick(), LOG_PRUNE_INTERVAL_MS);
+void logPruneTick();
+
 console.log(
   `[worker] Sahabat Kreator worker aktif — antrean "${MAIN_QUEUE_NAME}", relay outbox tiap ${RELAY_INTERVAL_MS}ms`,
 );
@@ -372,6 +402,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`[worker] menerima ${signal}, berhenti secara anggun...`);
   clearInterval(relayTimer);
   clearInterval(purgeTimer);
+  clearInterval(logPruneTimer);
   await bullWorker.close();
   await queue.close();
   realtimePublisher.close();

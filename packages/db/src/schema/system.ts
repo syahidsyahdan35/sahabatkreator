@@ -1,4 +1,5 @@
 import {
+  boolean,
   index,
   jsonb,
   numeric,
@@ -10,6 +11,8 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
+import { channelAccounts } from "./channels";
+import { messages } from "./inbox";
 
 /**
  * Tabel sistem fondasi (RANCANGAN §2 & §6):
@@ -20,6 +23,12 @@ import { tenants } from "./tenants";
  * - audit_logs    : jejak setiap aksi penting, terutama aksi otonom AI agent.
  * - usage_ledger  : metering APPEND-ONLY (sengaja tanpa updated_at) untuk
  *                   billing; mencatat qty + biaya model + biaya provider.
+ * - integration_log: log observabilitas integrasi (Fase 7B.1) — SETIAP hit
+ *                   webhook provider (telegram/meta) dan SETIAP percobaan
+ *                   kirim keluar poller tercatat dengan outcome jujur.
+ *                   Terpisah dari webhook_inbox di atas: tabel itu tetap
+ *                   dedup provider; tabel ini lapisan observabilitasnya
+ *                   (payload dibatasi ±32KB, retensi 30 hari oleh worker).
  */
 
 export const auditActorTypeEnum = pgEnum("audit_actor_type", [
@@ -132,6 +141,76 @@ export const usageLedger = pgTable(
   ],
 );
 
+export const integrationDirectionEnum = pgEnum("integration_direction", [
+  "in",
+  "out",
+]);
+
+/**
+ * Log integrasi (Fase 7B.1) — APPEND-ONLY, satu baris per hit webhook
+ * (direction 'in') atau per percobaan kirim keluar poller (direction
+ * 'out'). Kolom penjelas:
+ *
+ * - `tenantId` NULLABLE: hit yang tidak ter-resolve ke tenant mana pun
+ *   (akun tak dikenal, tanda tangan buruk sebelum resolusi, handshake)
+ *   tetap tercatat sebagai baris platform — hanya terlihat lewat flag
+ *   platform-admin (policy `platform_integration_log`, pola 0022).
+ * - `channelAccountId` / `messageId`: FK `ON DELETE SET NULL` — purge
+ *   channel/pesan (Fase 6I) tidak menghapus sejarah log; barisnya tetap
+ *   ada dengan ringkasan teksnya, tautannya saja yang lepas.
+ * - `signatureValid`: hanya bermakna untuk direction 'in' (telegram:
+ *   secret token; meta: HMAC-SHA256). NULL = tidak berlaku / belum bisa
+ *   dinilai (mis. akun tak dikenal sehingga secret tak bisa dicek, atau
+ *   arah 'out'). Nilai secret/tanda tangan TIDAK PERNAH disimpan — hanya
+ *   boolean ini.
+ * - `outcome`: teks terkendali (union di @sahabat-kreator/contracts &
+ *   core/integration-log): in → recorded | duplicate |
+ *   ignored_disconnected | ignored_echo | ignored_status_only |
+ *   rejected_signature | rejected_unconfigured | unresolved_account |
+ *   error; out → sent | failed.
+ * - `payload`: payload webhook mentah (in) — DIBATASI ±32KB oleh penulis
+ *   di core; payload yang lebih besar disimpan sebagai objek penanda
+ *   `{ truncated: true, originalSize, preview }`. Untuk 'out' payload
+ *   selalu NULL (isi pesan sudah ada di tabel messages; log cukup
+ *   menunjuk messageId).
+ */
+export const integrationLog = pgTable(
+  "integration_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    direction: integrationDirectionEnum("direction").notNull(),
+    /** 'telegram' | 'messenger' | 'instagram' | 'whatsapp' | 'meta' (pra-rute). */
+    provider: varchar("provider", { length: 32 }).notNull(),
+    tenantId: uuid("tenant_id").references(() => tenants.id, {
+      onDelete: "cascade",
+    }),
+    channelAccountId: uuid("channel_account_id").references(
+      () => channelAccounts.id,
+      { onDelete: "set null" },
+    ),
+    /** Hanya untuk direction 'out': pesan yang dicoba dikirim. */
+    messageId: uuid("message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    signatureValid: boolean("signature_valid"),
+    outcome: varchar("outcome", { length: 32 }).notNull(),
+    /** Kode error provider/sistem yang aman (tanpa rahasia), mis. `meta_graph_131047`. */
+    errorCode: varchar("error_code", { length: 128 }),
+    /** Ringkasan pendek buatan server, mis. "text message from 62812…". */
+    summary: varchar("summary", { length: 255 }),
+    payload: jsonb("payload"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // APPEND-ONLY: sengaja TIDAK ada updated_at.
+  },
+  (t) => [
+    index("integration_log_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("integration_log_created_at_idx").on(t.createdAt),
+    index("integration_log_channel_account_idx").on(t.channelAccountId),
+  ],
+);
+
 export type WebhookInboxRow = typeof webhookInbox.$inferSelect;
 export type NewWebhookInboxRow = typeof webhookInbox.$inferInsert;
 export type OutboxEvent = typeof outboxEvents.$inferSelect;
@@ -140,3 +219,5 @@ export type AuditLog = typeof auditLogs.$inferSelect;
 export type NewAuditLog = typeof auditLogs.$inferInsert;
 export type UsageLedgerRow = typeof usageLedger.$inferSelect;
 export type NewUsageLedgerRow = typeof usageLedger.$inferInsert;
+export type IntegrationLogRow = typeof integrationLog.$inferSelect;
+export type NewIntegrationLogRow = typeof integrationLog.$inferInsert;

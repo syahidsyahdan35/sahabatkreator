@@ -1090,3 +1090,104 @@ export const PlatformSettingTestResultSchema = z.object({
 export type PlatformSettingTestResult = z.infer<
   typeof PlatformSettingTestResultSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Log integrasi webhook & pengiriman (Fase 7B.1)
+// ---------------------------------------------------------------------------
+
+export const IntegrationLogDirectionSchema = z.enum(["in", "out"]);
+export type IntegrationLogDirection = z.infer<
+  typeof IntegrationLogDirectionSchema
+>;
+
+/**
+ * Provider pada baris log. `meta` = hit webhook Meta SEBELUM ter-rute ke
+ * provider konkret (tanda tangan buruk / belum terkonfigurasi / akun tak
+ * dikenal di gerbang bersama). `webchat` dicadangkan (flush webchat bukan
+ * percobaan API provider dan tidak dicatat di v1).
+ */
+export const IntegrationLogProviderSchema = z.enum([
+  "telegram",
+  "messenger",
+  "instagram",
+  "whatsapp",
+  "webchat",
+  "meta",
+]);
+export type IntegrationLogProvider = z.infer<
+  typeof IntegrationLogProviderSchema
+>;
+
+/** Outcome terkendali — union arah masuk & keluar (kolom `outcome`). */
+export const IntegrationLogOutcomeSchema = z.enum([
+  // arah masuk
+  "recorded",
+  "duplicate",
+  "ignored_disconnected",
+  "ignored_echo",
+  "ignored_status_only",
+  "rejected_signature",
+  "rejected_unconfigured",
+  "unresolved_account",
+  "error",
+  // arah keluar
+  "sent",
+  "failed",
+]);
+export type IntegrationLogOutcome = z.infer<typeof IntegrationLogOutcomeSchema>;
+
+/**
+ * Satu baris log integrasi sebagaimana tampil di daftar (TANPA payload —
+ * payload hanya di endpoint detail; payload memuat isi pesan pelanggan
+ * dan endpoint-nya owner/admin saja). `hasPayload` memberi tahu UI
+ * apakah detail punya payload untuk ditampilkan.
+ */
+export const IntegrationLogResponseSchema = z.object({
+  id: z.string().uuid(),
+  direction: IntegrationLogDirectionSchema,
+  provider: z.string(),
+  tenantId: z.string().uuid().nullable(),
+  channelAccountId: z.string().uuid().nullable(),
+  messageId: z.string().uuid().nullable(),
+  /** Hanya arah 'in'; null = tidak berlaku/belum bisa dinilai. */
+  signatureValid: z.boolean().nullable(),
+  outcome: IntegrationLogOutcomeSchema,
+  errorCode: z.string().nullable(),
+  summary: z.string().nullable(),
+  hasPayload: z.boolean(),
+  createdAt: z.string().datetime(),
+});
+export type IntegrationLogResponse = z.infer<
+  typeof IntegrationLogResponseSchema
+>;
+
+/** Detail satu baris log: daftar + payload tersimpan (sudah dibatasi ±32KB di server). */
+export const IntegrationLogDetailResponseSchema =
+  IntegrationLogResponseSchema.extend({
+    payload: z.unknown().nullable(),
+  });
+export type IntegrationLogDetailResponse = z.infer<
+  typeof IntegrationLogDetailResponseSchema
+>;
+
+export const IntegrationLogListResponseSchema = z.object({
+  logs: z.array(IntegrationLogResponseSchema),
+  /** Kursor opaque halaman berikutnya; null = habis. */
+  nextCursor: z.string().nullable(),
+});
+export type IntegrationLogListResponse = z.infer<
+  typeof IntegrationLogListResponseSchema
+>;
+
+/** Query daftar log: filter + paginasi kursor (bukan offset). */
+export const IntegrationLogListQuerySchema = z.object({
+  provider: IntegrationLogProviderSchema.optional(),
+  direction: IntegrationLogDirectionSchema.optional(),
+  outcome: IntegrationLogOutcomeSchema.optional(),
+  channelAccountId: z.string().uuid().optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type IntegrationLogListQuery = z.infer<
+  typeof IntegrationLogListQuerySchema
+>;

@@ -3,6 +3,8 @@ import {
   listQueuedTelegramDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
+  recordIntegrationLog,
+  type TelegramQueuedDelivery,
 } from "@sahabat-kreator/core";
 import {
   TelegramApiError,
@@ -55,6 +57,35 @@ export function startTelegramDeliveryPoller(
   let running = false;
   let warnedNoSecret = false;
 
+  /**
+   * Fase 7B.1: setiap percobaan kirim (termasuk gagal pra-kirim)
+   * meninggalkan baris log integrasi arah 'out' yang terhubung ke
+   * messageId — best-effort, tidak pernah mengubah hasil pengiriman.
+   */
+  const logOut = async (
+    delivery: TelegramQueuedDelivery,
+    outcome: "sent" | "failed",
+    errorCode: string | null,
+  ): Promise<void> => {
+    try {
+      await recordIntegrationLog(bundle.db, {
+        direction: "out",
+        provider: "telegram",
+        tenantId: delivery.tenantId,
+        channelAccountId: delivery.channelAccountId,
+        messageId: delivery.messageId,
+        outcome,
+        errorCode,
+        summary:
+          outcome === "sent"
+            ? `message sent to chat ${delivery.chatExternalId}`
+            : `send to chat ${delivery.chatExternalId} failed`,
+      });
+    } catch {
+      // Sengaja ditelan: log tidak boleh menjatuhkan poller.
+    }
+  };
+
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
@@ -91,6 +122,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_empty_text",
           );
+          await logOut(delivery, "failed", "telegram_empty_text");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -102,6 +134,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_missing_credentials",
           );
+          await logOut(delivery, "failed", "telegram_missing_credentials");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -117,6 +150,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             "telegram_token_undecryptable",
           );
+          await logOut(delivery, "failed", "telegram_token_undecryptable");
           await nudgeStatus("message.failed");
           continue;
         }
@@ -156,6 +190,7 @@ export function startTelegramDeliveryPoller(
               "telegram-poller",
             );
           }
+          await logOut(delivery, "sent", null);
           await nudgeStatus("message.sent");
         } catch (err) {
           const code =
@@ -174,6 +209,7 @@ export function startTelegramDeliveryPoller(
             "telegram-poller",
             code,
           );
+          await logOut(delivery, "failed", code);
           await nudgeStatus("message.failed");
         }
       }

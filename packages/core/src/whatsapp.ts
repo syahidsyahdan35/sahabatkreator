@@ -232,6 +232,8 @@ export interface RecordWhatsAppInboundResult {
   message: Message;
   contactId: string;
   identityCreated: boolean;
+  /** Fase 7B.1: true bila wamid ini kembaran yang sudah tercatat. */
+  duplicate: boolean;
 }
 
 export interface RecordWhatsAppInboundInput {
@@ -360,7 +362,8 @@ export async function recordWhatsAppInboundMessage(
       .from(messages)
       .where(eq(messages.providerMessageId, compositeId))
       .limit(1);
-    if (dupe) return { message: dupe, contactId, identityCreated: false };
+    if (dupe)
+      return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
     // ON CONFLICT DO NOTHING: index uniknya global sedangkan SELECT
     // dedup terkurung RLS tenant ini (pelajaran 6A.1/7A).
@@ -401,7 +404,7 @@ export async function recordWhatsAppInboundMessage(
       },
     });
 
-    return { message, contactId, identityCreated };
+    return { message, contactId, identityCreated, duplicate: false };
   });
 }
 
