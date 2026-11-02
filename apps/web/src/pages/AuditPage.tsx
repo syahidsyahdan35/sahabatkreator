@@ -105,6 +105,7 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "agent.suggestion_rejected": "audit.actionAgentSuggestionRejected",
   "contact.tagged": "audit.actionContactTagged",
   "contact.stage_changed": "audit.actionContactStageChanged",
+  "contact.merged": "audit.actionContactMerged",
   "payment_link.created": "audit.actionPaymentLinkCreated",
   "payment.paid": "audit.actionPaymentPaid",
   "api_key.created": "audit.actionApiKeyCreated",

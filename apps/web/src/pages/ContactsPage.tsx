@@ -6,6 +6,7 @@ import {
   type FormEvent,
 } from "react";
 import type {
+  ContactDuplicatesResponse,
   ContactResponse,
   OptInStatus,
 } from "@sahabat-kreator/contracts";
@@ -71,6 +72,50 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
   const [showForm, setShowForm] = useState(false);
   const [selected, setSelected] = useState<ContactResponse | null>(null);
   const requestSeq = useRef(0);
+
+  // Kandidat duplikat (Fase 9B): dimuat terpisah dari daftar utama;
+  // seksinya hanya tampil bila ada kandidat.
+  const [dupGroups, setDupGroups] = useState<
+    ContactDuplicatesResponse["groups"]
+  >([]);
+  const [dupError, setDupError] = useState<string | null>(null);
+  const [mergePair, setMergePair] = useState<{
+    survivor: ContactResponse;
+    merged: ContactResponse;
+  } | null>(null);
+  const [merging, setMerging] = useState(false);
+  const canMerge = active?.role === "owner" || active?.role === "admin";
+
+  const loadDuplicates = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      const body = await api.contacts.duplicates(tenantId);
+      setDupGroups(body.groups);
+      setDupError(null);
+    } catch {
+      // Kegagalan memuat kandidat tidak boleh menghalangi daftar utama.
+      setDupError(t("contacts.duplicates.loadError"));
+    }
+  }, [tenantId, t]);
+
+  useEffect(() => {
+    void loadDuplicates();
+  }, [loadDuplicates]);
+
+  const confirmMerge = async () => {
+    if (!tenantId || !mergePair) return;
+    setMerging(true);
+    try {
+      await api.contacts.merge(tenantId, mergePair.survivor.id, mergePair.merged.id);
+      setMergePair(null);
+      await Promise.all([loadFirst(), loadDuplicates()]);
+    } catch (err) {
+      setError(translateApiError(t, err));
+      setMergePair(null);
+    } finally {
+      setMerging(false);
+    }
+  };
 
   // Debounce kolom pencarian → query `search` API.
   useEffect(() => {
@@ -186,8 +231,103 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
             setShowForm(false);
             setItems((prev) => [contact, ...prev]);
             setTotal((prev) => prev + 1);
+            void loadDuplicates();
           }}
         />
+      ) : null}
+
+      {dupError ? (
+        <p className="mt-4 text-xs text-danger">{dupError}</p>
+      ) : null}
+
+      {dupGroups.length > 0 ? (
+        <div className="mt-5 rounded-xl border border-line bg-surface p-4">
+          <h2 className="text-sm font-semibold text-ink">
+            {t("contacts.duplicates.title")}
+          </h2>
+          <p className="mt-1 text-xs text-muted">
+            {t("contacts.duplicates.subtitle")}
+          </p>
+          {!canMerge ? (
+            <p className="mt-2 text-xs text-muted">
+              {t("contacts.duplicates.forbiddenNote")}
+            </p>
+          ) : null}
+          <div className="mt-3 space-y-3">
+            {dupGroups.map((group, gi) => {
+              const [survivor, ...others] = group.contacts;
+              if (!survivor) return null;
+              return (
+                <div
+                  key={gi}
+                  className="rounded-lg border border-line bg-elevated/40 p-3"
+                >
+                  <div className="flex flex-wrap gap-1">
+                    {group.reasons.map((reason, ri) => (
+                      <span
+                        key={ri}
+                        className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent"
+                      >
+                        {reason.type === "phone"
+                          ? t("contacts.duplicates.reasonPhone")
+                          : reason.type === "email"
+                            ? t("contacts.duplicates.reasonEmail")
+                            : t("contacts.duplicates.reasonIdentity", {
+                                provider:
+                                  reason.value.split(":")[0] ?? reason.value,
+                              })}
+                        {reason.type !== "channel_identity"
+                          ? `: ${reason.value}`
+                          : ""}
+                      </span>
+                    ))}
+                  </div>
+                  <ul className="mt-2 space-y-2">
+                    {group.contacts.map((contact) => {
+                      const isSurvivor = contact.id === survivor.id;
+                      return (
+                        <li
+                          key={contact.id}
+                          className="flex flex-wrap items-center gap-2 text-sm"
+                        >
+                          <Avatar
+                            name={contact.name}
+                            imageUrl={contact.avatarUrl}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium text-ink">
+                              {contact.name}
+                            </span>
+                            <span className="block truncate text-xs text-muted">
+                              {[contact.phone, contact.email]
+                                .filter(Boolean)
+                                .join(" · ") || "—"}
+                            </span>
+                          </span>
+                          {isSurvivor ? (
+                            <span className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-semibold text-white">
+                              {t("contacts.duplicates.keptLabel")}
+                            </span>
+                          ) : canMerge ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMergePair({ survivor, merged: contact })
+                              }
+                              className="rounded-lg bg-elevated px-3 py-1.5 text-xs font-semibold text-ink"
+                            >
+                              {t("contacts.duplicates.mergeButton")}
+                            </button>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       ) : null}
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -294,6 +434,42 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
             setSelected(updated);
           }}
         />
+      ) : null}
+
+      {mergePair ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-line bg-surface p-5">
+            <h2 className="text-base font-semibold text-ink">
+              {t("contacts.duplicates.confirmTitle")}
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              {t("contacts.duplicates.confirmBody", {
+                merged: mergePair.merged.name,
+                survivor: mergePair.survivor.name,
+              })}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setMergePair(null)}
+                disabled={merging}
+                className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink disabled:opacity-60"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmMerge()}
+                disabled={merging}
+                className="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {merging
+                  ? t("contacts.duplicates.merging")
+                  : t("contacts.duplicates.confirmButton")}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );

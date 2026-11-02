@@ -1,17 +1,21 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  ContactDuplicatesResponseSchema,
   ContactListResponseSchema,
   ContactResponseSchema,
   CreateContactRequestSchema,
+  MergeContactRequestSchema,
   UpdateContactRequestSchema,
   type ContactResponse,
 } from "@sahabat-kreator/contracts";
 import {
   createContact,
+  findDuplicateContacts,
   getContact,
   listContacts,
   listProfilePhotoOwnerIds,
+  mergeContacts,
   updateContact,
 } from "@sahabat-kreator/core";
 import type { Contact } from "@sahabat-kreator/db";
@@ -87,7 +91,9 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
   if (!bundle) {
     app.post(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.get(base, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.get(`${base}/duplicates`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.get(`${base}/:id`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
+    app.post(`${base}/:id/merge`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     app.patch(`${base}/:id`, (c) => apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"));
     return app;
   }
@@ -138,6 +144,34 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     return c.json(body);
   });
 
+  // GET /tenants/:tenantId/contacts/duplicates — kelompok kandidat
+  // duplikat (Fase 9B). Didaftarkan SEBELUM "/:id" agar segmen
+  // "duplicates" tidak tertangkap sebagai id kontak. Boleh dibaca
+  // semua member; merge-nya yang digerbang owner/admin.
+  app.get(`${base}/duplicates`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const groups = await findDuplicateContacts(bundle.db, { tenantId: tenant.id });
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: tenant.id },
+      "contact",
+      groups.flatMap((g) => g.contacts.map((row) => row.id)),
+    );
+    const body = ContactDuplicatesResponseSchema.parse({
+      groups: groups.map((g) => ({
+        contacts: g.contacts.map((row) =>
+          serializeContact(
+            row,
+            withPhoto.has(row.id) ? contactAvatarUrl(tenant.id, row.id) : null,
+          ),
+        ),
+        reasons: g.reasons,
+      })),
+    });
+    return c.json(body);
+  });
+
   app.get(`${base}/:id`, async (c) => {
     const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
     if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
@@ -149,6 +183,51 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
     return c.json(
       serializeContact(contact, await singleContactAvatarUrl(bundle, tenant.id, id)),
+    );
+  });
+
+  // POST /tenants/:tenantId/contacts/:id/merge — gabungkan kontak lain
+  // (body.mergedId) KE kontak :id (survivor). Owner/admin saja; satu
+  // transaksi di core (`mergeContacts`); audit contact.merged di sana.
+  app.post(`${base}/:id/merge`, async (c) => {
+    const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    if (tenant.role !== "owner" && tenant.role !== "admin") {
+      return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can merge contacts");
+    }
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = MergeContactRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid contact payload");
+    }
+    if (parsed.data.mergedId === id) {
+      return apiError(c, 422, "CONTACT_MERGE_SAME", "A contact cannot be merged into itself");
+    }
+    const result = await mergeContacts(
+      bundle.db,
+      { tenantId: tenant.id, userId: c.get("appUser").id },
+      { survivorId: id, mergedId: parsed.data.mergedId },
+    );
+    if (result.kind === "not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    if (result.kind === "same_contact") {
+      return apiError(c, 422, "CONTACT_MERGE_SAME", "A contact cannot be merged into itself");
+    }
+    return c.json(
+      serializeContact(
+        result.survivor,
+        await singleContactAvatarUrl(bundle, tenant.id, result.survivor.id),
+      ),
     );
   });
 
