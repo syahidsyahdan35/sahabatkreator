@@ -10,6 +10,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { LEGAL_PATHS } from "../components/LegalLinks";
 import { formatDateTime } from "../utils/format";
 
 type Translate = (
@@ -27,6 +28,46 @@ const TESTABLE: ReadonlySet<PlatformSettingKey> = new Set([
   "r2_access_key_id",
   "r2_secret_access_key",
 ]);
+
+/**
+ * Baris URL read-only + tombol salin (Fase 7D.1) — pola yang sama dengan
+ * baris Redirect URI OAuth: nilai ditampilkan mono, salin memberi
+ * umpan balik "Tersalin!" selama 2 detik. State salin per baris.
+ */
+function CopyableUrlRow({
+  t,
+  label,
+  url,
+}: {
+  t: Translate;
+  label: string;
+  url: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="rounded-xl bg-surface p-3">
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className="mt-0.5 flex flex-wrap items-center gap-2">
+        <span className="break-all font-mono text-xs text-ink">{url}</span>
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard
+              ?.writeText(url)
+              .then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              })
+              .catch(() => undefined);
+          }}
+          className="rounded-md bg-elevated px-2 py-1 text-xs font-medium text-ink"
+        >
+          {copied ? t("admin.copiedLabel") : t("admin.copyButton")}
+        </button>
+      </dd>
+    </div>
+  );
+}
 
 const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
   openrouter_api_key: "admin.openrouterApiKeyLabel",
@@ -248,6 +289,27 @@ export function AdminPage({ t, locale }: AdminPageProps) {
                 {metaInfo.waConfigId ?? "—"}
               </dd>
             </div>
+            {/*
+              Fase 7D.1 — URL halaman legal publik untuk diisi ke
+              pengaturan aplikasi Meta (Privasi & instruksi penghapusan
+              data wajib ada untuk App Review). Nilainya diturunkan dari
+              origin publik saat ini + path tetap halaman legal.
+            */}
+            <CopyableUrlRow
+              t={t}
+              label={t("admin.metaPrivacyUrlLabel")}
+              url={`${window.location.origin}${LEGAL_PATHS.privacy}`}
+            />
+            <CopyableUrlRow
+              t={t}
+              label={t("admin.metaTermsUrlLabel")}
+              url={`${window.location.origin}${LEGAL_PATHS.terms}`}
+            />
+            <CopyableUrlRow
+              t={t}
+              label={t("admin.metaDeletionUrlLabel")}
+              url={`${window.location.origin}${LEGAL_PATHS.deletion}`}
+            />
           </dl>
         ) : null}
         <div className="mt-4 space-y-3">

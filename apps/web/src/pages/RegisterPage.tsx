@@ -9,6 +9,7 @@ import {
   inputClassName,
   primaryButtonClassName,
 } from "../components/AuthLayout";
+import { LegalLinks } from "../components/LegalLinks";
 
 type Translate = (
   key: TranslationKey,
@@ -61,6 +62,7 @@ export function RegisterPage({ t, controls, onNavigate }: RegisterPageProps) {
       title={t("auth.signUpTitle")}
       subtitle={t("auth.signUpSubtitle")}
       controls={controls}
+      footer={<LegalLinks t={t} onNavigate={onNavigate} />}
     >
       <form onSubmit={handleSubmit} className="space-y-4" noValidate>
         <div>

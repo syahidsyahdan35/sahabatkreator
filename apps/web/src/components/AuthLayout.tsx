@@ -7,13 +7,15 @@ interface AuthLayoutProps {
   subtitle: string;
   children: ReactNode;
   controls: ReactNode;
+  /** Baris kaki tambahan di bawah kontrol (Fase 7D.1: tautan legal). */
+  footer?: ReactNode;
 }
 
 /**
  * Kerangka halaman auth (Fase 1C): berdiri sendiri TANPA sidebar/bottom bar.
  * Kartu terpusat di atas token permukaan yang sama dengan shell.
  */
-export function AuthLayout({ t, title, subtitle, children, controls }: AuthLayoutProps) {
+export function AuthLayout({ t, title, subtitle, children, controls, footer }: AuthLayoutProps) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg px-4 py-10 text-ink">
       <div className="w-full max-w-md">
@@ -27,6 +29,7 @@ export function AuthLayout({ t, title, subtitle, children, controls }: AuthLayou
           <div className="mt-6">{children}</div>
         </div>
         <div className="mt-6 flex justify-center">{controls}</div>
+        {footer ? <div className="mt-5">{footer}</div> : null}
       </div>
     </div>
   );

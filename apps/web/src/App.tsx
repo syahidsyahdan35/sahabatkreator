@@ -42,6 +42,8 @@ import { AdminPage } from "./pages/AdminPage";
 import { LogsPage } from "./pages/LogsPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
+import { LegalPage } from "./pages/LegalPage";
+import { LEGAL_PATHS, type LegalPageKind } from "./components/LegalLinks";
 import { useTheme, type ThemeMode } from "./theme";
 
 // Badge navigasi berasal dari API workspace aktif — query yang sama untuk
@@ -359,6 +361,23 @@ export default function App() {
       </div>
     </div>
   );
+
+  // Halaman legal publik (Fase 7D.1): /privacy, /terms, /data-deletion —
+  // di luar shell & tanpa sesi; URL-nya didaftarkan ke pengaturan
+  // aplikasi Meta (privasi + instruksi penghapusan data).
+  const legalKind = (Object.keys(LEGAL_PATHS) as LegalPageKind[]).find(
+    (kind) => LEGAL_PATHS[kind] === path,
+  );
+  if (legalKind) {
+    return (
+      <LegalPage
+        t={t}
+        kind={legalKind}
+        controls={controls}
+        onNavigate={navigateTo}
+      />
+    );
+  }
 
   // Halaman demo webchat publik (Fase 1F): di luar shell & tanpa sesi —
   // harus bisa dibuka siapa pun seperti situs tenant yang memasang widget.
