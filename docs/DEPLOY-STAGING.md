@@ -1028,3 +1028,53 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   pengguna umum, `node dist/index.js` adalah jalur standarnya.
 - SDK belum punya retry/pagination otomatis — pemanggil memakai
   `limit`/`offset` secara eksplisit (sesuai kontrak v1).
+
+---
+
+## Update Fase QA-2 — Regresi Playwright akhir (semua fitur) (2026-11-02)
+
+### Perubahan
+- **Tidak ada perubahan kode aplikasi** — QA-2 tidak menemukan bug aplikasi
+  baru, jadi tidak ada rebuild/redeploy; bundle publik tetap build terakhir
+  Fase 5A (`index-C1L6ZCNk.js`). Yang bertambah hanya cakupan tes:
+  - **Spec baru `tests/e2e/specs/settings-api-keys.spec.ts`** (Fase 5A):
+    login → Settings → buat API key lewat UI (nama + centang scope tulis
+    `contacts:write`) → modal menampilkan kunci utuh berawalan `sk_live_`
+    (nilai diambil dari DOM hanya untuk dipakai tes, TIDAK dicetak) →
+    daftar hanya menampilkan awalan (`Key: sk_live_<4>…`) dan kunci utuh
+    tidak muncul lagi di halaman → kunci dipakai dari APIRequestContext
+    Playwright ke `GET /api/v1/me` → 200 dengan tenantName persis workspace
+    yang dibuat tes → cabut lewat UI (modal konfirmasi, chip menjadi
+    Revoked) → `GET /api/v1/me` dengan kunci yang sama → 401.
+  - **Cakupan sequence 2C di `automations.spec.ts` diperiksa**: spec QA-1
+    ternyata SUDAH menguji editor langkah UI (2 langkah: jeda 0 & 1 menit)
+    + modal enrollments (status Active setelah pemicu widget) — tidak
+    perlu tambahan tes.
+- README suite diperbarui: 14 tes / 9 spec.
+
+### Verifikasi Fase QA-2 (dari server terhadap https://botara.my.id)
+- Spec baru dijalankan sendirian lebih dulu: **1/1 PASS** (6,3 dtk).
+- **Run PENUH suite: 14/14 PASS dalam 3,5 menit, satu kali jalan** —
+  agents 1, auth 3, automations 2 (keyword + sequence), channels-webchat 1,
+  contacts 1, products-pay 1, settings-api-keys 1, shell-ux 3, workspace 1.
+  Tidak ada run ulang yang dibutuhkan: helper auth tahan rate-limit bawaan
+  tidak terpicu pada run ini.
+- **Regresi non-browser 5B dijalankan ulang** dengan akun & API key uji
+  BARU (orkestrasi Bun sekali pakai di server; kunci full-scope prefix
+  `sk_live_RpDl…` + read-only prefix `sk_live_rEDP…`; file env kunci
+  dihapus dari server setelah jalan): **`verify:mcp` 14/14 PASS**
+  (`send_message` berstatus `sent`; pengunjung webchat menerima pesan MCP
+  secara live lewat WS selama uji; negatif scope →
+  `API_KEY_SCOPE_DENIED`) dan **`verify:sdk` 3/3 PASS** (kunci salah →
+  `SahabatKreatorApiError` `API_KEY_INVALID` 401).
+- Penutup: typecheck SEMUA proyek (16 paket/app) hijau;
+  `GET https://botara.my.id/api/health` ok.
+
+### Batas jujur
+- Nol bug baru bukan berarti nol risiko: suite tetap menargetkan jalur
+  bahagia + negatif utama per fitur; skenario dua worker balapan dan uji
+  beban di luar cakupan (sama seperti catatan QA-1/2A).
+- Koneksi SSH interaktif ke server sempat putus sekali (`Broken pipe`)
+  saat run penuh dijalankan menempel di sesi SSH — run diulang sebagai
+  proses detached (nohup + log) dan itulah run 14/14 di atas; ini isu
+  transport sesi, bukan aplikasi/tes.
