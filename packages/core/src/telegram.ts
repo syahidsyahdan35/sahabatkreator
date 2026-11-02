@@ -159,7 +159,10 @@ export interface RecordTelegramInboundInput {
  * lalu baris pesan + unread + event outbox `message.received` dalam SATU
  * transaksi tenant (pola webchat persis). Idempoten terhadap retry
  * webhook Telegram: provider_message_id yang sama mengembalikan pesan
- * yang sudah ada.
+ * yang sudah ada. Mengembalikan NULL hanya bila kembaran pesan itu
+ * dimiliki tenant/akun lain (bot sama terhubung ganda) — pesan sudah
+ * tercatat di sana, pemanggil cukup mengakui webhook (200) tanpa
+ * memproses ulang.
  *
  * Resolusi percakapan (Fase 6A.1):
  * - Grup: berdasarkan `provider_chat_id` (= id grup) pada akun ini —
@@ -173,7 +176,7 @@ export async function recordTelegramInboundMessage(
   db: Database,
   account: Pick<TelegramAccountRef, "id" | "tenantId">,
   input: RecordTelegramInboundInput,
-): Promise<Message> {
+): Promise<Message | null> {
   return withTenantDb(db, account.tenantId, async (tx) => {
     const [identity] = await tx
       .select()
@@ -277,6 +280,15 @@ export async function recordTelegramInboundMessage(
       .limit(1);
     if (dupe) return dupe;
 
+    // ON CONFLICT DO NOTHING (tanpa target = semua index unik; satu-
+    // satunya index unik di messages adalah provider_message_id):
+    // SELECT dedup di atas berjalan dalam konteks RLS tenant ini,
+    // sedangkan index-nya GLOBAL — bila bot yang sama pernah terhubung
+    // di tenant/akun lain, baris kembarannya tak terlihat oleh SELECT
+    // tetapi tetap ditolak index. Tanpa penjaga ini insert melempar
+    // 23505 → webhook 500 → Telegram me-retry update yang sama selamanya
+    // (poison pill). Semantik dedup tidak berubah: tepat satu baris
+    // tersimpan per provider_message_id.
     const [message] = await tx
       .insert(messages)
       .values({
@@ -292,7 +304,14 @@ export async function recordTelegramInboundMessage(
         providerMessageId: input.providerMessageId,
         status: "received",
       })
+      .onConflictDoNothing()
       .returning();
+    if (!message) {
+      // Kembaran dimiliki tenant/akun lain (tak terlihat RLS di sini):
+      // pesan sudah tercatat di tempat yang benar — akui & lewati tanpa
+      // unread/outbox ganda. Route tetap menjawab 200.
+      return null;
+    }
 
     const now = new Date();
     await tx
