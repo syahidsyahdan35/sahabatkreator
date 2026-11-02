@@ -23,6 +23,16 @@ import { z } from "zod";
  *                                      dan diteruskan sebagai tool error.
  *   SAHABAT_KREATOR_BASE_URL  (opsional) origin API, default
  *                                      https://botara.my.id
+ *   MCP_ALLOW_WRITES          (opsional, Fase 9B) tiering keamanan:
+ *                                      DEFAULT server ini READ-ONLY.
+ *                                      Tool TULIS (create_contact,
+ *                                      send_message) terdaftar tetapi
+ *                                      MENOLAK dengan error yang jelas
+ *                                      sampai env ini bernilai persis
+ *                                      "1". Tool baca selalu jalan.
+ *                                      Ini lapisan opt-in lokal di atas
+ *                                      scope API key — keduanya harus
+ *                                      mengizinkan agar tulis berhasil.
  *
  * Error API TIDAK membuat server crash: ia menjadi hasil tool `isError`
  * yang memuat kode kontrak agar model/pengguna bisa memahami penolakan.
@@ -37,6 +47,26 @@ if (!apiKey) {
   process.exit(1);
 }
 const baseUrl = process.env.SAHABAT_KREATOR_BASE_URL ?? "https://botara.my.id";
+
+/** Tiering keamanan MCP (Fase 9B): tulis hanya dengan opt-in eksplisit. */
+const writesEnabled = process.env.MCP_ALLOW_WRITES === "1";
+
+/** Hasil penolakan tool tulis saat tier tulis tidak diaktifkan. */
+function writeDisabledResult(toolName: string): CallToolResult {
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text:
+          `Tool "${toolName}" adalah tool TULIS dan server MCP ini berjalan ` +
+          `READ-ONLY secara default (tiering keamanan Fase 9B). ` +
+          `Untuk mengizinkan tool tulis, jalankan ulang server dengan env ` +
+          `MCP_ALLOW_WRITES=1. Tool baca tetap tersedia tanpa env tersebut.`,
+      },
+    ],
+  };
+}
 
 const client = new SahabatKreatorClient({ baseUrl, apiKey });
 
@@ -84,6 +114,7 @@ server.registerTool(
     description:
       "Identitas tenant pemilik API key yang dipakai server ini (tenantId, tenantName) beserta scope kunci. Berguna untuk memastikan kunci/workspace yang benar sebelum bertindak.",
     inputSchema: {},
+    annotations: { readOnlyHint: true },
   },
   async () => run(() => client.me()),
 );
@@ -98,6 +129,7 @@ server.registerTool(
       limit: z.number().int().min(1).max(100).optional().describe("Maks. jumlah kontak (default server 50)"),
       offset: z.number().int().min(0).optional().describe("Lewati N kontak pertama"),
     },
+    annotations: { readOnlyHint: true },
   },
   async ({ search, limit, offset }) =>
     run(() => client.listContacts({ search, limit, offset })),
@@ -107,15 +139,18 @@ server.registerTool(
   "create_contact",
   {
     description:
-      "Buat kontak baru di workspace (scope contacts:write). Hasil: kontak yang dibuat.",
+      "Buat kontak baru di workspace (scope contacts:write). Hasil: kontak yang dibuat. [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
     inputSchema: {
       name: z.string().min(1).max(255).describe("Nama kontak"),
       phone: z.string().min(1).max(32).optional().describe("Nomor telepon (opsional)"),
       email: z.string().email().max(320).optional().describe("Email (opsional)"),
     },
+    annotations: { readOnlyHint: false },
   },
   async ({ name, phone, email }) =>
-    run(() => client.createContact({ name, phone, email })),
+    writesEnabled
+      ? run(() => client.createContact({ name, phone, email }))
+      : writeDisabledResult("create_contact"),
 );
 
 server.registerTool(
@@ -124,6 +159,7 @@ server.registerTool(
     description:
       "Daftar percakapan workspace (scope conversations:read), terbaru dulu, dengan cuplikan pesan terakhir dan jumlah belum terbaca.",
     inputSchema: {},
+    annotations: { readOnlyHint: true },
   },
   async () => run(() => client.listConversations()),
 );
@@ -137,6 +173,7 @@ server.registerTool(
       conversationId: z.string().uuid().describe("Id percakapan (dari list_conversations)"),
       limit: z.number().int().min(1).max(200).optional().describe("Maks. jumlah pesan (default server 50)"),
     },
+    annotations: { readOnlyHint: true },
   },
   async ({ conversationId, limit }) =>
     run(() => client.listMessages(conversationId, { limit })),
@@ -146,14 +183,17 @@ server.registerTool(
   "send_message",
   {
     description:
-      "Kirim pesan keluar ke satu percakapan sebagai workspace (scope messages:write). Pesan masuk jalur pengiriman yang sama dengan balasan dashboard — untuk webchat, pengunjung yang terhubung menerimanya realtime.",
+      "Kirim pesan keluar ke satu percakapan sebagai workspace (scope messages:write). Pesan masuk jalur pengiriman yang sama dengan balasan dashboard — untuk webchat, pengunjung yang terhubung menerimanya realtime. [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
     inputSchema: {
       conversationId: z.string().uuid().describe("Id percakapan tujuan"),
       text: z.string().min(1).max(4096).describe("Isi pesan teks"),
     },
+    annotations: { readOnlyHint: false },
   },
   async ({ conversationId, text }) =>
-    run(() => client.sendMessage(conversationId, text)),
+    writesEnabled
+      ? run(() => client.sendMessage(conversationId, text))
+      : writeDisabledResult("send_message"),
 );
 
 server.registerTool(
@@ -162,11 +202,16 @@ server.registerTool(
     description:
       "Daftar produk workspace beserta harga Rupiah (scope products:read).",
     inputSchema: {},
+    annotations: { readOnlyHint: true },
   },
   async () => run(() => client.listProducts()),
 );
 
 await server.connect(new StdioServerTransport());
 console.error(
-  `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl}`,
+  `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl} — tier: ${
+    writesEnabled
+      ? "BACA+TULIS (MCP_ALLOW_WRITES=1)"
+      : "READ-ONLY (tool tulis menolak; set MCP_ALLOW_WRITES=1 untuk mengizinkan)"
+  }`,
 );

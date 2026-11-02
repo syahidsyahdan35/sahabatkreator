@@ -7,6 +7,14 @@
  *       @modelcontextprotocol/sdk) — initialize, tools/list, tools/call —
  *       terhadap API publik v1 yang LIVE.
  *
+ * Tiering keamanan (Fase 9B) diuji eksplisit dalam TIGA sesi:
+ *   A) default TANPA MCP_ALLOW_WRITES: baca berhasil, tool tulis
+ *      DITOLAK di lapisan MCP (pesan menyebut MCP_ALLOW_WRITES);
+ *   B) MCP_ALLOW_WRITES=1: tool tulis berhasil end-to-end;
+ *   C) kunci terbatas + MCP_ALLOW_WRITES=1: permintaan lolos tier MCP
+ *      lalu DITOLAK API oleh scope kunci (API_KEY_SCOPE_DENIED) —
+ *      kedua lapisan independen.
+ *
  * Env yang dibaca (kunci TIDAK PERNAH dicetak — hanya prefix):
  *   SAHABAT_KREATOR_API_KEY           (wajib) kunci FULL-scope tenant uji
  *   SAHABAT_KREATOR_API_KEY_LIMITED   (opsional) kunci scope-read default
@@ -80,13 +88,17 @@ function resultJson<T>(result: ToolResult): T | null {
   }
 }
 
-async function connect(apiKey: string): Promise<Client> {
+async function connect(apiKey: string, allowWrites = false): Promise<Client> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") env[k] = v;
   }
   env.SAHABAT_KREATOR_API_KEY = apiKey;
   env.SAHABAT_KREATOR_BASE_URL = baseUrl;
+  // Tier tulis dikendalikan EKSPLISIT oleh skrip, bukan env sekitar:
+  // sesi default harus benar-benar tanpa MCP_ALLOW_WRITES.
+  if (allowWrites) env.MCP_ALLOW_WRITES = "1";
+  else delete env.MCP_ALLOW_WRITES;
   const transport = new StdioClientTransport({
     command: process.env.SAHABAT_KREATOR_MCP_COMMAND ?? "node",
     args: [serverEntry],
@@ -116,6 +128,8 @@ const EXPECTED_TOOLS = [
   "list_products",
 ];
 
+const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
+
 const client = await connect(fullKey);
 try {
   const serverInfo = client.getServerVersion();
@@ -131,6 +145,18 @@ try {
     "tools/list memuat 7 tools",
     JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()),
     names.join(","),
+  );
+
+  const hintOf = (name: string) =>
+    tools.tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
+  check(
+    "annotations tier: baca readOnlyHint=true, tulis=false (Fase 9B)",
+    hintOf("whoami") === true &&
+      hintOf("list_contacts") === true &&
+      hintOf("list_products") === true &&
+      hintOf("create_contact") === false &&
+      hintOf("send_message") === false,
+    `create_contact=${String(hintOf("create_contact"))} send_message=${String(hintOf("send_message"))}`,
   );
 
   const whoami = await call(client, "whoami");
@@ -149,20 +175,13 @@ try {
     contacts ? `total=${contacts.total}` : resultText(contactsResult),
   );
 
-  const uniqueName = `MCP Uji ${Date.now()}`;
-  const createdResult = await call(client, "create_contact", { name: uniqueName });
-  const created = resultJson<{ id: string; name: string }>(createdResult);
+  // --- Tier READ-ONLY (default): tool tulis DITOLAK di lapisan MCP ----
+  const rejectedCreate = await call(client, "create_contact", { name: uniqueNameRef.name });
   check(
-    "create_contact",
-    !createdResult.isError && !!created && created.name === uniqueName,
-    created ? `id=${created.id}` : resultText(createdResult),
-  );
-
-  const searchResult = await call(client, "list_contacts", { search: uniqueName });
-  const found = resultJson<{ contacts: Array<{ id: string }> }>(searchResult);
-  check(
-    "kontak baru muncul di list_contacts",
-    !!found && !!created && found.contacts.some((c) => c.id === created.id),
+    "tanpa MCP_ALLOW_WRITES: create_contact DITOLAK (menyebut MCP_ALLOW_WRITES)",
+    rejectedCreate.isError === true &&
+      resultText(rejectedCreate).includes("MCP_ALLOW_WRITES"),
+    resultText(rejectedCreate).slice(0, 120),
   );
 
   const convResult = await call(client, "list_conversations");
@@ -192,29 +211,15 @@ try {
       history ? `count=${history.messages.length}` : resultText(historyResult),
     );
 
-    const marker = `Pesan uji MCP ${Date.now()}`;
-    const sendResult = await call(client, "send_message", {
+    const rejectedSend = await call(client, "send_message", {
       conversationId,
-      text: marker,
+      text: "pesan ini harus ditolak tier read-only",
     });
-    const sent = resultJson<{ contentText: string; status: string }>(sendResult);
     check(
-      "send_message terkirim (queued/sent)",
-      !sendResult.isError &&
-        !!sent &&
-        sent.contentText === marker &&
-        (sent.status === "queued" || sent.status === "sent"),
-      sent ? `status=${sent.status}` : resultText(sendResult),
-    );
-
-    const afterResult = await call(client, "list_messages", {
-      conversationId,
-      limit: 50,
-    });
-    const after = resultJson<{ messages: Array<{ contentText: string | null }> }>(afterResult);
-    check(
-      "pesan MCP terbaca kembali via list_messages",
-      !!after && after.messages.some((m) => m.contentText === marker),
+      "tanpa MCP_ALLOW_WRITES: send_message DITOLAK (menyebut MCP_ALLOW_WRITES)",
+      rejectedSend.isError === true &&
+        resultText(rejectedSend).includes("MCP_ALLOW_WRITES"),
+      resultText(rejectedSend).slice(0, 120),
     );
   }
 
@@ -229,11 +234,67 @@ try {
   await client.close();
 }
 
+// --- Tier BACA+TULIS: sesi kedua dengan MCP_ALLOW_WRITES=1 ---------------
+const writer = await connect(fullKey, true);
+try {
+  const createdResult = await call(writer, "create_contact", { name: uniqueNameRef.name });
+  const created = resultJson<{ id: string; name: string }>(createdResult);
+  check(
+    "MCP_ALLOW_WRITES=1: create_contact berhasil",
+    !createdResult.isError && !!created && created.name === uniqueNameRef.name,
+    created ? `id=${created.id}` : resultText(createdResult),
+  );
+
+  const searchResult = await call(writer, "list_contacts", { search: uniqueNameRef.name });
+  const found = resultJson<{ contacts: Array<{ id: string }> }>(searchResult);
+  check(
+    "kontak baru muncul di list_contacts",
+    !!found && !!created && found.contacts.some((c) => c.id === created.id),
+  );
+
+  const convsW = resultJson<{ conversations: Array<{ id: string }> }>(
+    await call(writer, "list_conversations"),
+  );
+  const conversationIdW = testConversationId ?? convsW?.conversations[0]?.id;
+  if (!conversationIdW) {
+    check("MCP_ALLOW_WRITES=1: send_message", false, "tidak ada percakapan uji");
+  } else {
+    const marker = `Pesan uji MCP ${Date.now()}`;
+    const sendResult = await call(writer, "send_message", {
+      conversationId: conversationIdW,
+      text: marker,
+    });
+    const sent = resultJson<{ contentText: string; status: string }>(sendResult);
+    check(
+      "MCP_ALLOW_WRITES=1: send_message terkirim (queued/sent)",
+      !sendResult.isError &&
+        !!sent &&
+        sent.contentText === marker &&
+        (sent.status === "queued" || sent.status === "sent"),
+      sent ? `status=${sent.status}` : resultText(sendResult),
+    );
+
+    const afterResult = await call(writer, "list_messages", {
+      conversationId: conversationIdW,
+      limit: 50,
+    });
+    const after = resultJson<{ messages: Array<{ contentText: string | null }> }>(afterResult);
+    check(
+      "pesan MCP terbaca kembali via list_messages",
+      !!after && after.messages.some((m) => m.contentText === marker),
+    );
+  }
+} finally {
+  await writer.close();
+}
+
 // --- Uji negatif scope: kunci read-only tidak boleh menulis -----------------
+// Sesi ini berjalan dengan MCP_ALLOW_WRITES=1 agar permintaan LOLOS tier
+// MCP dan benar-benar diuji di lapisan scope API (lapisan independen).
 if (!limitedKey) {
   skip("uji negatif scope", "SAHABAT_KREATOR_API_KEY_LIMITED tidak diisi");
 } else {
-  const limited = await connect(limitedKey);
+  const limited = await connect(limitedKey, true);
   try {
     const tools = await limited.listTools();
     check(
