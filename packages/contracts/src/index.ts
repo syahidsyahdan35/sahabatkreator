@@ -1878,8 +1878,14 @@ export type BroadcastRecipientListQuery = z.infer<
  * worker, dan Flow Builder UI Fase 8B):
  *
  *   graph = { nodes: FlowNode[], edges: FlowEdge[] }
- *   FlowNode = { id: string, type: FlowNodeType, config: object }
+ *   FlowNode = { id: string, type: FlowNodeType, config: object,
+ *                position?: { x: number, y: number } }
  *   FlowEdge = { from: nodeId, to: nodeId, branch?: "yes" | "no" }
+ *
+ * `position` adalah metadata TAMPILAN milik builder (Fase 8B): disimpan
+ * apa adanya di graf yang sama (satu sumber kebenaran), diterima
+ * validasi bentuk, dan DIABAIKAN eksekutor — flow 8A tanpa position
+ * tetap sah dan berjalan persis sama.
  *
  * Tepat SATU node `trigger` per flow; eksekusi mulai dari node yang
  * ditunjuk edge keluar trigger. Node tanpa edge keluar = akhir run
@@ -1976,10 +1982,21 @@ export const FlowNodeConfigSchema = z.union([
 ]);
 export type FlowNodeConfig = z.infer<typeof FlowNodeConfigSchema>;
 
+/**
+ * Posisi node di canvas builder (Fase 8B) — koordinat piksel relatif
+ * kanvas, boleh negatif (pan bebas). Murni metadata tampilan.
+ */
+export const FlowNodePositionSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+});
+export type FlowNodePosition = z.infer<typeof FlowNodePositionSchema>;
+
 export const FlowNodeSchema = z.object({
   id: z.string().min(1).max(128),
   type: FlowNodeTypeSchema,
   config: z.record(z.string(), z.unknown()).default({}),
+  position: FlowNodePositionSchema.optional(),
 });
 export type FlowNode = z.infer<typeof FlowNodeSchema>;
 

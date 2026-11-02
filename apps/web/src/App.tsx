@@ -42,6 +42,8 @@ import { AdminPage } from "./pages/AdminPage";
 import { LogsPage } from "./pages/LogsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { BroadcastsPage } from "./pages/BroadcastsPage";
+import { FlowsPage } from "./pages/FlowsPage";
+import { FlowBuilderPage } from "./pages/FlowBuilderPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -185,6 +187,15 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
     else onNavigateTo(next);
   };
 
+  /** Builder flow hidup di URL: /flows/:flowId (pola deep-link yang sama). */
+  const handleFlowOpen = (flowId: string | null) => {
+    onNavigateTo(flowId ? `/flows/${encodeURIComponent(flowId)}` : "/flows");
+  };
+
+  // Builder canvas (Fase 8B) butuh panggung lebih lebar dari kolom
+  // baca 5xl halaman lain — hanya saat builder yang terbuka.
+  const wideMain = activeId === "flows" && match.segment !== null;
+
   const handleSignOut = async () => {
     await signOut();
     onNavigateTo("/login");
@@ -207,7 +218,11 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
         profile={profile}
         items={visibleDesktopItems}
       />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
+      <main
+        className={`mx-auto w-full flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10 ${
+          wideMain ? "max-w-[1440px]" : "max-w-5xl"
+        }`}
+      >
         <div className="mb-6 md:hidden">
           <div className="text-lg font-bold">{t("app.name")}</div>
           <div className="text-xs text-muted">{t("app.tagline")}</div>
@@ -233,6 +248,21 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <AutomationsPage t={t} locale={locale} />
         ) : activeId === "broadcasts" ? (
           <BroadcastsPage t={t} locale={locale} />
+        ) : activeId === "flows" ? (
+          match.segment ? (
+            <FlowBuilderPage
+              t={t}
+              locale={locale}
+              flowId={match.segment}
+              onBack={() => handleFlowOpen(null)}
+            />
+          ) : (
+            <FlowsPage
+              t={t}
+              locale={locale}
+              onOpenBuilder={(flowId) => handleFlowOpen(flowId)}
+            />
+          )
         ) : activeId === "products" ? (
           <ProductsPage t={t} locale={locale} />
         ) : activeId === "settings" ? (

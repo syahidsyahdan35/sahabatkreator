@@ -1,0 +1,216 @@
+import type {
+  FlowGraph,
+  FlowGraphIssue,
+  FlowNode,
+  FlowNodeType,
+} from "@sahabat-kreator/contracts";
+import type { TranslationKey } from "@sahabat-kreator/i18n";
+
+type Translate = (
+  key: TranslationKey,
+  params?: Record<string, string | number>,
+) => string;
+
+/**
+ * Model graf bersama UI Flows (Fase 8B): pemetaan tipe node → kunci
+ * label, ringkasan config satu baris, config bawaan node baru, dan
+ * terjemahan issue validasi server. Kontrak grafnya sendiri hidup di
+ * `@sahabat-kreator/contracts` — berkas ini TIDAK mendefinisikan ulang
+ * bentuk graf, hanya cara UI membacanya.
+ */
+
+export const FLOW_NODE_LABEL_KEYS: Record<FlowNodeType, TranslationKey> = {
+  trigger: "flows.nodeTrigger",
+  send_message: "flows.nodeSendMessage",
+  condition: "flows.nodeCondition",
+  delay: "flows.nodeDelay",
+  add_tag: "flows.nodeAddTag",
+  remove_tag: "flows.nodeRemoveTag",
+  set_stage: "flows.nodeSetStage",
+  enroll_sequence: "flows.nodeEnrollSequence",
+  ai_response: "flows.nodeAiResponse",
+  handoff: "flows.nodeHandoff",
+  end: "flows.nodeEnd",
+};
+
+/** Tipe yang boleh ditambahkan dari palet (trigger dibuat otomatis & tunggal). */
+export const ADDABLE_NODE_TYPES: FlowNodeType[] = [
+  "send_message",
+  "condition",
+  "delay",
+  "add_tag",
+  "remove_tag",
+  "set_stage",
+  "enroll_sequence",
+  "ai_response",
+  "handoff",
+  "end",
+];
+
+/** Config bawaan saat node baru ditambahkan ke kanvas. */
+export function defaultNodeConfig(
+  type: FlowNodeType,
+): Record<string, unknown> {
+  switch (type) {
+    case "trigger":
+      return { kind: "keyword", keywords: [], match: "exact" };
+    case "send_message":
+      return { text: "" };
+    case "condition":
+      return { predicate: "has_tag", tag: "" };
+    case "delay":
+      return { amount: 5, unit: "minutes" };
+    case "add_tag":
+    case "remove_tag":
+      return { tag: "" };
+    case "set_stage":
+      return { stage: "contacted" };
+    case "enroll_sequence":
+      return { automationId: "" };
+    default:
+      return {};
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function truncate(text: string, max = 90): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/**
+ * Ringkasan config SATU baris untuk badan node di kanvas & daftar flow.
+ * `sequenceName` memetakan automationId → nama sequence (dari daftar
+ * automations tenant) bila pemanggil memilikinya.
+ */
+export function summarizeNodeConfig(
+  t: Translate,
+  node: Pick<FlowNode, "type" | "config">,
+  sequenceName?: (automationId: string) => string | undefined,
+): string {
+  const c = node.config;
+  switch (node.type) {
+    case "trigger": {
+      if (c.kind === "any_message") return t("flows.summaryAnyMessage");
+      const keywords = Array.isArray(c.keywords)
+        ? c.keywords.filter((k): k is string => typeof k === "string")
+        : [];
+      return keywords.length > 0
+        ? truncate(
+            t("flows.summaryKeywords", { keywords: keywords.join(", ") }),
+          )
+        : t("flows.summaryNotConfigured");
+    }
+    case "send_message": {
+      const text = asString(c.text);
+      return text ? truncate(text) : t("flows.summaryNotConfigured");
+    }
+    case "condition": {
+      if (c.predicate === "has_tag") {
+        const tag = asString(c.tag);
+        return tag
+          ? `${t("flows.predicateHasTag")}: ${tag}`
+          : t("flows.summaryNotConfigured");
+      }
+      if (c.predicate === "stage_equals") {
+        const stage = asString(c.stage);
+        return stage
+          ? `${t("flows.predicateStageEquals")}: ${stage}`
+          : t("flows.summaryNotConfigured");
+      }
+      if (c.predicate === "field_equals") {
+        const field = asString(c.field);
+        const value = asString(c.value);
+        return field && value
+          ? t("flows.summaryFieldEquals", { field, value })
+          : t("flows.summaryNotConfigured");
+      }
+      if (c.predicate === "message_contains") {
+        const text = asString(c.text);
+        return text
+          ? t("flows.summaryContains", { text })
+          : t("flows.summaryNotConfigured");
+      }
+      return t("flows.summaryNotConfigured");
+    }
+    case "delay": {
+      const amount = typeof c.amount === "number" ? c.amount : 0;
+      const unit = asString(c.unit) || "minutes";
+      const unitKey =
+        unit === "seconds"
+          ? "flows.unitSeconds"
+          : unit === "hours"
+            ? "flows.unitHours"
+            : "flows.unitMinutes";
+      return t("flows.summaryDelay", { amount, unit: t(unitKey as TranslationKey) });
+    }
+    case "add_tag":
+    case "remove_tag": {
+      const tag = asString(c.tag);
+      return tag || t("flows.summaryNotConfigured");
+    }
+    case "set_stage": {
+      const stage = asString(c.stage);
+      return stage || t("flows.summaryNotConfigured");
+    }
+    case "enroll_sequence": {
+      const id = asString(c.automationId);
+      if (!id) return t("flows.summaryNotConfigured");
+      return sequenceName?.(id) ?? `${id.slice(0, 8)}…`;
+    }
+    default:
+      return "";
+  }
+}
+
+/** Ringkasan pemicu untuk daftar flow (dari node trigger graf). */
+export function summarizeTrigger(t: Translate, graph: FlowGraph): string {
+  const trigger = graph.nodes.find((n) => n.type === "trigger");
+  if (!trigger) return t("flows.triggerNoneSummary");
+  if (trigger.config.kind === "any_message") {
+    return t("flows.triggerAnySummary");
+  }
+  return summarizeNodeConfig(t, trigger);
+}
+
+const ISSUE_KEY_PREFIX = "flows.issue.";
+
+/** Terjemahkan kode issue server ke teks klien; kode tak dikenal → pesan server. */
+export function translateFlowIssue(t: Translate, issue: FlowGraphIssue): string {
+  const key = `${ISSUE_KEY_PREFIX}${issue.code}` as TranslationKey;
+  const translated = t(key);
+  // createTranslator jatuh kembali ke kunci itu sendiri bila tidak ada —
+  // itu tanda kode belum diterjemahkan; pakai pesan server apa adanya.
+  return translated === key ? issue.message : translated;
+}
+
+/** Bentuk issue untuk panel: pisah error vs warning, urutan server dipertahankan. */
+export function splitIssues(issues: FlowGraphIssue[]): {
+  errors: FlowGraphIssue[];
+  warnings: FlowGraphIssue[];
+} {
+  return {
+    errors: issues.filter((i) => i.severity === "error"),
+    warnings: issues.filter((i) => i.severity === "warning"),
+  };
+}
+
+/** Ekstrak issues dari ApiClientError 422 FLOW_GRAPH_INVALID (details.issues). */
+export function issuesFromError(err: unknown): FlowGraphIssue[] | null {
+  if (typeof err !== "object" || err === null) return null;
+  const details = (err as { details?: unknown }).details;
+  if (typeof details !== "object" || details === null) return null;
+  const issues = (details as { issues?: unknown }).issues;
+  if (!Array.isArray(issues)) return null;
+  return issues.filter(
+    (i): i is FlowGraphIssue =>
+      typeof i === "object" &&
+      i !== null &&
+      typeof (i as FlowGraphIssue).code === "string" &&
+      ((i as FlowGraphIssue).severity === "error" ||
+        (i as FlowGraphIssue).severity === "warning"),
+  );
+}

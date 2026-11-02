@@ -39,3 +39,41 @@ body {
   font-family:
     ui-sans-system, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
+
+/* Kanvas Flow Builder (Fase 8B, @xyflow/react): chrome library (kontrol,
+   minimap, handle, attribution) diwarnai dari token semantik yang sama
+   agar terbaca di tema terang & gelap — dibatasi scope .sk-flow agar
+   tidak bocor ke permukaan lain. */
+.sk-flow .react-flow {
+  background-color: rgb(var(--color-bg));
+}
+.sk-flow .react-flow__handle {
+  width: 10px;
+  height: 10px;
+  background-color: rgb(var(--color-accent));
+  border: 2px solid rgb(var(--color-surface));
+}
+.sk-flow .react-flow__edge.selected .react-flow__edge-path {
+  stroke: rgb(var(--color-accent));
+}
+.sk-flow .react-flow__controls {
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+}
+.sk-flow .react-flow__controls-button {
+  background-color: rgb(var(--color-surface));
+  border-bottom: 1px solid rgb(var(--color-border));
+  fill: rgb(var(--color-text));
+}
+.sk-flow .react-flow__controls-button:hover {
+  background-color: rgb(var(--color-elevated));
+}
+.sk-flow .react-flow__minimap {
+  background-color: rgb(var(--color-surface));
+}
+.sk-flow .react-flow__attribution {
+  background-color: transparent;
+  color: rgb(var(--color-text-muted));
+}
+.sk-flow .react-flow__attribution a {
+  color: rgb(var(--color-text-muted));
+}

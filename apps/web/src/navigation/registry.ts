@@ -12,7 +12,7 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
   | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more"
-  | "list" | "audit";
+  | "list" | "audit" | "flow";
 
 export interface NavItem {
   id: string;
@@ -33,23 +33,26 @@ export const NAV_REGISTRY: NavItem[] = [
   { id: "broadcasts",  labelKey: "nav.broadcasts",  icon: "megaphone", route: "/broadcasts", mobile: { slot: 4 },      order: { desktop: 4,  more: 0 } },
   { id: "contacts",    labelKey: "nav.contacts",    icon: "users",     route: "/contacts",    mobile: { slot: "more" }, order: { desktop: 5,  more: 1 } },
   { id: "automations", labelKey: "nav.automations", icon: "workflow",  route: "/automations", mobile: { slot: "more" }, order: { desktop: 6,  more: 2 } },
-  { id: "knowledge",   labelKey: "nav.knowledge",   icon: "book",      route: "/knowledge",   mobile: { slot: "more" }, order: { desktop: 7,  more: 3 } },
-  { id: "products",    labelKey: "nav.products",    icon: "bag",       route: "/products",    mobile: { slot: "more" }, order: { desktop: 8,  more: 4 } },
-  { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 9,  more: 5 } },
-  { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
-  { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
-  { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
+  // Flow Builder (Fase 8B): daftar /flows + builder canvas /flows/:flowId
+  // (matchNavPath memetakan sub-path ke item ini, pola deep-link Inbox).
+  { id: "flows",       labelKey: "nav.flows",       icon: "flow",      route: "/flows",       mobile: { slot: "more" }, order: { desktop: 7,  more: 3 } },
+  { id: "knowledge",   labelKey: "nav.knowledge",   icon: "book",      route: "/knowledge",   mobile: { slot: "more" }, order: { desktop: 8,  more: 4 } },
+  { id: "products",    labelKey: "nav.products",    icon: "bag",       route: "/products",    mobile: { slot: "more" }, order: { desktop: 9,  more: 5 } },
+  { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
+  { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
+  { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
+  { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
   // Log integrasi (Fase 7B.1): jejak webhook & pengiriman per workspace —
   // grup utilitas bersama Settings/Admin di "More" (tab utama mobile
   // tetap 4 sesuai keputusan desain).
-  { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
+  { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
   // Penelusur Audit (Fase 7B.4): jejak aksi user/agent/sistem/API key
   // per workspace dari audit_logs — bersebelahan dengan Logs.
-  { id: "audit",       labelKey: "nav.audit",       icon: "audit",     route: "/audit",       mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
+  { id: "audit",       labelKey: "nav.audit",       icon: "audit",     route: "/audit",       mobile: { slot: "more" }, order: { desktop: 15, more: 11 } },
   // Panel Admin Platform (Fase 6C): `permission: "platformAdmin"` — item
   // hanya dirender untuk user ber-flag isPlatformAdmin (lihat
   // filterNavItems); gerbang sesungguhnya ada di API (non-admin → 404).
-  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 15, more: 11 } },
+  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 16, more: 12 } },
 ];
 
 /**

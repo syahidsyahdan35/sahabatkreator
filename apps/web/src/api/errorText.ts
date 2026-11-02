@@ -84,6 +84,10 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.MESSAGE_NOT_FAILED");
     case "MESSAGE_RETRY_UNSUPPORTED":
       return t("errors.MESSAGE_RETRY_UNSUPPORTED");
+    case "FLOW_INVALID_STATE":
+      return t("errors.FLOW_INVALID_STATE");
+    case "FLOW_GRAPH_INVALID":
+      return t("errors.FLOW_GRAPH_INVALID");
     default:
       break;
   }

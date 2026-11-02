@@ -28,6 +28,14 @@ import type {
   CreateAgentRequest,
   CreateAutomationRequest,
   CreateContactRequest,
+  CreateFlowRequest,
+  FlowGraph,
+  FlowGraphIssue,
+  FlowListResponse,
+  FlowResponse,
+  FlowRunListResponse,
+  FlowRunStepListResponse,
+  FlowValidationResponse,
   CreateKbDocumentRequest,
   CreatePaymentLinkRequest,
   CreateProductRequest,
@@ -62,6 +70,7 @@ import type {
   UpdateAgentRequest,
   UpdateAutomationRequest,
   UpdateContactRequest,
+  UpdateFlowRequest,
   UpdateProductRequest,
 } from "@sahabat-kreator/contracts";
 
@@ -93,12 +102,19 @@ export interface SessionUser {
 export class ApiClientError extends Error {
   readonly status: number;
   readonly code: string;
+  /**
+   * Detail terstruktur opsional dari server (format kontrak
+   * `{error:{code,message,details}}`) — dipakai builder flow (Fase 8B)
+   * untuk membaca `details.issues` pada 422 FLOW_GRAPH_INVALID.
+   */
+  readonly details: unknown;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: unknown) {
     super(message);
     this.name = "ApiClientError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -143,7 +159,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       (typeof contractError?.message === "string" && contractError.message) ||
       (typeof record.message === "string" && record.message) ||
       res.statusText;
-    throw new ApiClientError(res.status, code, message);
+    throw new ApiClientError(res.status, code, message, contractError?.details);
   }
 
   return body as T;
@@ -923,6 +939,144 @@ export const api = {
       const qs = params.toString();
       return request<BroadcastRecipientListResponse>(
         `/api/tenants/${tenantId}/broadcasts/${broadcastId}/recipients${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+  },
+  flows: {
+    /**
+     * GET /api/tenants/:tenantId/flows — daftar flow + runCount
+     * (Fase 8A; UI daftar & builder Fase 8B).
+     */
+    list(
+      tenantId: string,
+      query: { status?: string; cursor?: string; limit?: number } = {},
+    ): Promise<FlowListResponse> {
+      const params = new URLSearchParams();
+      if (query.status) params.set("status", query.status);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<FlowListResponse>(
+        `/api/tenants/${tenantId}/flows${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/flows/:id → detail flow (graf utuh). */
+    get(tenantId: string, flowId: string): Promise<FlowResponse> {
+      return request<FlowResponse>(`/api/tenants/${tenantId}/flows/${flowId}`, {
+        method: "GET",
+      });
+    },
+    /** POST /api/tenants/:tenantId/flows → 201 draf baru (owner/admin). */
+    create(
+      tenantId: string,
+      input: CreateFlowRequest,
+    ): Promise<FlowResponse> {
+      return request<FlowResponse>(`/api/tenants/${tenantId}/flows`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    /**
+     * PATCH /api/tenants/:tenantId/flows/:id → edit draf (owner/admin;
+     * flow non-draf → 409 FLOW_INVALID_STATE).
+     */
+    update(
+      tenantId: string,
+      flowId: string,
+      input: UpdateFlowRequest,
+    ): Promise<FlowResponse> {
+      return request<FlowResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/flows/:id → hapus draf (owner/admin). */
+    async remove(tenantId: string, flowId: string): Promise<void> {
+      await request<unknown>(`/api/tenants/${tenantId}/flows/${flowId}`, {
+        method: "DELETE",
+      });
+    },
+    /**
+     * POST /api/tenants/:tenantId/flows/:id/validate {graph} — validasi
+     * graf KERING (tidak mengubah status); mengembalikan issues
+     * terstruktur yang sama seperti aktivasi.
+     */
+    validate(
+      tenantId: string,
+      flowId: string,
+      graph: FlowGraph,
+    ): Promise<FlowValidationResponse> {
+      return request<FlowValidationResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/validate`,
+        { method: "POST", body: JSON.stringify({ graph }) },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/flows/:id/activate — aktifkan graf
+     * tersimpan. Gagal validasi → 422 FLOW_GRAPH_INVALID dengan
+     * `details.issues` (dibaca pemanggil lewat ApiClientError.details);
+     * sukses → {flow, warnings}.
+     */
+    activate(
+      tenantId: string,
+      flowId: string,
+    ): Promise<{ flow: FlowResponse; warnings: FlowGraphIssue[] }> {
+      return request<{ flow: FlowResponse; warnings: FlowGraphIssue[] }>(
+        `/api/tenants/${tenantId}/flows/${flowId}/activate`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /** POST .../flows/:id/deactivate — aktif → draf (bisa diedit lagi). */
+    deactivate(tenantId: string, flowId: string): Promise<FlowResponse> {
+      return request<FlowResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/deactivate`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /** POST .../flows/:id/archive — arsipkan flow. */
+    archive(tenantId: string, flowId: string): Promise<FlowResponse> {
+      return request<FlowResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/archive`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /** POST .../flows/:id/unarchive — arsip → draf. */
+    unarchive(tenantId: string, flowId: string): Promise<FlowResponse> {
+      return request<FlowResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/unarchive`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /** GET /api/tenants/:tenantId/flows/:id/runs — run milik flow (penampil debugging 8B). */
+    listRuns(
+      tenantId: string,
+      flowId: string,
+      query: { status?: string; cursor?: string; limit?: number } = {},
+    ): Promise<FlowRunListResponse> {
+      const params = new URLSearchParams();
+      if (query.status) params.set("status", query.status);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<FlowRunListResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/runs${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/flows/runs/:runId/steps — langkah satu run, kronologis. */
+    listRunSteps(
+      tenantId: string,
+      runId: string,
+      query: { cursor?: string; limit?: number } = {},
+    ): Promise<FlowRunStepListResponse> {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<FlowRunStepListResponse>(
+        `/api/tenants/${tenantId}/flows/runs/${runId}/steps${qs ? `?${qs}` : ""}`,
         { method: "GET" },
       );
     },

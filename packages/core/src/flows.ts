@@ -80,6 +80,12 @@ export interface FlowGraphNode {
   id: string;
   type: string;
   config: Record<string, unknown>;
+  /**
+   * Posisi canvas builder (Fase 8B) — metadata tampilan yang dibawa apa
+   * adanya oleh normalisasi agar round-trip API utuh; eksekutor tidak
+   * pernah membacanya.
+   */
+  position?: { x: number; y: number };
 }
 
 export interface FlowGraphEdge {
@@ -107,6 +113,19 @@ const NODE_TYPES = new Set([
   "end",
 ]);
 
+function isValidFlowPosition(
+  value: unknown,
+): value is { x: number; y: number } {
+  if (typeof value !== "object" || value === null) return false;
+  const p = value as { x?: unknown; y?: unknown };
+  return (
+    typeof p.x === "number" &&
+    Number.isFinite(p.x) &&
+    typeof p.y === "number" &&
+    Number.isFinite(p.y)
+  );
+}
+
 /** Normalisasi jsonb graf menjadi bentuk kerja (defensif terhadap data lama). */
 export function normalizeFlowGraph(raw: unknown): FlowGraphData {
   const graph = (raw ?? {}) as { nodes?: unknown; edges?: unknown };
@@ -126,6 +145,12 @@ export function normalizeFlowGraph(raw: unknown): FlowGraphData {
             typeof n.config === "object" && n.config !== null
               ? (n.config as Record<string, unknown>)
               : {},
+          // `position` builder (8B) dipertahankan hanya bila bentuknya
+          // sah (dua angka finite); selain itu dibuang diam-diam —
+          // normalisasi memang defensif terhadap data lama/rusak.
+          ...(isValidFlowPosition(n.position)
+            ? { position: { x: n.position.x, y: n.position.y } }
+            : {}),
         }))
     : [];
   const edges: FlowGraphEdge[] = Array.isArray(graph.edges)
