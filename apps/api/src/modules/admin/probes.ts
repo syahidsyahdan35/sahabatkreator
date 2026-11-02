@@ -112,48 +112,47 @@ export async function probeR2Bucket(
   const region = "auto";
   const service = "s3";
   const host = new URL(config.endpoint).host;
-  const now = new Date();
-  const amzDate = now
-    .toISOString()
-    .replace(/[:-]/g, "")
-    .replace(/\.\d{3}/, "");
-  const dateStamp = amzDate.slice(0, 8);
   const payloadHash = sha256Hex("");
 
-  const canonicalHeaders =
-    `host:${host}\n` +
-    `x-amz-content-sha256:${payloadHash}\n` +
-    `x-amz-date:${amzDate}\n`;
-  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
-  const canonicalRequest = [
-    "HEAD",
-    `/${config.bucket}`,
-    "",
-    canonicalHeaders,
-    signedHeaders,
-    payloadHash,
-  ].join("\n");
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join("\n");
-  const signingKey = deriveSigV4SigningKey(
-    credentials.secretAccessKey,
-    dateStamp,
-    region,
-    service,
-  );
-  const signature = createHmac("sha256", signingKey)
-    .update(stringToSign, "utf8")
-    .digest("hex");
-
-  let res: Response;
-  try {
-    res = await fetch(`${config.endpoint}/${config.bucket}`, {
-      method: "HEAD",
+  /** Satu request bertanda tangan SigV4 untuk method yang diminta. */
+  const signedFetch = (method: "HEAD" | "GET"): Promise<Response> => {
+    const now = new Date();
+    const amzDate = now
+      .toISOString()
+      .replace(/[:-]/g, "")
+      .replace(/\.\d{3}/, "");
+    const dateStamp = amzDate.slice(0, 8);
+    const canonicalHeaders =
+      `host:${host}\n` +
+      `x-amz-content-sha256:${payloadHash}\n` +
+      `x-amz-date:${amzDate}\n`;
+    const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+    const canonicalRequest = [
+      method,
+      `/${config.bucket}`,
+      "",
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash,
+    ].join("\n");
+    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      amzDate,
+      credentialScope,
+      sha256Hex(canonicalRequest),
+    ].join("\n");
+    const signingKey = deriveSigV4SigningKey(
+      credentials.secretAccessKey!,
+      dateStamp,
+      region,
+      service,
+    );
+    const signature = createHmac("sha256", signingKey)
+      .update(stringToSign, "utf8")
+      .digest("hex");
+    return fetch(`${config.endpoint}/${config.bucket}`, {
+      method,
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       headers: {
         Authorization:
@@ -163,15 +162,45 @@ export async function probeR2Bucket(
         "x-amz-content-sha256": payloadHash,
       },
     });
+  };
+
+  let res: Response;
+  try {
+    res = await signedFetch("HEAD");
   } catch {
     return { ok: false, code: "R2_UNREACHABLE" };
   }
   if (res.status === 200) return { ok: true, code: "OK" };
-  if (res.status === 403) return { ok: false, code: "R2_AUTH_FAILED" };
+  if (res.status === 403 || res.status === 401) {
+    return { ok: false, code: "R2_AUTH_FAILED" };
+  }
   if (res.status === 404) return { ok: false, code: "R2_BUCKET_NOT_FOUND" };
+
+  // Status lain (mis. 400): HEAD tidak membawa body, jadi baca kode error
+  // S3 lewat GET bertanda tangan agar penolakan auth yang dibungkus 400
+  // (InvalidAccessKeyId dsb.) tetap terpetakan dengan jujur. Kode error
+  // S3 bukan rahasia — hanya ia yang boleh masuk `info`.
+  let s3Code: string | undefined;
+  try {
+    const getRes = await signedFetch("GET");
+    const text = await getRes.text();
+    s3Code = text.match(/<Code>([^<]+)<\/Code>/)?.[1];
+    if (getRes.status === 404 || s3Code === "NoSuchBucket") {
+      return { ok: false, code: "R2_BUCKET_NOT_FOUND" };
+    }
+  } catch {
+    // Abaikan — laporkan status HEAD apa adanya di bawah.
+  }
+  if (
+    s3Code === "InvalidAccessKeyId" ||
+    s3Code === "SignatureDoesNotMatch" ||
+    s3Code === "AccessDenied"
+  ) {
+    return { ok: false, code: "R2_AUTH_FAILED" };
+  }
   return {
     ok: false,
     code: "R2_UNEXPECTED_STATUS",
-    info: { status: res.status },
+    info: { status: res.status, ...(s3Code ? { s3Code } : {}) },
   };
 }
