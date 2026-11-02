@@ -3390,3 +3390,154 @@ migrasi (jurnal tetap 29 baris; 34 tabel / 45 policy).
   `processing_error` live secara deterministik tidak praktis tanpa
   merusak data), sedangkan skenario Meta `ignored_disconnected`
   diuji LIVE penuh dari webhook bertanda tangan sampai tercatat.
+
+---
+
+## Update Fase 7B.3 — Indikator Kesehatan Channel di kartu Channels (2026-11-02)
+
+Setiap kartu channel kini menampilkan kesehatan operasional dari data
+yang sudah tercatat sejak 7B.1: webhook terakhir diterima, pengiriman
+sukses terakhir, dan titik status (sehat / perlu perhatian / belum ada
+aktivitas). Commit fitur `e0c3785` (`feat(channels): phase 7B.3
+channel health indicators on channel cards`) + perbaikan `c767a4a`.
+TANPA migrasi — skema 7B.1 + messages/audit sudah cukup (tetap 34
+tabel / 45 policy, jurnal 29 baris).
+
+### Kontrak & perhitungan (core `packages/core/src/channel-health.ts`)
+
+- `ChannelAccountResponse.health` kini WAJIB hadir di semua respons
+  akun channel (daftar, Sampah, connect/disconnect/trash/restore):
+  `{ status: 'ok'|'attention'|'idle', lastInboundAt,
+  lastInboundOutcome, lastDeliveredAt, lastFailureAt,
+  lastFailureOutcome, lastFailureErrorCode }` — waktu ISO atau null.
+  `IntegrationLogOutcomeSchema` dipindah ke seksi channel di
+  contracts agar dipakai skema health maupun log.
+- Perhitungan server: `getChannelHealthMap(db, ctx, accounts)` —
+  TIGA kueri agregat untuk seluruh daftar tenant dalam SATU transaksi
+  konteks tenant (bukan N+1 per kartu): satu agregat `integration_log`
+  untuk semua provider ber-webhook, dua agregat untuk webchat.
+  Aturan status (`computeChannelHealthStatus`, fungsi murni):
+  - **idle** — tidak ada aktivitas tercatat sama sekali;
+  - **attention** — ada sinyal kegagalan DAN (belum pernah ada
+    aktivitas sehat ATAU kegagalan terakhir KETAT lebih baru daripada
+    aktivitas sehat terakhir);
+  - **ok** — ada aktivitas dan tidak ada kegagalan yang lebih baru.
+  "Aktivitas sehat" = webhook masuk ber-outcome `recorded`/`duplicate`
+  atau kirim keluar sukses. "Sinyal kegagalan" = masuk ber-outcome
+  `rejected_signature`, `rejected_unconfigured`,
+  `unresolved_account`, `error`, `ignored_disconnected`, atau keluar
+  ber-outcome `failed`. `ignored_disconnected` masuk kelas kegagalan
+  karena maknanya persis "event tiba tetapi dibuang"; begitu channel
+  terhubung lagi dan event tercatat, status pulih sendiri.
+- **Sumber data per provider:**
+  - Telegram/Messenger/Instagram/WhatsApp: semua fakta dari
+    `integration_log` per `channel_account_id` (hit masuk terakhir
+    apa pun outcome-nya + outcome-nya; `out`/`sent` terakhir; baris
+    kegagalan terakhir + error_code-nya). Hit Meta yang gagal di
+    gerbang bersama ber-`channel_account_id` NULL → tidak menempel ke
+    kartu mana pun (memang belum teratribusi); terlihat di /logs
+    sebagai baris platform.
+  - **Webchat** (flush gateway BUKAN percobaan API provider dan tidak
+    dicatat integration_log by design 7B.1): masuk terakhir =
+    `messages.created_at` pesan inbound terakhir akun (join
+    conversations); terkirim terakhir = `audit_logs.created_at` baris
+    audit `message.sent` bermeta `channel='webchat'` terakhir —
+    `flushQueuedWebchatMessages` adalah SATU-SATUNYA penanda `sent`
+    webchat dan auditnya ditulis pada transaksi flush yang sama, jadi
+    stempelnya adalah waktu antar sesungguhnya (BUKAN
+    `messages.created_at` balasan, yang bisa jauh lebih awal saat
+    pengunjung luring — terbukti di rantai: lastDelivered ≥ waktu
+    balasan dibuat). Outcome masuk & semua fakta kegagalan webchat
+    selalu null: webchat tidak punya konsep outcome webhook dan
+    pesannya tidak pernah berstatus `failed` (7B.2).
+- **Gotcha driver (akar perbaikan `c767a4a`):** proyeksi agregat
+  `max(timestamptz)` lewat templat `sql` Drizzle TIDAK melewati pemeta
+  kolom timestamp — driver mengembalikannya sebagai STRING format
+  Postgres (`2026-11-02 07:23:35.998333+00`), bukan `Date`. Gejala:
+  endpoint channel 500 begitu akun punya baris log (`.getTime()` /
+  `.toISOString()` pada string), sementara akun kosong tetap menjawab
+  idle dengan sehat. Perbaikan: helper `toDate` menormalisasi semua
+  stempel agregat di core. Ingat pola ini untuk agregat SQL mentah
+  berikutnya.
+
+### UI (kartu Channels)
+
+Blok `ChannelHealthBlock` di bawah baris pill status kartu: titik
+semantik (success/warning/muted) + label status ("Sehat" / "Perlu
+perhatian"); `idle` = satu baris redup "Belum ada aktivitas" (bukan
+alarm). Fakta tampil sebagai baris label–waktu RELATIF
+(`Intl.RelativeTimeFormat` lewat helper baru `formatRelativeTime`;
+timestamp penuh di atribut `title`): "Webhook terakhir" (webchat:
+"Pesan terakhir") dan "Terakhir terkirim". Kegagalan terakhir tampil
+sebagai chip peringatan: label outcome (kunci `logs.outcome*` yang
+sama seperti halaman Logs) + `error_code` mono + waktu relatif.
+Channel disconnected tetap menampilkan riwayatnya. String baru di
+`channels.health*` (en+id); perilaku modal connect/disconnect/trash
+tidak berubah.
+
+### Deploy
+
+Build api+web+worker+realtime di VM → commit `e0c3785` → push →
+rsync repo (`.env.staging` dikecualikan & utuh) → 4 service direstart
+→ health ok; bundle publik **`index-cjxmySoy.js`** identik build
+lokal & memuat string health baru. Perbaikan `c767a4a` di-deploy
+dengan pola yang sama (rsync + restart API).
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+
+- Lokal: typecheck SEMUA paket hijau; build api/web/worker/realtime
+  hijau.
+- **Rantai dari server terhadap staging publik: 40/40 PASS**
+  (tenant uji `fase7b3-*@sk.test` run ber-suffix unik; mock Telegram
+  8410 + Graph 8411; jendela `TELEGRAM_API_BASE`/`META_API_BASE` +
+  `META_APP_SECRET` uji; `.env.staging` dipulihkan **byte-identik**
+  — sha256 diverifikasi driver — dan mock dimatikan sesudahnya):
+  - S1: telegram & webchat baru → `health.status='idle'`, semua waktu
+    & outcome null (di respons connect maupun daftar).
+  - S2: webhook telegram tercatat → `lastInboundOutcome='recorded'`;
+    balasan terkirim via poller → `lastDeliveredAt` terisi, status
+    `ok`, tanpa kegagalan.
+  - S3: mock kirim gagal → status `attention`, chip
+    `failed`/`telegram_http_400`; kirim sukses baru → pulih `ok`
+    (terkirim terakhir > gagal terakhir).
+  - S4: webhook secret salah (401) → `lastFailureOutcome=
+    'rejected_signature'`, inbound terakhir juga outcome itu, status
+    `attention`; webhook valid → pulih `ok`.
+  - S5: messenger lewat jalur yang sama (DM tercatat + balasan
+    terkirim via mock Graph → `ok` + `lastDeliveredAt`).
+  - S6: webchat — sesi pengunjung + pesan masuk → `lastInboundAt`
+    dari messages, outcome null, `ok`; balasan dashboard diantar
+    flush gateway saat pengunjung connect WebSocket publik →
+    `lastDeliveredAt` dari audit flush terisi dan ≥ waktu balasan
+    dibuat.
+  - S7: isolasi — bot tenant B idle walau A aktif; aktivitas B tidak
+    mengubah health A; daftar B hanya memuat akunnya.
+  - S8: channel asli user tidak tersentuh — bot `8fb9b81c…`
+    (@botaramyid_bot) tetap `connected` dan baris integration_log
+    untuk akun itu tetap 0.
+- Insiden proses (bukan produk): run rantai pertama kehilangan output
+  karena koneksi SSH putus (keadaan server diverifikasi bersih, env
+  pulih oleh trap driver); run kedua (28 PASS / 12 FAIL) membuka bug
+  format waktu agregat di atas — akar masalah dibuktikan dengan
+  skrip debug core di server, diperbaiki di `c767a4a`, dan run ketiga
+  bersih 40/40.
+
+### Batas jujur
+
+- Bukti visual blok kesehatan di kartu (titik, chip, waktu relatif)
+  menunggu uji user sesuai pembagian kerja — yang terbukti: kontrak
+  API, perhitungan server, bundle tersaji, dan seluruh rantai
+  perilaku.
+- Kesehatan per kartu hanya mencerminkan event yang TERATRIBUSI ke
+  akun itu: penolakan tanda tangan Meta di gerbang bersama (sebelum
+  routing per akun) tidak menempel ke kartu mana pun — tempatnya di
+  /logs (baris platform/unresolved).
+- Untuk Telegram, `rejected_signature` pasca-disconnect memang akan
+  menandai kartu terputus sebagai `attention` (secret-nya sudah
+  dihapus disconnect sehingga hit basi selalu tertolak) — itu jujur:
+  ada webhook yang masih menembak akun mati; pill status tetap
+  menunjukkan `disconnected` sebagai konteks utamanya.
+- Stempel webchat `lastDeliveredAt` seakurat audit flush gateway:
+  flush terjadi saat pengunjung connect / nudge antrean, jadi
+  nilainya waktu serah-terima socket — bukan receipt baca pengunjung
+  (webchat memang tidak punya konsep itu di v1).
