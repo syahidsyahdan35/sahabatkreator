@@ -388,6 +388,7 @@ export function createChannelsRoutes(
         pageAccessToken: parsed.data.pageAccessToken,
         pageId: parsed.data.pageId,
         igUserId: parsed.data.igUserId,
+        tokenType: parsed.data.tokenType,
       });
     }
     if (parsed.data.provider === "whatsapp") {
@@ -956,6 +957,25 @@ async function reviveTelegramAccount(
  *    (satu URL untuk semua akun, dipasang sekali di Meta App).
  * 4. Foto profil Page/akun IG diambil & disimpan (pola 6D,
  *    fire-and-forget).
+ *
+ * Varian System User Token untuk Instagram (Fase 7D.3,
+ * `tokenType: "system_user_token"`): OAuth Unified Login tidak bisa
+ * menjangkau akun IG pemilik aplikasi sendiri — portfolio bisnis
+ * aplikasi dan akun IG yang sama berarti "business integration system
+ * user" tersembunyi dari alur itu tidak menerima asetnya (penemuan
+ * /me/assigned_instagram_accounts selalu kosong untuk kasus
+ * satu-portfolio). Jalan resminya adalah SUAT dari System User
+ * EKSPILISIT yang dibuat pemilik di Pengaturan Bisnis (aset aplikasi +
+ * akun IG ditetapkan kepadanya). Varian ini menerima token itu TANPA
+ * Page ID: validasi `GET /{ig-id}?fields=id,username` dengan SUAT
+ * (gagal → 422 META_TOKEN_INVALID yang sama); `client_business_id`
+ * diambil best-effort sebagai parent_external_id; sesudah tersimpan,
+ * subscribe `POST /{ig-id}/subscribed_apps` dicoba — kegagalannya
+ * menjadi peringatan META_SUBSCRIBE_FAILED di respons, BUKAN kegagalan
+ * koneksi (konsisten dengan complete OAuth 7D). Jalur simpan persis
+ * sama (create/revive + penjaga 409 + enkripsi yang sama), dan poller
+ * pengiriman memakai token tersimpan apa adanya sebagai Bearer ke
+ * `POST /{ig-id}/messages` — tidak ada asumsi token-Page di jalur itu.
  */
 async function connectMeta(
   c: Parameters<typeof apiError>[0],
@@ -969,11 +989,18 @@ async function connectMeta(
     pageAccessToken?: string;
     pageId?: string;
     igUserId?: string;
+    /** Fase 7D.3: hanya bermakna untuk instagram (lihat kontrak). */
+    tokenType?: "page_access_token" | "system_user_token";
   },
 ) {
   if (!input.pageAccessToken) {
     return apiError(c, 400, "VALIDATION_ERROR", "pageAccessToken is required for Meta channels");
   }
+  // Varian SUAT (Fase 7D.3): hanya untuk instagram; provider lain dan
+  // tokenType absen/page_access_token = perilaku 7A persis.
+  const isSuat =
+    input.provider === "instagram" &&
+    input.tokenType === "system_user_token";
   // external_id akun: messenger = Page ID; instagram = ID akun IG.
   const accountExternalId =
     input.provider === "instagram" ? input.igUserId : input.pageId;
@@ -987,7 +1014,7 @@ async function connectMeta(
         : "pageId is required for messenger",
     );
   }
-  if (input.provider === "instagram" && !input.pageId) {
+  if (input.provider === "instagram" && !input.pageId && !isSuat) {
     return apiError(c, 400, "VALIDATION_ERROR", "pageId (the connected Facebook Page) is required for instagram");
   }
   if (!opts.channelTokenSecret) {
@@ -1000,13 +1027,32 @@ async function connectMeta(
   });
 
   // Validasi token + ambil identitas publik akun dari Graph.
-  let profile;
+  // - Varian Page token (7A): profil objek + (khusus IG) profil Page.
+  // - Varian SUAT (7D.3): profil ringkas akun IG saja (id, username);
+  //   konteks portofolio (client_business_id) best-effort — kegagalan
+  //   membacanya menghasilkan null, BUKAN kegagalan koneksi.
+  let profile: { id: string; name: string | null; username: string | null };
+  let suatParentExternalId: string | null = null;
   try {
-    profile = await client.getObjectProfile(accountExternalId);
-    if (input.provider === "instagram" && input.pageId) {
-      // Token juga harus berlaku untuk Page yang terhubung — inilah
-      // satu-satunya guna Page ID pada connect IG (tidak disimpan).
-      await client.getObjectProfile(input.pageId);
+    if (isSuat) {
+      const igProfile = await client.getInstagramAccountProfile(
+        accountExternalId,
+      );
+      profile = {
+        id: igProfile.id,
+        name: null,
+        username: igProfile.username,
+      };
+      suatParentExternalId = await client
+        .getClientBusinessId()
+        .catch(() => null);
+    } else {
+      profile = await client.getObjectProfile(accountExternalId);
+      if (input.provider === "instagram" && input.pageId) {
+        // Token juga harus berlaku untuk Page yang terhubung — inilah
+        // satu-satunya guna Page ID pada connect IG (tidak disimpan).
+        await client.getObjectProfile(input.pageId);
+      }
     }
   } catch (err) {
     if (err instanceof MetaGraphError) {
@@ -1027,6 +1073,32 @@ async function connectMeta(
   } catch {
     return apiError(c, 503, "INTERNAL_ERROR", "Channel credential encryption is not configured");
   }
+
+  // Penutup connect untuk jalur yang MENYIMPAN kredensial (create &
+  // revive). Varian SUAT (7D.3): sesudah tersimpan, subscribe akun IG
+  // ke webhook aplikasi dicoba dengan SUAT yang sama — kegagalan TIDAK
+  // menggagalkan koneksi, melainkan peringatan META_SUBSCRIBE_FAILED
+  // yang menempel pada respons (konsisten dengan complete OAuth 7D;
+  // kontrak respons manual tetap objek channel, peringatan adalah
+  // field tambahan opsional). Varian lain: respons persis seperti
+  // sebelumnya, tanpa field tambahan.
+  const finishSavedConnect = async (
+    row: ChannelAccount,
+    status: 200 | 201,
+  ) => {
+    const serialized = await serializeChannelWithHealth(bundle, row);
+    if (!isSuat) return c.json(serialized, status);
+    const warnings: Array<"META_SUBSCRIBE_FAILED"> = [];
+    try {
+      await client.subscribeAppToObject(accountExternalId, ["messages"]);
+    } catch {
+      warnings.push("META_SUBSCRIBE_FAILED");
+      console.error(
+        `[meta] subscribe subscribed_apps akun IG ${row.id} (varian SUAT) gagal — koneksi tetap aktif`,
+      );
+    }
+    return c.json({ ...serialized, warnings }, status);
+  };
 
   // Penjaga "satu akun = satu koneksi": akun ini tidak boleh AKTIF di
   // workspace lain (pesan Page/IG hanya boleh masuk ke satu inbox).
@@ -1058,6 +1130,9 @@ async function connectMeta(
     }
     // Akun milik workspace ini 'disconnected'/'error': hidupkan lagi
     // baris yang sama dengan kredensial baru (pola revive Telegram).
+    // Varian SUAT: segarkan juga konteks portofolio bila terbaca —
+    // null hasil bacaan gagal TIDAK menimpa nilai lama (undefined =
+    // jangan ubah, lihat core).
     const updated = await updateMetaChannelAccountCredentials(
       bundle.db,
       { tenantId: input.tenantId },
@@ -1067,6 +1142,8 @@ async function connectMeta(
         publicHandle: profile.username,
         graphName: profile.name,
         displayName: input.displayName,
+        parentExternalId:
+          isSuat && suatParentExternalId ? suatParentExternalId : undefined,
         status: "connected",
       },
     );
@@ -1074,7 +1151,7 @@ async function connectMeta(
       return apiError(c, 404, "NOT_FOUND", "Channel not found");
     }
     scheduleMetaAccountPhoto(bundle, client, input.tenantId, updated.id, accountExternalId);
-    return c.json(await serializeChannelWithHealth(bundle, updated), 200);
+    return finishSavedConnect(updated, 200);
   }
 
   let row: ChannelAccount;
@@ -1090,6 +1167,9 @@ async function connectMeta(
         displayName: input.displayName,
         encryptedAccessToken,
         graphApiVersion: META_GRAPH_API_VERSION,
+        // Varian SUAT (7D.3): konteks portofolio pemilik token.
+        // Varian lain: undefined → core menyimpan null (perilaku 7A).
+        parentExternalId: isSuat ? suatParentExternalId : undefined,
       },
     );
   } catch {
@@ -1132,7 +1212,7 @@ async function connectMeta(
   }
 
   scheduleMetaAccountPhoto(bundle, client, input.tenantId, row.id, accountExternalId);
-  return c.json(await serializeChannelWithHealth(bundle, row), 201);
+  return finishSavedConnect(row, 201);
 }
 
 /**

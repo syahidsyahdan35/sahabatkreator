@@ -10,6 +10,7 @@ import {
   MetaOAuthStartResponseSchema,
   type ChannelAccountResponse,
   type MetaOAuthAsset,
+  type MetaOAuthEmptyHint,
   type MetaOAuthProvider,
 } from "@sahabat-kreator/contracts";
 import {
@@ -36,6 +37,7 @@ import {
 import {
   MetaGraphClient,
   MetaGraphError,
+  type MetaDiscoveryTraceEntry,
 } from "@sahabat-kreator/channel-messenger";
 import { WhatsAppCloudClient } from "@sahabat-kreator/channel-whatsapp";
 import { createRedisConnection } from "@sahabat-kreator/queue";
@@ -63,8 +65,12 @@ import { resolveTenantForUser } from "../tenants/guard";
  *   channel = Page Access Token turunan token long-lived per Page.
  * - instagram — Unified Login: dialog membawa `config_id` (BUKAN scope,
  *   BUKAN JS SDK); exchange code → Business Integration System User
- *   Access Token (SUAT); aset dari /me/assigned_instagram_accounts;
- *   `client_business_id` dari /me disimpan sebagai parent_external_id.
+ *   Access Token (SUAT); aset dari RANTAI penemuan multi-tepi
+ *   (Fase 7D.3: assigned_instagram_accounts → IG-pada-Page →
+ *   IG-milik-portofolio → per-Page; kandidat lewat Page membawa Page
+ *   token-nya dan disimpan dengan token itu); probe /me membedakan
+ *   SUAT vs token user untuk petunjuk picker; `client_business_id`
+ *   disimpan sebagai parent_external_id.
  * - whatsapp — Embedded Signup (Login for Business): dialog membawa
  *   `config_id`; exchange code → token bisnis; penemuan WABA ter-assign
  *   + nomor-nomornya DARI TOKEN di server (keputusan redirect-based —
@@ -295,14 +301,35 @@ interface OAuthSessionData {
   provider: MetaOAuthProvider;
   userId: string;
   assets: MetaOAuthAsset[];
-  /** Messenger: Page Access Token per Page ID (asetnya banyak token). */
+  /**
+   * Page Access Token per ID aset: Messenger per Page; Instagram
+   * (Fase 7D.3) per akun IG yang ditemukan LEWAT sebuah Page — aset
+   * itu disimpan dengan token Page-nya, bukan token alur.
+   */
   pageTokens?: Record<string, string>;
   /** Instagram (SUAT) & WhatsApp (token bisnis): satu token semua aset. */
   accessToken?: string;
   /** Instagram: client_business_id portfolio klien (konteks induk). */
   clientBusinessId?: string | null;
+  /**
+   * Instagram (Fase 7D.3): petunjuk keadaan kosong picker, dihitung di
+   * callback dari probe profil token + jejak penemuan. TANPA token —
+   * aman hidup di sesi & tampil ke browser.
+   */
+  emptyHint?: MetaOAuthEmptyHint | null;
   /** Epoch milidetik kedaluwarsa sesi. */
   expiresAt: number;
+}
+
+/** Format jejak penemuan untuk satu baris log: `label=jumlah` / `label=ERR:kelas`. */
+function formatDiscoveryTrace(trace: MetaDiscoveryTraceEntry[]): string {
+  return trace
+    .map((entry) =>
+      entry.error
+        ? `${entry.label}=ERR:${entry.error}`
+        : `${entry.label}=${entry.count}`,
+    )
+    .join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +645,18 @@ export function createMetaOAuthRoutes(
           ...credentials,
           shortLivedToken: short.accessToken,
         });
-        const pages = await graphClient(longLived.accessToken).getManagedPages();
+        // Daftar Page lewat rantai yang sama seperti penemuan IG
+        // (Fase 7D.3): /me/accounts → assigned_pages → businesses +
+        // pengisian token. Untuk token user klasik hasil /me/accounts
+        // dipertahankan persis (kemunculan pertama menang) — rantai
+        // hanya menemukan Page tambahan untuk token bisnis.
+        const pageTrace: MetaDiscoveryTraceEntry[] = [];
+        const pages = await graphClient(longLived.accessToken).getManagedPages(
+          pageTrace,
+        );
+        console.log(
+          `[meta-oauth] discovery provider=messenger ${formatDiscoveryTrace(pageTrace)} total=${pages.length}`,
+        );
         const pageTokens: Record<string, string> = {};
         const assets: MetaOAuthAsset[] = pages.map((page) => {
           pageTokens[page.id] = page.accessToken;
@@ -651,25 +689,81 @@ export function createMetaOAuthRoutes(
           redirectUri,
         });
         const client = graphClient(suat.accessToken);
-        const accounts = await client.getAssignedInstagramAccounts();
-        const clientBusinessId = await client
-          .getClientBusinessId()
-          .catch(() => null);
+        // Probe profil token (Fase 7D.3, best-effort): client_business_id
+        // yang terisi = token System User (BISU); kosong = token user.
+        // Dipakai untuk konteks induk + petunjuk keadaan kosong picker.
+        let tokenProfile: {
+          id: string | null;
+          clientBusinessId: string | null;
+        } | null = null;
+        try {
+          tokenProfile = await client.getTokenProfile();
+        } catch {
+          tokenProfile = null;
+        }
+        const clientBusinessId = tokenProfile?.clientBusinessId ?? null;
+        // RANTAI PENEMUAN multi-tepi (Fase 7D.3) menggantikan union
+        // /me + /{business}/assigned_instagram_accounts rancangan awal
+        // fase ini (tepi bisnis lama tercakup semangatnya oleh tepi
+        // (c) businesses_instagram_accounts): assigned → IG-pada-Page
+        // → IG-milik-portofolio → per-Page, dedupe by ID akun IG.
+        // Kandidat yang ditemukan lewat Page membawa Page token-nya —
+        // disimpan per aset di pageTokens dan dipakai saat complete.
+        const trace: MetaDiscoveryTraceEntry[] = [];
+        const candidates = await client.discoverInstagramAccounts(trace);
+        const pageTokens: Record<string, string> = {};
+        const assets: MetaOAuthAsset[] = candidates.map((candidate) => {
+          if (candidate.pageAccessToken) {
+            pageTokens[candidate.id] = candidate.pageAccessToken;
+          }
+          return {
+            assetId: candidate.id,
+            kind: "instagram_account" as const,
+            name: null,
+            handle: candidate.username,
+            parentId: clientBusinessId,
+            parentName: null,
+            linkedIgUsername: null,
+          };
+        });
+        console.log(
+          `[meta-oauth] discovery provider=instagram ${formatDiscoveryTrace(trace)} total=${assets.length} token=${
+            tokenProfile === null
+              ? "unknown"
+              : clientBusinessId
+                ? "system_user"
+                : "user"
+          }`,
+        );
+        // Petunjuk keadaan kosong (Fase 7D.3): hanya saat tak ada aset.
+        // Prioritas: error izin tepi portofolio paling bisa ditindak;
+        // lalu jenis token; terakhir SUAT-sah-namun-kosong.
+        let emptyHint: MetaOAuthEmptyHint | null = null;
+        if (assets.length === 0) {
+          const businessEdge = trace.find(
+            (entry) => entry.label === "businesses_instagram_accounts",
+          );
+          if (
+            businessEdge?.error === "graph_200" ||
+            businessEdge?.error === "graph_10"
+          ) {
+            emptyHint = "business_permission_missing";
+          } else if (tokenProfile !== null && !clientBusinessId) {
+            emptyHint = "not_system_user";
+          } else if (tokenProfile !== null && clientBusinessId) {
+            emptyHint = "no_accounts_shared";
+          }
+        }
         session = {
           tenantId: state.tenantId,
           provider: "instagram",
           userId: state.userId,
-          assets: accounts.map((account) => ({
-            assetId: account.id,
-            kind: "instagram_account" as const,
-            name: null,
-            handle: account.username,
-            parentId: clientBusinessId,
-            parentName: null,
-            linkedIgUsername: null,
-          })),
+          assets,
+          pageTokens:
+            Object.keys(pageTokens).length > 0 ? pageTokens : undefined,
           accessToken: suat.accessToken,
           clientBusinessId,
+          emptyHint,
           expiresAt: Date.now() + OAUTH_TTL_SECONDS * 1000,
         };
       } else {
@@ -700,6 +794,13 @@ export function createMetaOAuthRoutes(
             });
           }
         }
+        // Instrumentasi jumlah (Fase 7D.3, pola yang sama seperti
+        // Instagram): me = jumlah WABA dari tepi /me; business = null
+        // karena discovery WhatsApp memang tidak memakai tepi bisnis;
+        // total = jumlah aset nomor yang bisa dipilih.
+        console.log(
+          `[meta-oauth] discovery provider=whatsapp me=${wabas.length} business=null total=${assets.length}`,
+        );
         session = {
           tenantId: state.tenantId,
           provider: "whatsapp",
@@ -802,6 +903,7 @@ export function createMetaOAuthRoutes(
       sessionId,
       provider: session.provider,
       assets: session.assets,
+      emptyHint: session.emptyHint ?? null,
       expiresAt: new Date(session.expiresAt).toISOString(),
     });
     return c.json(body);
@@ -856,10 +958,11 @@ export function createMetaOAuthRoutes(
       );
     }
     const provider = session.provider;
+    // Token per aset menang atas token alur: Messenger per Page;
+    // Instagram untuk kandidat yang ditemukan lewat Page (Fase 7D.3);
+    // WhatsApp & kandidat IG lain jatuh ke token alur sesi.
     const accessToken =
-      provider === "messenger"
-        ? session.pageTokens?.[asset.assetId]
-        : session.accessToken;
+      session.pageTokens?.[asset.assetId] ?? session.accessToken;
     if (!accessToken) {
       return apiError(
         c,

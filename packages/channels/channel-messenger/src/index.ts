@@ -105,6 +105,52 @@ export interface MetaManagedPage {
   linkedIg: { id: string; username: string | null } | null;
 }
 
+/**
+ * Satu baris jejak penemuan aset (Fase 7D.3): tiap edge Graph yang
+ * dicoba rantai penemuan meninggalkan label + jumlah hasil mentahnya,
+ * atau kelas error AMAN bila edge gagal (`graph_<kode>` /
+ * `http_<status>` / `network` / `unknown` — pesan resmi Graph dan
+ * token tidak pernah masuk jejak). Lapisan route menulis seluruh jejak
+ * sebagai satu baris log `[meta-oauth] discovery ...` agar kegagalan
+ * penemuan live terdiagnosis per edge dari log saja.
+ */
+export interface MetaDiscoveryTraceEntry {
+  label: string;
+  count: number;
+  error: string | null;
+}
+
+/** Kelas error aman untuk jejak penemuan (lihat MetaDiscoveryTraceEntry). */
+function discoveryErrorClass(err: unknown): string {
+  if (err instanceof MetaGraphError) {
+    if (err.status === 0) return "network";
+    return err.graphCode !== null ? `graph_${err.graphCode}` : `http_${err.status}`;
+  }
+  return "unknown";
+}
+
+/**
+ * Kandidat akun IG hasil rantai penemuan (Fase 7D.3). Kandidat yang
+ * ditemukan LEWAT sebuah Page (tepi accounts/per-Page) membawa Page
+ * Access Token Page itu — saat complete, token itulah yang disimpan
+ * (semantik yang sama seperti connect manual IG via Page 7A); kandidat
+ * dari tepi lain memakai token alur (SUAT Unified Login).
+ */
+export interface MetaInstagramCandidate {
+  id: string;
+  username: string | null;
+  pageAccessToken: string | null;
+}
+
+/** Kandidat Page dari rantai daftar Page (token bisa belum terisi). */
+export interface MetaPageCandidate {
+  id: string;
+  name: string | null;
+  username: string | null;
+  accessToken: string | null;
+  linkedIg: { id: string; username: string | null } | null;
+}
+
 /** Satu nomor telepon di bawah WABA (Fase 7D, penemuan Embedded Signup). */
 export interface MetaWabaPhoneNumber {
   id: string;
@@ -227,6 +273,27 @@ export class MetaGraphClient {
   }
 
   /**
+   * Profil ringkas akun IG (`GET /{ig-id}?fields=id,username`) — bentuk
+   * validasi connect manual Instagram varian System User Token (Fase
+   * 7D.3): SUAT memvalidasi akun IG-nya langsung, tanpa perantara Page,
+   * jadi field yang diminta persis id + username (username menjadi
+   * handle publik akun). Token yang ditolak Graph melempar
+   * MetaGraphError seperti getObjectProfile.
+   */
+  async getInstagramAccountProfile(
+    id: string,
+  ): Promise<{ id: string; username: string | null }> {
+    const body = await this.getJson<{
+      id?: string;
+      username?: string;
+    }>(`${encodeURIComponent(id)}?fields=id,username`);
+    return {
+      id: typeof body.id === "string" ? body.id : id,
+      username: typeof body.username === "string" ? body.username : null,
+    };
+  }
+
+  /**
    * Foto profil Page/akun IG (`GET /{id}/picture?type=large`): Graph
    * menjawab redirect ke CDN atau langsung byte gambar. Mengembalikan
    * byte + content-type, atau null bila tidak ada gambar (404). Catatan
@@ -272,8 +339,13 @@ export class MetaGraphClient {
   //   7D.2 — asumsi awal "tanpa redirect_uri" gugur oleh bukti live:
   //   Graph menolak code dengan error 100 bila redirect_uri absen)
   //   menghasilkan Business Integration System User Access Token (SUAT);
-  //   aset dari /me/assigned_instagram_accounts; konteks portfolio dari
-  //   /me?fields=client_business_id.
+  //   aset dari RANTAI penemuan multi-tepi (Fase 7D.3:
+  //   discoverInstagramAccounts — assigned + IG-di-Page + IG-portofolio
+  //   + per-Page; konteks portfolio dari probe /me?fields=
+  //   client_business_id). Satu tepi saja terbukti tidak cukup: dialog
+  //   tampaknya menyerahkan Page sebagai aset dan IG menumpang padanya,
+  //   dan akun aset portofolio tanpa Page hanya terlihat dari tepi
+  //   businesses.
   // - WhatsApp Embedded Signup (advanced implementation): exchange yang
   //   sama menghasilkan token bisnis; WABA ter-assign ditemukan dari
   //   token, nomor-nomornya dari tepi phone_numbers WABA.
@@ -284,9 +356,13 @@ export class MetaGraphClient {
   /**
    * Tukar authorization `code` → access token:
    * `GET /oauth/access_token?client_id&client_secret&code[&redirect_uri]`.
-   * `redirectUri` hanya untuk alur klasik (Messenger); alur berbasis
-   * konfigurasi (Unified Login IG & Embedded Signup WA) menukarnya TANPA
-   * redirect_uri, persis contoh dokumentasi Unified Login.
+   * `redirectUri` WAJIB disertakan bila dialog yang menerbitkan code
+   * dibangun dengan `redirect_uri` — dan dialog ketiga provider kita
+   * memang dibangun begitu (Hotfix 7D.2: asumsi awal bahwa alur
+   * berbasis konfigurasi menukarnya TANPA redirect_uri GUGUR oleh bukti
+   * live — Graph menolak dengan error 100 "Error validating
+   * verification code"). Ketiga cabang routes OAuth kini selalu
+   * meneruskan redirectUri callback yang identik.
    */
   async exchangeOAuthCode(input: {
     clientId: string;
@@ -345,46 +421,38 @@ export class MetaGraphClient {
   }
 
   /**
-   * Page yang dikelola pemilik token user (`GET /me/accounts`) — setiap
-   * entri membawa Page Access Token turunannya sendiri + akun IG
-   * Professional yang terhubung (info pemilih saja). Klien ini harus
-   * dibangun dengan user token (long-lived) sebagai accessToken.
+   * Probe profil token (`GET /me?fields=id,client_business_id`) —
+   * Fase 7D.3: `client_business_id` yang terisi menandai token System
+   * User (Business Integration System User dari Unified Login / SUAT
+   * eksplisit); token user klasik tidak memilikinya. Lapisan route
+   * memakainya untuk pesan kegagalan penemuan yang spesifik. Melempar
+   * MetaGraphError pada penolakan Graph — pemanggil memperlakukannya
+   * best-effort.
    */
-  async getManagedPages(): Promise<MetaManagedPage[]> {
+  async getTokenProfile(): Promise<{
+    id: string | null;
+    clientBusinessId: string | null;
+  }> {
     const body = await this.getJsonParams<{
-      data?: Array<{
-        id?: string;
-        name?: string;
-        username?: string;
-        access_token?: string;
-        instagram_business_account?: { id?: string; username?: string };
-      }>;
-    }>("me/accounts", {
-      fields: "id,name,username,access_token,instagram_business_account{id,username}",
-      limit: "100",
-    });
-    const pages: MetaManagedPage[] = [];
-    for (const row of body.data ?? []) {
-      if (typeof row.id !== "string" || !row.id) continue;
-      if (typeof row.access_token !== "string" || !row.access_token) continue;
-      pages.push({
-        id: row.id,
-        name: typeof row.name === "string" ? row.name : null,
-        username: typeof row.username === "string" ? row.username : null,
-        accessToken: row.access_token,
-        linkedIg:
-          typeof row.instagram_business_account?.id === "string"
-            ? {
-                id: row.instagram_business_account.id,
-                username:
-                  typeof row.instagram_business_account.username === "string"
-                    ? row.instagram_business_account.username
-                    : null,
-              }
-            : null,
-      });
-    }
-    return pages;
+      id?: string;
+      client_business_id?: string;
+    }>("me", { fields: "id,client_business_id" });
+    return {
+      id: typeof body.id === "string" ? body.id : null,
+      clientBusinessId:
+        typeof body.client_business_id === "string"
+          ? body.client_business_id
+          : null,
+    };
+  }
+
+  /**
+   * ID portfolio bisnis klien pemilik token (`GET
+   * /me?fields=client_business_id`) — disimpan sebagai konteks induk
+   * akun IG (parent_external_id) untuk manajemen token kelak.
+   */
+  async getClientBusinessId(): Promise<string | null> {
+    return (await this.getTokenProfile()).clientBusinessId;
   }
 
   /**
@@ -410,18 +478,416 @@ export class MetaGraphClient {
   }
 
   /**
-   * ID portfolio bisnis klien pemilik token BISU (`GET
-   * /me?fields=client_business_id`) — disimpan sebagai konteks induk
-   * akun IG (parent_external_id) untuk manajemen token kelak.
+   * Rantai daftar Page terkelola (Fase 7D.3) — dipakai penemuan
+   * Messenger DAN tepi per-Page penemuan Instagram:
+   *   1. `GET /me/accounts?fields=id,name,username,access_token,
+   *      instagram_business_account{id,username}` (Page + tokennya)
+   *   2. `GET /me/assigned_pages?fields=id,name` (Page ter-assign yang
+   *      tidak muncul di /me/accounts untuk token bisnis)
+   *   3. `GET /me/businesses?fields=id,name,owned_pages{id,name},
+   *      client_pages{id,name}` (Page milik/terhubung portofolio)
+   * Dedupe by Page ID — kemunculan pertama menang, jadi hasil
+   * /me/accounts untuk token user klasik TIDAK berubah (rantai hanya
+   * MENAMBAH Page yang belum terlihat). Page tanpa token diisi
+   * best-effort lewat `GET /{page-id}?fields=...,access_token,...`
+   * (respons yang sama sekaligus mengisi username & akun IG tertaut).
+   * Setiap tepi dicatat ke `trace` bila diberikan; kegagalan satu tepi
+   * tidak menggagalkan tepi lain. Mengembalikan SEMUA kandidat
+   * (termasuk yang tokennya tetap kosong — pemanggil memutuskan).
    */
-  async getClientBusinessId(): Promise<string | null> {
-    const body = await this.getJsonParams<{ client_business_id?: string }>(
-      "me",
-      { fields: "client_business_id" },
+  async listPageCandidates(
+    trace?: MetaDiscoveryTraceEntry[],
+  ): Promise<MetaPageCandidate[]> {
+    const byId = new Map<string, MetaPageCandidate>();
+    const addPage = (page: MetaPageCandidate) => {
+      const existing = byId.get(page.id);
+      if (!existing) {
+        byId.set(page.id, page);
+        return;
+      }
+      // Kemunculan pertama menang untuk identitas; field yang masih
+      // kosong boleh diisi kemunculan berikutnya.
+      if (!existing.accessToken && page.accessToken) {
+        existing.accessToken = page.accessToken;
+      }
+      if (!existing.username && page.username) existing.username = page.username;
+      if (!existing.name && page.name) existing.name = page.name;
+      if (!existing.linkedIg && page.linkedIg) existing.linkedIg = page.linkedIg;
+    };
+    const note = (
+      label: string,
+      count: number,
+      error: string | null,
+    ): void => {
+      trace?.push({ label, count, error });
+    };
+
+    // Tepi 1 — /me/accounts (Page yang dikelola langsung + tokennya).
+    try {
+      const body = await this.getJsonParams<{
+        data?: Array<{
+          id?: string;
+          name?: string;
+          username?: string;
+          access_token?: string;
+          instagram_business_account?: { id?: string; username?: string };
+        }>;
+      }>("me/accounts", {
+        fields:
+          "id,name,username,access_token,instagram_business_account{id,username}",
+        limit: "100",
+      });
+      let count = 0;
+      for (const row of body.data ?? []) {
+        if (typeof row.id !== "string" || !row.id) continue;
+        count += 1;
+        addPage({
+          id: row.id,
+          name: typeof row.name === "string" ? row.name : null,
+          username: typeof row.username === "string" ? row.username : null,
+          accessToken:
+            typeof row.access_token === "string" && row.access_token
+              ? row.access_token
+              : null,
+          linkedIg:
+            typeof row.instagram_business_account?.id === "string"
+              ? {
+                  id: row.instagram_business_account.id,
+                  username:
+                    typeof row.instagram_business_account.username === "string"
+                      ? row.instagram_business_account.username
+                      : null,
+                }
+              : null,
+        });
+      }
+      note("pages_accounts", count, null);
+    } catch (err) {
+      note("pages_accounts", 0, discoveryErrorClass(err));
+    }
+
+    // Tepi 2 — /me/assigned_pages (tanpa token; diisi di langkah isi).
+    try {
+      const body = await this.getJsonParams<{
+        data?: Array<{ id?: string; name?: string }>;
+      }>("me/assigned_pages", { fields: "id,name", limit: "100" });
+      let count = 0;
+      for (const row of body.data ?? []) {
+        if (typeof row.id !== "string" || !row.id) continue;
+        count += 1;
+        addPage({
+          id: row.id,
+          name: typeof row.name === "string" ? row.name : null,
+          username: null,
+          accessToken: null,
+          linkedIg: null,
+        });
+      }
+      note("pages_assigned_pages", count, null);
+    } catch (err) {
+      note("pages_assigned_pages", 0, discoveryErrorClass(err));
+    }
+
+    // Tepi 3 — Page dari portofolio bisnis yang terlihat token.
+    try {
+      const body = await this.getJsonParams<{
+        data?: Array<{
+          owned_pages?: { data?: Array<{ id?: string; name?: string }> };
+          client_pages?: { data?: Array<{ id?: string; name?: string }> };
+        }>;
+      }>("me/businesses", {
+        fields: "id,name,owned_pages{id,name},client_pages{id,name}",
+        limit: "100",
+      });
+      let count = 0;
+      for (const business of body.data ?? []) {
+        for (const group of [business.owned_pages, business.client_pages]) {
+          for (const row of group?.data ?? []) {
+            if (typeof row.id !== "string" || !row.id) continue;
+            count += 1;
+            addPage({
+              id: row.id,
+              name: typeof row.name === "string" ? row.name : null,
+              username: null,
+              accessToken: null,
+              linkedIg: null,
+            });
+          }
+        }
+      }
+      note("pages_businesses", count, null);
+    } catch (err) {
+      note("pages_businesses", 0, discoveryErrorClass(err));
+    }
+
+    // Isi token Page yang masih kosong (best-effort per Page) — respons
+    // tepi objek Page sekaligus membawa username + akun IG tertaut.
+    let filled = 0;
+    for (const page of byId.values()) {
+      if (page.accessToken) continue;
+      if (filled >= 25) break;
+      try {
+        const body = await this.getJson<{
+          name?: string;
+          username?: string;
+          access_token?: string;
+          instagram_business_account?: { id?: string; username?: string };
+        }>(
+          `${encodeURIComponent(page.id)}?fields=id,name,username,access_token,instagram_business_account{id,username}`,
+        );
+        if (typeof body.access_token === "string" && body.access_token) {
+          page.accessToken = body.access_token;
+          filled += 1;
+        }
+        if (!page.name && typeof body.name === "string") page.name = body.name;
+        if (!page.username && typeof body.username === "string") {
+          page.username = body.username;
+        }
+        if (
+          !page.linkedIg &&
+          typeof body.instagram_business_account?.id === "string"
+        ) {
+          page.linkedIg = {
+            id: body.instagram_business_account.id,
+            username:
+              typeof body.instagram_business_account.username === "string"
+                ? body.instagram_business_account.username
+                : null,
+          };
+        }
+      } catch {
+        /* best-effort — Page ini tetap kandidat tanpa token */
+      }
+    }
+    note("pages_backfill", filled, null);
+
+    return [...byId.values()];
+  }
+
+  /**
+   * Page yang dikelola pemilik token BESERTA Page Access Token-nya —
+   * bentuk yang dipakai penemuan Messenger: hasil `listPageCandidates`
+   * disaring ke Page bertoken. Untuk token user klasik (alur terbukti
+   * live 7D) himpunannya sama seperti /me/accounts lama: Page-Page itu
+   * muncul pertama di rantai dan tokennya langsung terisi; rantai hanya
+   * menambah Page ter-assign/portofolio yang tokennya berhasil diisi.
+   */
+  async getManagedPages(
+    trace?: MetaDiscoveryTraceEntry[],
+  ): Promise<MetaManagedPage[]> {
+    const candidates = await this.listPageCandidates(trace);
+    const pages: MetaManagedPage[] = [];
+    for (const page of candidates) {
+      if (!page.accessToken) continue;
+      pages.push({
+        id: page.id,
+        name: page.name,
+        username: page.username,
+        accessToken: page.accessToken,
+        linkedIg: page.linkedIg,
+      });
+    }
+    return pages;
+  }
+
+  /**
+   * Akun IG tertaut ke SATU Page (`GET
+   * /{page-id}?fields=instagram_business_account{id,username}`) —
+   * dipanggil dengan token alur; null bila Page tak punya IG tertaut.
+   * Melempar MetaGraphError pada penolakan Graph (pemanggil rantai
+   * memperlakukannya best-effort per Page).
+   */
+  async getPageInstagramBusinessAccount(
+    pageId: string,
+  ): Promise<{ id: string; username: string | null } | null> {
+    const body = await this.getJson<{
+      instagram_business_account?: { id?: string; username?: string };
+    }>(
+      `${encodeURIComponent(pageId)}?fields=instagram_business_account{id,username}`,
     );
-    return typeof body.client_business_id === "string"
-      ? body.client_business_id
-      : null;
+    const ig = body.instagram_business_account;
+    if (typeof ig?.id !== "string" || !ig.id) return null;
+    return {
+      id: ig.id,
+      username: typeof ig.username === "string" ? ig.username : null,
+    };
+  }
+
+  /**
+   * RANTAI PENEMUAN akun IG untuk callback OAuth (Fase 7D.3) — adopsi
+   * pendekatan kode referensi yang terbukti menghubungkan IG pemilik:
+   * dialog Unified Login pada praktiknya menyerahkan aset lewat
+   * BEBERAPA tepi sekaligus, jadi satu tepi saja (pola 7D:
+   * /me/assigned_instagram_accounts) tidak cukup. Tepi dicoba
+   * berurutan, kandidat digabung & di-dedupe by ID akun IG:
+   *   a. `assigned_instagram_accounts` — /me/assigned_instagram_accounts
+   *      (jalur SUAT murni).
+   *   b. `accounts_instagram_business_account` — /me/accounts dengan
+   *      instagram_business_account: IG yang menempel pada Page;
+   *      kandidat membawa Page token Page itu. (Dialog Unified
+   *      tampaknya menyerahkan PAGE sebagai aset dan IG menumpang
+   *      padanya — inilah tepi yang menemukan akun pada kode referensi.)
+   *   c. `businesses_instagram_accounts` — /me/businesses dengan
+   *      instagram_accounts: IG MILIK portofolio yang terlihat token.
+   *      Tepi kritis untuk akun IG yang merupakan aset portofolio dan
+   *      TIDAK tertaut ke Page mana pun; tepi ini bisa menolak dengan
+   *      error izin (mis. graph_200) bila konfigurasi Login untuk
+   *      Bisnis tidak memuat business_management — jejaknya sengaja
+   *      terbaca jelas agar lapisan route bisa menyebutkannya di
+   *      petunjuk picker.
+   *   d. `page_instagram_business_account` — per-Page lewat rantai
+   *      daftar Page (`listPageCandidates`, dibatasi 10 Page): IG
+   *      tertaut tiap Page; kandidat membawa token Page itu bila ada.
+   * Dedupe: kandidat yang sama dari banyak tepi menjadi satu; username
+   * terisi dari tepi mana pun yang memilikinya; Page token dari tepi
+   * mana pun MENANG atas kandidat tanpa token (kredensial Page adalah
+   * semantik connect IG yang sudah terbukti). Kegagalan satu tepi
+   * dicatat di `trace` dan TIDAK menggagalkan tepi berikutnya.
+   */
+  async discoverInstagramAccounts(
+    trace: MetaDiscoveryTraceEntry[],
+  ): Promise<MetaInstagramCandidate[]> {
+    const byId = new Map<string, MetaInstagramCandidate>();
+    const addCandidate = (
+      id: string,
+      username: string | null,
+      pageAccessToken: string | null,
+    ): void => {
+      const existing = byId.get(id);
+      if (!existing) {
+        byId.set(id, { id, username, pageAccessToken });
+        return;
+      }
+      if (!existing.username && username) existing.username = username;
+      if (!existing.pageAccessToken && pageAccessToken) {
+        existing.pageAccessToken = pageAccessToken;
+      }
+    };
+
+    // Tepi (a) — assigned_instagram_accounts (jalur SUAT).
+    try {
+      const accounts = await this.getAssignedInstagramAccounts();
+      for (const account of accounts) {
+        addCandidate(account.id, account.username, null);
+      }
+      trace.push({
+        label: "assigned_instagram_accounts",
+        count: accounts.length,
+        error: null,
+      });
+    } catch (err) {
+      trace.push({
+        label: "assigned_instagram_accounts",
+        count: 0,
+        error: discoveryErrorClass(err),
+      });
+    }
+
+    // Tepi (b) — IG yang menempel pada Page dari /me/accounts.
+    try {
+      const body = await this.getJsonParams<{
+        data?: Array<{
+          id?: string;
+          access_token?: string;
+          instagram_business_account?: { id?: string; username?: string };
+        }>;
+      }>("me/accounts", {
+        fields: "id,access_token,instagram_business_account{id,username}",
+        limit: "100",
+      });
+      let found = 0;
+      for (const row of body.data ?? []) {
+        const ig = row.instagram_business_account;
+        if (typeof ig?.id !== "string" || !ig.id) continue;
+        found += 1;
+        addCandidate(
+          ig.id,
+          typeof ig.username === "string" ? ig.username : null,
+          typeof row.access_token === "string" && row.access_token
+            ? row.access_token
+            : null,
+        );
+      }
+      trace.push({
+        label: "accounts_instagram_business_account",
+        count: found,
+        error: null,
+      });
+    } catch (err) {
+      trace.push({
+        label: "accounts_instagram_business_account",
+        count: 0,
+        error: discoveryErrorClass(err),
+      });
+    }
+
+    // Tepi (c) — IG milik portofolio dari /me/businesses.
+    try {
+      const body = await this.getJsonParams<{
+        data?: Array<{
+          instagram_accounts?: {
+            data?: Array<{ id?: string; username?: string }>;
+          };
+        }>;
+      }>("me/businesses", {
+        fields: "id,instagram_accounts{id,username}",
+        limit: "100",
+      });
+      let found = 0;
+      for (const business of body.data ?? []) {
+        for (const row of business.instagram_accounts?.data ?? []) {
+          if (typeof row.id !== "string" || !row.id) continue;
+          found += 1;
+          addCandidate(
+            row.id,
+            typeof row.username === "string" ? row.username : null,
+            null,
+          );
+        }
+      }
+      trace.push({
+        label: "businesses_instagram_accounts",
+        count: found,
+        error: null,
+      });
+    } catch (err) {
+      trace.push({
+        label: "businesses_instagram_accounts",
+        count: 0,
+        error: discoveryErrorClass(err),
+      });
+    }
+
+    // Tepi (d) — per-Page lewat rantai daftar Page (jejak rantainya
+    // sendiri ikut tercatat lebih dulu di trace yang sama).
+    try {
+      const pages = await this.listPageCandidates(trace);
+      let found = 0;
+      for (const page of pages.slice(0, 10)) {
+        let ig = page.linkedIg;
+        if (!ig) {
+          ig = await this.getPageInstagramBusinessAccount(page.id).catch(
+            () => null,
+          );
+        }
+        if (!ig) continue;
+        found += 1;
+        addCandidate(ig.id, ig.username, page.accessToken);
+      }
+      trace.push({
+        label: "page_instagram_business_account",
+        count: found,
+        error: null,
+      });
+    } catch (err) {
+      trace.push({
+        label: "page_instagram_business_account",
+        count: 0,
+        error: discoveryErrorClass(err),
+      });
+    }
+
+    return [...byId.values()];
   }
 
   /**

@@ -486,6 +486,23 @@ export const CreateChannelRequestSchema = z.object({
    */
   igUserId: z.string().trim().min(1).max(64).optional(),
   /**
+   * Jenis token untuk connect manual Instagram (Fase 7D.3):
+   * - 'page_access_token' (bawaan bila absen) — perilaku 7A: token di
+   *   field `pageAccessToken` adalah Page Access Token dan `pageId`
+   *   (Page yang terhubung) WAJIB untuk memvalidasinya.
+   * - 'system_user_token' — token di field `pageAccessToken` adalah
+   *   System User Access Token (SUAT) dari Pengaturan Bisnis Meta;
+   *   `pageId` TIDAK dipakai: validasi langsung ke akun IG
+   *   (`GET /{ig-id}?fields=id,username`) dan konteks portofolio
+   *   (`client_business_id`) disimpan sebagai parent_external_id.
+   *   Varian ini untuk akun IG yang portofolionya sama dengan aplikasi
+   *   (kasus pemilik sendiri), yang tidak terjangkau OAuth Unified
+   *   Login. Untuk provider selain 'instagram' field ini diabaikan.
+   */
+  tokenType: z
+    .enum(["page_access_token", "system_user_token"])
+    .optional(),
+  /**
    * WABA ID (Fase 7B) — wajib hanya untuk provider 'whatsapp': id
    * WhatsApp Business Account yang menaungi nomor; disimpan sebagai
    * konteks induk (`parent_external_id`), bukan kunci resolusi.
@@ -591,7 +608,9 @@ export type MetaWebhookInfoResponse = z.infer<
 // - messenger: Facebook Login klasik (scope di URL dialog) → user token →
 //   long-lived → /me/accounts (Page + Page Access Token turunannya).
 // - instagram: Unified Login (config_id) → Business Integration System
-//   User Access Token (SUAT) → /me/assigned_instagram_accounts.
+//   User Access Token (SUAT) → RANTAI penemuan multi-tepi (Fase 7D.3:
+//   assigned_instagram_accounts + IG-pada-Page + IG-milik-portofolio +
+//   per-Page; kandidat lewat Page membawa Page token-nya).
 // - whatsapp: Embedded Signup / Login for Business (config_id) → token
 //   bisnis → penemuan WABA ter-assign + nomor-nomornya.
 // Token hasil exchange TIDAK PERNAH meninggalkan server: callback
@@ -669,6 +688,31 @@ export const MetaOAuthAssetSchema = z.object({
 export type MetaOAuthAsset = z.infer<typeof MetaOAuthAssetSchema>;
 
 /**
+ * Petunjuk keadaan kosong pemilih OAuth (Fase 7D.3) — hanya bermakna
+ * untuk provider 'instagram' saat daftar aset kosong; membedakan
+ * penyebab yang arahan perbaikannya BERBEDA (ditentukan dari probe
+ * profil token + jejak rantai penemuan di callback):
+ * - 'not_system_user': token hasil login BUKAN System User token
+ *   (client_business_id kosong) — periksa jenis token pada konfigurasi
+ *   Facebook Login untuk Bisnis (Unified Login wajib menerbitkan SUAT).
+ * - 'no_accounts_shared': SUAT sah tetapi semua tepi penemuan kosong —
+ *   akun belum dibagikan ke aplikasi, atau kasus portofolio-sama
+ *   (akun pemilik aplikasi sendiri tidak diserahkan lewat login ini;
+ *   jalur keluarnya connect manual varian System User Token).
+ * - 'business_permission_missing': tepi IG-milik-portofolio
+ *   (/me/businesses) menolak dengan error izin — konfigurasi Login
+ *   untuk Bisnis kemungkinan belum memuat business_management.
+ * null bila tidak relevan (aset tidak kosong / provider lain / probe
+ * dan jejak tidak memberi kesimpulan).
+ */
+export const MetaOAuthEmptyHintSchema = z.enum([
+  "not_system_user",
+  "no_accounts_shared",
+  "business_permission_missing",
+]);
+export type MetaOAuthEmptyHint = z.infer<typeof MetaOAuthEmptyHintSchema>;
+
+/**
  * Isi sesi OAuth yang boleh dilihat browser: daftar aset TANPA token apa
  * pun. Token hidup terenkripsi di server dan hanya dipakai endpoint
  * complete.
@@ -677,6 +721,8 @@ export const MetaOAuthSessionResponseSchema = z.object({
   sessionId: z.string(),
   provider: MetaOAuthProviderSchema,
   assets: z.array(MetaOAuthAssetSchema),
+  /** Fase 7D.3: petunjuk spesifik saat `assets` kosong (instagram). */
+  emptyHint: MetaOAuthEmptyHintSchema.nullable(),
   expiresAt: z.string().datetime(),
 });
 export type MetaOAuthSessionResponse = z.infer<
