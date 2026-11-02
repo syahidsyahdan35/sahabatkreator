@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   createTranslator,
   type Locale,
@@ -19,9 +27,6 @@ import { MoreSheet } from "./components/MoreSheet";
 import { ProfileBlock } from "./components/ProfileBlock";
 import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
-import { AutomationsPage } from "./pages/AutomationsPage";
-import { AgentsHubPage } from "./pages/AgentsHubPage";
-import { ContactsPage } from "./pages/ContactsPage";
 import { InboxPage } from "./pages/InboxPage";
 import {
   UnreadBadgeProvider,
@@ -35,21 +40,62 @@ import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { InvitePage } from "./pages/InvitePage";
-import { ChannelsPage } from "./pages/ChannelsPage";
-import { ProductsPage } from "./pages/ProductsPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { AdminPage } from "./pages/AdminPage";
-import { LogsPage } from "./pages/LogsPage";
-import { AuditPage } from "./pages/AuditPage";
-import { BroadcastsPage } from "./pages/BroadcastsPage";
-import { AnalyticsPage } from "./pages/AnalyticsPage";
-import { FlowsPage } from "./pages/FlowsPage";
-import { FlowBuilderPage } from "./pages/FlowBuilderPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { LegalPage } from "./pages/LegalPage";
 import { LEGAL_PATHS, type LegalPageKind } from "./components/LegalLinks";
 import { useTheme, type ThemeMode } from "./theme";
+
+// Code-splitting per rute (Fase 13A — menutup utang bundle sejak 8B):
+// halaman berat dimuat malas agar chunk utama hanya memuat shell +
+// halaman kritis (login/register/dashboard/inbox/halaman publik).
+// Builder flow (@xyflow/react), Analytics, Channels, Broadcasts, dan
+// halaman besar lain menjadi chunk terpisah yang diunduh saat rutenya
+// pertama dibuka; fallback Suspense di ShellMain memakai teks loading
+// dwibahasa yang sama seperti keadaan loading shell.
+const AgentsHubPage = lazy(() =>
+  import("./pages/AgentsHubPage").then((m) => ({ default: m.AgentsHubPage })),
+);
+const ContactsPage = lazy(() =>
+  import("./pages/ContactsPage").then((m) => ({ default: m.ContactsPage })),
+);
+const ChannelsPage = lazy(() =>
+  import("./pages/ChannelsPage").then((m) => ({ default: m.ChannelsPage })),
+);
+const AutomationsPage = lazy(() =>
+  import("./pages/AutomationsPage").then((m) => ({
+    default: m.AutomationsPage,
+  })),
+);
+const BroadcastsPage = lazy(() =>
+  import("./pages/BroadcastsPage").then((m) => ({ default: m.BroadcastsPage })),
+);
+const AnalyticsPage = lazy(() =>
+  import("./pages/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })),
+);
+const FlowsPage = lazy(() =>
+  import("./pages/FlowsPage").then((m) => ({ default: m.FlowsPage })),
+);
+const FlowBuilderPage = lazy(() =>
+  import("./pages/FlowBuilderPage").then((m) => ({
+    default: m.FlowBuilderPage,
+  })),
+);
+const ProductsPage = lazy(() =>
+  import("./pages/ProductsPage").then((m) => ({ default: m.ProductsPage })),
+);
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
+const AdminPage = lazy(() =>
+  import("./pages/AdminPage").then((m) => ({ default: m.AdminPage })),
+);
+const LogsPage = lazy(() =>
+  import("./pages/LogsPage").then((m) => ({ default: m.LogsPage })),
+);
+const AuditPage = lazy(() =>
+  import("./pages/AuditPage").then((m) => ({ default: m.AuditPage })),
+);
 
 // Badge navigasi berasal dari API workspace aktif — query yang sama untuk
 // desktop & mobile (§10.1), registry tidak diubah: unread Inbox dari API
@@ -248,6 +294,9 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <div className="text-lg font-bold">{t("app.name")}</div>
           <div className="text-xs text-muted">{t("app.tagline")}</div>
         </div>
+        <Suspense
+          fallback={<p className="text-sm text-muted">{t("common.loading")}</p>}
+        >
         {activeId === "dashboard" ? (
           <DashboardPage t={t} locale={locale} />
         ) : activeId === "contacts" ? (
@@ -297,6 +346,7 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}
+        </Suspense>
       </main>
       <MobileBottomBar
         t={t}

@@ -3,6 +3,19 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Fase 13A: pisahkan React ke chunk vendor tersendiri agar
+        // cache-nya bertahan lintas rilis aplikasi; halaman berat
+        // terpisah otomatis lewat React.lazy di App.tsx (chunk per rute,
+        // mis. builder flow + @xyflow/react tidak lagi di chunk utama).
+        manualChunks: {
+          "vendor-react": ["react", "react-dom"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     host: true,
