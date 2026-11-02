@@ -3971,3 +3971,130 @@ yang sama. i18n en+id lengkap (seksi `audit.*` + `nav.audit`).
   kerja; yang terbukti di sini adalah kontrak API ujung-ke-ujung,
   typecheck/build, dan bundle tersaji. File rantai tinggal di
   server `/tmp/sk7b4/` (sementara).
+
+---
+
+## Update Fase 7B.5 — Reply Quote lintas channel (2026-11-02)
+
+Satu commit fitur: `d3b7ddd`. Pengguna kini bisa membalas pesan
+tertentu dengan kutipan pesan aslinya — masuk maupun keluar — tampil
+sebagai blok kutipan di Inbox dan widget webchat, dan terkirim secara
+native ke provider bila salurannya mendukung.
+
+### Desain data & tautan
+
+- Migrasi `0029_message_reply_to`: `messages.reply_to_message_id`
+  uuid NULLABLE, FK ke `messages(id)` **ON DELETE SET NULL** + index
+  `messages_reply_to_message_id_idx`. SET NULL disengaja: purge
+  channel (6I) menghapus baris target tanpa menggagalkan purge dan
+  tanpa menghapus balasan — kutipannya lepas dengan anggun (serializer
+  melaporkan `replyTo: null`). TIDAK ada policy RLS baru: kolom berada
+  di tabel `messages` yang sudah ternaungi `tenant_isolation` (0005);
+  staging tetap 45 policy. PGlite verify seksi **[22]** membuktikan
+  kolom ada, terbaca dalam konteks tenant pemilik lewat policy yang
+  ada, tak terlihat tenant lain, dan SET NULL bekerja.
+- ID provider kutipan **TIDAK disimpan duplikat**: poller menurunkan
+  id mentah target saat kirim dari `provider_message_id` baris target
+  (konteks tenant, `getMessageProviderMessageId` +
+  `extractRawProviderMessageId` — uraian sesudah titik dua kedua dari
+  bentuk majemuk). Sumber kebenaran tunggal, tidak bisa basi.
+- Resolusi tampilan server-side: `listMessages`, hasil antrean, dan
+  riwayat sesi webchat membawa `MessageWithReplyTo` — serializer
+  memetakannya ke kontrak `replyTo: { id, direction, senderType,
+  type, authorLabel, contentPreview } | null` (preview teks terpotong
+  140 char; non-teks tanpa caption → null, UI menampilkan label tipe
+  dwibahasanya). API publik v1 memakai serializer yang sama persis.
+
+### Peta per provider (masuk / keluar + bentuk parameter persis)
+
+| Provider | Masuk (parser → tautan) | Keluar (poller → parameter native) |
+|---|---|---|
+| Telegram | `message.reply_to_message.message_id` (juga `channel_post`) → majemuk `telegram:<botId>:<id>` | `reply_parameters: { message_id: <number> }` pada sendMessage |
+| WhatsApp | `messages[].context.id` (wamid) → majemuk `meta:<phoneId>:<wamid>` | `context: { message_id: <wamid> }` pada payload Cloud API |
+| Messenger | `message.reply_to.mid` → majemuk `meta:<pageId>:<mid>` | **tanpa parameter** (keterbatasan terdokumentasi di bawah) |
+| Instagram | `message.reply_to.mid` → majemuk `meta:<igId>:<mid>` | **tanpa parameter** (sama) |
+| Webchat | — (tidak ada kutipan sisi pengunjung di v1) | payload REST riwayat/sesi membawa `replyTo`; widget me-render blok kutipan |
+
+- Penautan masuk: target dicari DI PERCAKAPAN YANG SAMA dalam
+  transaksi pencatatan yang sama; tidak ditemukan → `reply_to` null
+  dan pesan TETAP tercatat (webhook tidak pernah gagal karena kutipan
+  asing).
+- **Keterbatasan Messenger/Instagram keluar (hasil riset referensi):**
+  referensi resmi Send API untuk objek `message` hanya
+  mendokumentasikan `text`, `attachment`, `quick_replies`,
+  `metadata` — tidak ada parameter balasan-terkutip untuk pengiriman
+  Page/IG; `reply_to` hanya ada di payload webhook (arah masuk, yang
+  kita parse penuh). Karena itu poller SENGAJA mengirim polos untuk
+  kedua provider ini (didokumentasikan juga di
+  `MetaGraphClient.sendMessage`): tautan kutipan tetap tersimpan dan
+  tampil sebagai blok kutipan di inbox kita, tetapi penerima di
+  Messenger/IG melihat pesan biasa tanpa kutipan native. Jangan
+  menambahkan field tak terdokumentasi ke body Send API — risikonya
+  penolakan Graph pada pesan yang seharusnya terkirim polos.
+- Validasi keluar: `replyToMessageId` opsional pada
+  `SendMessageRequestSchema` (dashboard + API publik v1, paritas).
+  Target harus ada, milik tenant yang sama, dan di PERCAKAPAN YANG
+  SAMA — selain itu **422 `MESSAGE_REPLY_TARGET_INVALID`** (kode
+  kontrak baru), tanpa tulisan apa pun. Pesan automation/sequence/
+  agent TIDAK memakai kutipan (jalurnya tidak disentuh).
+
+### UI
+
+- Inbox: blok kutipan di dalam gelembung (penulis + cuplikan, token
+  tema; varian gelembung accent memakai lapisan putih transparan);
+  klik blok menggulir + menyorot pesan asal ±1,6 dtk BILA termuat di
+  utas (bila tidak, no-op senyap). Aksi gelembung "Balas dengan
+  kutipan" (muncul saat hover/fokus) menetapkan target → chip
+  pratinjau di atas composer (penulis + cuplikan + ✕; Esc membatalkan
+  saat composer fokus); chip dibersihkan sesudah kirim sukses dan
+  saat pindah percakapan. i18n en+id (`inbox.replyWithQuote`,
+  `inbox.quoteTeamLabel`, `inbox.quoteCancel`, `inbox.quoteJumpTitle`,
+  `inbox.messageType.*`, `errors.MESSAGE_REPLY_TARGET_INVALID`).
+- Widget (`packages/embed`): blok kutipan dirender di gelembung dari
+  payload `replyTo` (riwayat sesi + sinkronisasi realtime via REST),
+  dwibahasa (`quoteYou`/`quoteTeam`/`quoteMedia`), gaya netral
+  semi-transparan yang terbaca di tema terang/gelap.
+- **Stretch widget DITOLAK secara eksplisit untuk v1:** compose
+  kutipan dari sisi widget (pengunjung mengutip pesan) TIDAK
+  dikerjakan — UX kutipan pada widget melayang (aksi per gelembung
+  untuk pengunjung anonim) bukan pekerjaan murah yang aman
+  ditambahkan di akhir fase; dicatat sebagai kandidat fase lanjutan.
+  Balasan berkutipan dari dashboard ke pengunjung tampil penuh.
+
+### Verifikasi (tanpa Playwright)
+
+- Lokal: typecheck SELURUH workspace hijau; build semua paket hijau;
+  PGlite verify lulus [1]–[22]. Bundle web `index-CflMSHj-.js`.
+  Catatan lingkungan: `pnpm install` di direktori repo VM gagal
+  `EPERM chown` (file repo bergrup `nogroup` yang tidak bisa di-chown
+  sesi root ini) — build dijalankan di salinan kerja `/tmp/skbuild`
+  dengan pnpm yang sama; hasil rsync ke server identik pola biasanya.
+- Rantai mock dari server (`/tmp/sk7b5/`, mock Telegram :8410 + Graph
+  :8411, jendela env singkat lalu pulih): **47/47 PASS** —
+  (1) Telegram masuk berkutipan tertaut (preview + authorLabel nama
+  kontak benar), target asing → null tanpa error; (2) Telegram keluar:
+  mock menerima `reply_parameters.message_id` = 101 (number), kirim
+  polos tanpa parameter itu; (3) WhatsApp `context.id` tertaut dan
+  mock Graph menerima `context.message_id` = `wamid.in.1`, context
+  asing → null; (4) Messenger `reply_to.mid` tertaut, kirim keluar
+  terverifikasi TANPA parameter kutipan sesuai keputusan
+  terdokumentasi, tautan tetap tersimpan; (5) webchat: payload
+  riwayat widget membawa `replyTo` (preview + nama pengunjung);
+  (6) validasi lintas-percakapan & target acak → 422 kode yang benar
+  di dashboard DAN API v1 (kunci scope `messages:write`), + satu
+  kirim v1 berkutipan sukses 201; (7) migrasi terpasang di staging
+  (kolom ada; FK SET NULL terbukti di PGlite [22]).
+- Sesudah jendela mock: `.env.staging` pulih **byte-identik**
+  (sha256 `9c1ded2a…` sebelum = sesudah), API direstart dengan env
+  asli, port mock tertutup. Channel asli user utuh: bot Telegram
+  `8fb9b81c…` (@botaramyid_bot, "Botara My Id") tetap `connected`.
+  Publik: `/api/health` ok, bundle `index-CflMSHj-.js` identik build
+  lokal dan memuat string kutipan kedua locale, `widget.js` publik
+  memuat render kutipan.
+- Batas jujur: pembuktian live per provider menunggu wiring nyata —
+  Telegram bisa langsung diuji user lewat bot aslinya; WhatsApp/
+  Messenger/IG live menunggu kredensial Meta asli (App Secret panel +
+  akun uji), sama seperti status fase 7A/7B. Bukti visual UI
+  (rendering blok kutipan, tema) menunggu uji user sesuai pembagian
+  kerja; yang terbukti di sini adalah kontrak ujung-ke-ujung, bentuk
+  parameter persis di mock, typecheck/build, dan bundle tersaji.
