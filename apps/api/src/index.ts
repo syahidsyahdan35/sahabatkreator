@@ -244,7 +244,18 @@ routes.route("/", createAvatarsRoutes(authBundle));
 // Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
 routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
-routes.route("/", createAgentsRoutes(authBundle, realtimePublisher));
+// Fase 12E: agents menerima deps resolver Panel Admin + env provider
+// (pola knowledge 12D) agar playground menguji provider yang sama
+// persis seperti yang dipakai worker (kunci panel → env).
+routes.route(
+  "/",
+  createAgentsRoutes(authBundle, realtimePublisher, {
+    platform: platformOptions,
+    llmProviderEnv: env.LLM_PROVIDER,
+    embeddingProviderEnv: env.EMBEDDING_PROVIDER,
+    embeddingModelEnv: env.OPENROUTER_EMBEDDING_MODEL,
+  }),
+);
 // Fase 12D: knowledge menerima deps resolver Panel Admin + env
 // embedding agar /kb/stats melaporkan status indeks semantik yang
 // benar-benar di-resolve proses ini (selaras worker).

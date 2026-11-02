@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import {
   AgentListResponseSchema,
+  AgentPlaygroundRequestSchema,
+  AgentPlaygroundResponseSchema,
   AgentResponseSchema,
   AgentSuggestionListResponseSchema,
   AgentSuggestionResponseSchema,
@@ -17,7 +19,11 @@ import {
   listAgents,
   listSuggestions,
   rejectSuggestion,
+  resolveAgentLlmProvider,
+  resolveEmbeddingProvider,
+  runAgentPlayground,
   updateAgent,
+  type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import type { Agent, AgentSuggestion } from "@sahabat-kreator/db";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
@@ -56,21 +62,42 @@ function serializeSuggestion(row: AgentSuggestion): AgentSuggestionResponse {
 }
 
 /**
+ * Dependensi playground (Fase 12E): resolver Panel Admin proses API +
+ * env provider — pola yang sama seperti status semantik modul knowledge
+ * (Fase 12D), agar provider yang dipakai playground PERSIS provider yang
+ * akan dipakai worker (kunci panel → env; mock hanya dari env/default).
+ */
+export interface AgentsRoutesDeps {
+  platform?: PlatformSettingsOptions;
+  /** Nilai env LLM_PROVIDER proses ini ('mock' | 'openrouter'). */
+  llmProviderEnv?: string;
+  /** Nilai env EMBEDDING_PROVIDER proses ini ('mock' | 'openrouter' | undefined). */
+  embeddingProviderEnv?: string;
+  /** Nilai env OPENROUTER_EMBEDDING_MODEL proses ini. */
+  embeddingModelEnv?: string;
+}
+
+/**
  * Modul agents (Fase 3A) — manajemen agent AI workspace + antrean draf
  * balasan mode 'suggest':
  *   POST  /tenants/:tenantId/agents                  buat → 201
  *   GET   /tenants/:tenantId/agents                  daftar
  *   PATCH /tenants/:tenantId/agents/:id              ubah name/systemPrompt/model/mode/isActive/config
+ *   POST  /tenants/:tenantId/agents/:id/playground   uji kering agent (Fase 12E) → balasan + potongan KB + niat tool
  *   GET   /tenants/:tenantId/suggestions?status=     draf balasan agent
  *   POST  /tenants/:tenantId/suggestions/:id/approve kirim teks saran sbg pesan agent
  *   POST  /tenants/:tenantId/suggestions/:id/reject  tolak draf
  * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND,
  * pola Fase 1B/1D). Runtime agent berjalan di worker (job `agent.respond`),
- * bukan di proses API ini.
+ * bukan di proses API ini; playground adalah satu-satunya jalur agent
+ * yang dieksekusi proses API — dan ia kering secara konstruksi (core
+ * `runAgentPlayground` tidak mengeksekusi tool & tidak menulis data
+ * percakapan; hanya usage playground yang tercatat).
  */
 export function createAgentsRoutes(
   bundle: AuthBundle | null,
   publisher?: RealtimePublisher | null,
+  deps: AgentsRoutesDeps = {},
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
   const agentsBase = "/tenants/:tenantId/agents";
@@ -82,6 +109,7 @@ export function createAgentsRoutes(
     app.post(agentsBase, notConfigured);
     app.get(agentsBase, notConfigured);
     app.patch(`${agentsBase}/:id`, notConfigured);
+    app.post(`${agentsBase}/:id/playground`, notConfigured);
     app.get(suggestionsBase, notConfigured);
     app.post(`${suggestionsBase}/:id/approve`, notConfigured);
     app.post(`${suggestionsBase}/:id/reject`, notConfigured);
@@ -158,6 +186,95 @@ export function createAgentsRoutes(
     );
     if (!updated) return apiError(c, 404, "NOT_FOUND", "Agent not found");
     return c.json(serializeAgent(updated));
+  });
+
+  // Playground (Fase 12E): uji kering SATU agent pilihan pemilik.
+  // Provider di-resolve per request dengan resolver yang sama seperti
+  // worker (Panel → env) agar yang diuji = yang akan menjawab sungguhan.
+  app.post(`${agentsBase}/:id/playground`, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Agent not found");
+    }
+    const json = await parseJson(c);
+    if (json === undefined) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = AgentPlaygroundRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid playground payload");
+    }
+
+    let llmProvider;
+    try {
+      llmProvider = await resolveAgentLlmProvider(bundle.db, {
+        platform: deps.platform,
+        providerEnv: deps.llmProviderEnv,
+      });
+    } catch {
+      return apiError(
+        c,
+        502,
+        "AGENT_PROVIDER_ERROR",
+        "AI provider is not configured correctly",
+      );
+    }
+    // Embedding adalah peningkat: kegagalan resolusi = nonaktif (retrieval
+    // full-text murni), tidak pernah menggagalkan playground.
+    const embeddingProvider = deps.platform
+      ? await resolveEmbeddingProvider(bundle.db, {
+          platform: deps.platform,
+          providerEnv: deps.embeddingProviderEnv,
+          modelEnv: deps.embeddingModelEnv,
+        }).catch(() => null)
+      : null;
+
+    const outcome = await runAgentPlayground(bundle.db, llmProvider, {
+      tenantId: tenant.id,
+      agentId: id,
+      message: parsed.data.message,
+      history: parsed.data.history,
+      embeddingProvider,
+    });
+    if (outcome.kind === "agent_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Agent not found");
+    }
+    if (outcome.kind === "provider_error") {
+      return apiError(
+        c,
+        502,
+        "AGENT_PROVIDER_ERROR",
+        "AI provider failed to respond",
+      );
+    }
+    const body = AgentPlaygroundResponseSchema.parse({
+      replyText: outcome.replyText,
+      mode: outcome.mode,
+      retrieval: outcome.retrieval,
+      kbHits: outcome.kbHits.map((h) => ({
+        chunkId: h.chunkId,
+        documentId: h.documentId,
+        documentTitle: h.documentTitle,
+        chunkIndex: h.chunkIndex,
+        snippet: h.content.slice(0, 280),
+        sources: h.sources,
+      })),
+      intents: outcome.intents.map((intent) =>
+        intent.kind === "unknown"
+          ? { kind: intent.kind, toolName: intent.toolName }
+          : intent,
+      ),
+      usage: {
+        provider: outcome.usage.provider,
+        model: outcome.usage.model,
+        tokensIn: outcome.usage.tokensIn,
+        tokensOut: outcome.usage.tokensOut,
+        costUsd: outcome.usage.costUsd ?? null,
+      },
+    });
+    return c.json(body);
   });
 
   app.get(suggestionsBase, async (c) => {
