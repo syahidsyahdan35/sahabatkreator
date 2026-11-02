@@ -2397,3 +2397,129 @@ di `.env.staging`).
   (disengaja: data belum dihapus sampai purge).
 - Hitungan purge di audit adalah hitungan saat transaksi purge
   berjalan (satu transaksi per akun).
+
+---
+
+## Update Fase 6D — Avatar asli: foto profil Telegram bot & kontak (2026-11-02)
+
+Mengisi celah avatar yang dikonfirmasi dari kode: sebelumnya TIDAK ada
+pipeline foto sama sekali (Channels/Contacts/Inbox semua inisial huruf).
+Kini foto bot tampil di kartu Channels dan foto pengguna Telegram tampil
+di Inbox/Kontak. Kontak webchat TETAP inisial berwarna BY DESIGN —
+pengunjung anonim memang tidak punya foto, tidak ada jalur foto webchat.
+
+### Penyimpanan (migrasi 0024 + 0025)
+- Tabel baru `profile_photos`: `tenant_id` (FK tenants, cascade),
+  `owner_type` ('channel_account'|'contact', CHECK), `owner_id` (uuid,
+  SENGAJA tanpa FK — pemiliknya polimorfik dua tabel), `content_type`,
+  `data` **bytea**, `etag` (SHA-256 hex byte foto, untuk cache HTTP),
+  `fetched_at` + index unik `(tenant_id, owner_type, owner_id)` (satu
+  foto per pemilik; jalur simpan = upsert) + policy `tenant_isolation`
+  standar (migrasi 0025 tulisan tangan). Staging kini **33 tabel /
+  37 policy**. drizzle-orm 0.44 belum mengekspor kolom `bytea`, jadi
+  skema memakai `customType` dengan dataType 'bytea'.
+- Bytea di DB adalah keputusan pragmatis fase ini (konsumen R2 belum
+  ada; foto dipilih ≤512px). Purge channel Fase 6I diperluas:
+  `purgeTrashedChannelAccount` kini juga menghapus foto milik akun
+  channel-nya (owner polimorfik tanpa FK — dibersihkan eksplisit;
+  tercatat di counts audit sebagai `profilePhotos`). Foto KONTAK tidak
+  disentuh purge, konsisten dengan kontak yang dipertahankan.
+- **Catatan penerapan migrasi di staging:** `drizzle-kit migrate`
+  GAGAL diam-diam (spinner, exit 1 tanpa pesan) karena migrasi 0023
+  ternyata dulu diterapkan manual — baris jurnalnya tidak ada di
+  `drizzle.__drizzle_migrations`, sehingga migrate mencoba menerapkan
+  ulang 0023 dan menabrak kolom yang sudah ada. 0024+0025 diterapkan
+  via psql (ON_ERROR_STOP) dan baris jurnal 0023/0024/0025 didaftarkan
+  manual dengan hash = sha256 isi file SQL (skema hash drizzle,
+  terverifikasi terhadap baris 0022) + created_at = `when` jurnal.
+  Keadaan akhir konsisten penuh: 33 tabel / 37 policy / 26 baris jurnal.
+
+### Pengambilan foto (core `avatars.ts`)
+- Helper `fetchAndStoreTelegramProfilePhoto` (TIDAK PERNAH melempar —
+  semua pemicu best-effort): `getUserProfilePhotos` → pilih ukuran →
+  `getFile` → unduh byte → upsert. **Keputusan ukuran:** ukuran terbesar
+  yang kedua sisinya ≤512px; semua lebih besar → terkecil; semua lebih
+  kecil → terbesar. Content-Type dari ekstensi jalur file (.png/.webp,
+  selain itu JPEG — foto profil Telegram pada praktiknya JPEG).
+- **Token tidak pernah bocor:** URL file Bot API menyematkan token
+  (`/file/bot<token>/...`); byte foto disimpan dan UI hanya menerima
+  URL endpoint kita. Error fetch tidak dicatat sebagai objek (pesannya
+  bisa memuat URL bertoken) — hanya label tahap generik.
+- Pemicu:
+  1. **Connect Telegram** (baru & revive): fire-and-forget dengan token
+     mentah yang sedang di tangan route.
+  2. **Backfill malas** saat daftar channel dibaca: akun telegram
+     'connected' tanpa foto memicu pengambilan async — bot yang
+     terhubung sebelum fase ini (@botaramyid_bot) fotonya muncul
+     sendiri tanpa reconnect. Penjaga per proses API: dedup in-flight
+     per akun + cache negatif 15 menit (bot tanpa foto / gagal ambil
+     tidak memanggil Bot API berulang di setiap pembacaan daftar).
+  3. **Kontak:** identitas Telegram PERTAMA KALI terlihat (core
+     `recordTelegramInboundMessage` kini mengembalikan
+     `{ message, contactId, identityCreated }`) → route webhook memicu
+     pengambilan dengan timeout 5 dtk, fire-and-forget. Pesan berikutnya
+     dari kontak yang sama TIDAK mengambil ulang (terbukti di rantai:
+     tepat 1x panggilan untuk 2 pesan). Kontak v1 tanpa refresh
+     berkala; foto bot ter-refresh tiap connect ulang.
+
+### Penyajian & kontrak
+- Endpoint baru (sesi + membership; non-member 404 TENANT_NOT_FOUND,
+  foto tak ada/lintas tenant 404 NOT_FOUND):
+  `GET /api/tenants/:tenantId/avatars/channels/:channelAccountId` dan
+  `GET .../avatars/contacts/:contactId` → byte foto + Content-Type +
+  `Cache-Control: private, max-age=3600` + ETag; If-None-Match cocok →
+  304.
+- Kontrak: `ChannelAccountResponse.avatarUrl` (baru),
+  `ConversationResponse.contactAvatarUrl` (baru),
+  `ContactResponse.avatarUrl` (sudah ada sejak 1D — kini diisi dari
+  `profile_photos`, BUKAN lagi kolom warisan `contacts.avatar_url` yang
+  tidak pernah terisi). Nilai = URL endpoint di atas atau null.
+  API publik /v1 sengaja tetap null (endpoint avatar tergerbang sesi
+  dashboard; konsumen API key tidak bisa mengambilnya).
+- Web: komponen bersama `Avatar` (img + fallback inisial saat URL null
+  ATAU gambar gagal dimuat) dipasang di ContactsPage (daftar + modal
+  detail) dan InboxPage (daftar + kepala utas); `ChannelAvatar` 6H
+  kini menerima `imageUrl` dari serializer Channels + fallback inisial
+  saat gambar gagal dimuat.
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+- Typecheck SEMUA proyek hijau; build api+worker+web hijau (bundle
+  `index-BGsFTz0k.js`, memuat pemakaian avatarUrl/contactAvatarUrl);
+  PGlite verify lulus termasuk seksi baru **[18]**: profile_photos
+  terisolasi per tenant (konteks A hanya baris A, bytea utuh, insert
+  lintas ditolak), unik satu foto per pemilik. Hitungan verify: tabel
+  32 → 33, policy 36 → 37.
+- **Rantai mock dari server 21/21 PASS** (tenant uji
+  `fase6d-a/b-*@sk.test`; jendela `TELEGRAM_API_BASE` → mock lokal
+  127.0.0.1:8399 yang melayani getUserProfilePhotos/getFile dengan
+  byte PNG berbeda per file_id; mock menolak token selain tiga token
+  uji dan user tak dikenal → total_count 0): connect bot A → avatarUrl
+  terisi → **byte endpoint == byte mock ukuran 320** (bukan 640 —
+  pemilihan ≤512px terbukti) + content-type + ETag + 304 → webhook
+  pengguna berfoto → foto kontak tersimpan (byte == ukuran 320) →
+  daftar percakapan memuat contactAvatarUrl → pengguna tanpa foto →
+  avatarUrl null → pesan kedua tidak memicu ambil ulang (stats mock:
+  tepat 1x) → bot C tersemai di tenant B sebagai akun connected TANPA
+  foto → daftar channel dibaca → avatarUrl muncul (backfill) dengan
+  byte benar → lintas tenant 404 (dua bentuk) → tanpa sesi 401.
+- **Jendela mock ditutup bersih & diverifikasi:** `.env.staging`
+  dipulihkan dari backup (baris TELEGRAM_API_BASE tidak ada lagi —
+  insiden kecil: `pkill -f` mencocokkan baris perintah SSH sendiri
+  sehingga sesi putus SETELAH env dipulihkan; API di-restart pada sesi
+  berikutnya by-PID dan health terverifikasi), mock mati, 4 service
+  active. DB pasca-jendela: bot asli `8fb9b81c` tetap connected &
+  tidak trashed; `profile_photos` tepat 3 baris dan SEMUANYA di dua
+  tenant uji; 0 pesan telegram berstatus failed pada 30 menit terakhir
+  di semua tenant.
+
+### Batas jujur
+- Bukti visual (foto tampil di kartu/daftar) menunggu uji user —
+  yang terbukti: byte foto identik ujung-ke-ujung lewat API publik.
+- Bot asli user ter-backfill otomatis saat daftar channel dibaca
+  setelah deploy **BILA botnya punya foto profil di BotFather**; bila
+  belum, kartu tetap inisial (dan cache negatif menunda percobaan
+  ulang ±15 menit setelah pemilik memasang foto).
+- Foto kontak tidak pernah di-refresh di v1 (foto diambil sekali saat
+  penampakan pertama); grup Telegram: foto yang tampil adalah kontak
+  jangkar percakapan (pengirim pertama), atribusi per pesan tetap
+  nama (`sender_name`), bukan foto per anggota.
