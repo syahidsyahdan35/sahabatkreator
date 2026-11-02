@@ -7,21 +7,29 @@ import {
   messages,
   outboxEvents,
   usageLedger,
+  type Agent,
   type Database,
 } from "@sahabat-kreator/db";
 import {
   AGENT_TOOLS,
+  createLlmProvider,
   isPipelineStage,
   type EmbeddingProvider,
+  type LlmChatMessage,
+  type LlmChatResult,
   type LlmProvider,
   type LlmToolCall,
 } from "@sahabat-kreator/ai";
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
-import { getActiveAgent } from "./agents";
+import { getActiveAgent, getAgent } from "./agents";
 import { listMessages } from "./conversations";
-import { searchKbChunks } from "./kb";
+import { searchKbChunks, type KbSearchHit } from "./kb";
 import { embedKbQueryText } from "./kb-embeddings";
+import {
+  resolveOpenRouterConfig,
+  type PlatformSettingsOptions,
+} from "./platform-settings";
 import {
   buildPaymentUrl,
   createPaymentLink,
@@ -73,6 +81,23 @@ export const AGENT_USAGE_REF_TYPE = "agent_response";
 
 const HISTORY_LIMIT = 20;
 const KB_HIT_LIMIT = 5;
+
+/**
+ * Normalisasi tag dari argumen tool `tag_contact` — bentuk kanonis yang
+ * benar-benar akan tersimpan di kontak (huruf kecil, spasi → tanda
+ * hubung, hanya [a-z0-9-_], maks 64). Dipakai executor sungguhan DAN
+ * playground (Fase 12E) agar "niat" yang ditampilkan dashboard persis
+ * sama dengan yang akan dieksekusi runtime.
+ */
+export function normalizeAgentTag(raw: unknown): string {
+  const value = typeof raw === "string" ? raw : "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9\-_]/g, "")
+    .slice(0, 64);
+}
 
 // ---------------------------------------------------------------------------
 // Executor tool — diekspor terpisah agar bisa diuji integrasi langsung
@@ -132,14 +157,7 @@ export async function executeAgentToolCall(
   const { tenantId } = ctx;
 
   if (call.name === "tag_contact") {
-    const rawTag =
-      typeof call.arguments.tag === "string" ? call.arguments.tag : "";
-    const tag = rawTag
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9\-_]/g, "")
-      .slice(0, 64);
+    const tag = normalizeAgentTag(call.arguments.tag);
     if (!tag) return { name: call.name, executed: false, note: "invalid_tag" };
     return withTenantDb(db, tenantId, async (tx) => {
       const [contact] = await tx
@@ -349,6 +367,112 @@ export async function executeAgentToolCall(
   }
 
   return { name: call.name, executed: false, note: "unknown_tool" };
+}
+
+// ---------------------------------------------------------------------------
+// Jalur bersama: rakit draft balasan (prompt + retrieval + provider)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompt sistem agent — SATU-SATUNYA tempat string ini dirakit. Dipakai
+ * loop runtime (`respondToInboundMessage`) dan playground (Fase 12E)
+ * lewat `generateAgentDraft`, supaya uji kering di dashboard tidak
+ * pernah menyimpang dari perilaku produksi (risiko drift prompt).
+ */
+export function buildAgentSystemPrompt(agent: Agent): string {
+  const languageLine = agent.config.language
+    ? `\nBahasa balasan: ${agent.config.language}.`
+    : "\nJawab mengikuti bahasa lawan bicara.";
+  return (
+    `${agent.systemPrompt.trim()}${languageLine}\n` +
+    "Kamu adalah agent layanan pelanggan. Jawab ringkas dan hanya berdasarkan fakta dari basis pengetahuan bila tersedia; jangan mengarang harga/fakta. " +
+    "Kamu boleh memakai tool tag_contact, move_pipeline_stage, send_payment_link (bila kontak ingin membeli), dan handoff_to_human bila relevan."
+  );
+}
+
+export interface AgentDraft {
+  /** Teks balasan final (trim + dipotong config.maxReplyChars; boleh kosong). */
+  text: string;
+  /** Tool call yang diusulkan model — BELUM dieksekusi di sini. */
+  toolCalls: LlmToolCall[];
+  /** Potongan KB yang dipakai sebagai konteks (sudah terpotong top-N). */
+  hits: KbSearchHit[];
+  /** Mode retrieval yang benar-benar terjadi: 'hybrid' hanya bila vektor kueri berhasil dibuat. */
+  retrieval: "hybrid" | "fts";
+  /** Hasil mentah provider (provider/model/usage final untuk metering). */
+  result: LlmChatResult;
+}
+
+/**
+ * Menghasilkan SATU draft balasan agent: retrieval KB untuk teks pemicu
+ * (hibrida full-text + vektor bila provider embedding aktif — kegagalan
+ * embedding kueri jatuh ke full-text murni, tidak pernah menggagalkan),
+ * rakit prompt, panggil provider LLM. TIDAK menulis apa pun selain usage
+ * panggilan embedding kueri (baris `kb_embedding` lewat embedKbQueryText)
+ * dan TIDAK mengeksekusi tool — keputusan eksekusi/pengiriman adalah
+ * milik pemanggil (runtime mengeksekusi & mengantrekan pesan; playground
+ * hanya melaporkan niat). Error provider DILEMPAR ke pemanggil.
+ */
+export async function generateAgentDraft(
+  db: Database,
+  provider: LlmProvider,
+  input: {
+    tenantId: string;
+    agent: Agent;
+    /** Riwayat kronologis siap kirim (role sudah dipetakan); pesan terakhir = pemicu. */
+    messages: LlmChatMessage[];
+    /** Teks acuan retrieval KB + embedding kueri (biasanya isi pesan pemicu). */
+    retrievalText: string;
+    /** Provider embedding aktif proses pemanggil; null/absen = full-text murni. */
+    embeddingProvider?: EmbeddingProvider | null;
+    /** refId baris usage `kb_embedding` untuk panggilan kueri ini. */
+    usageRefId?: string | null;
+  },
+): Promise<AgentDraft> {
+  const { tenantId, agent } = input;
+  const ctx = { tenantId };
+
+  // Fase 12D: embed kueri SEKALI bila provider embedding aktif; error
+  // provider apa pun (jaringan, model, dimensi) ditelan di sini dan
+  // pencarian berjalan full-text murni — retrieval tidak boleh
+  // menggagalkan jawaban agent. Usage panggilan kueri dicatat
+  // embedKbQueryText sebagai baris kb_embedding (bukan agent_response,
+  // jadi tidak menyentuh cap harian).
+  let queryEmbedding: number[] | null = null;
+  if (input.embeddingProvider && input.retrievalText.trim().length > 0) {
+    try {
+      queryEmbedding = await embedKbQueryText(db, input.embeddingProvider, {
+        tenantId,
+        text: input.retrievalText,
+        refId: input.usageRefId ?? null,
+      });
+    } catch {
+      queryEmbedding = null;
+    }
+  }
+  const hits = await searchKbChunks(db, ctx, input.retrievalText, KB_HIT_LIMIT, {
+    queryEmbedding,
+  });
+
+  const result = await provider.chat({
+    system: buildAgentSystemPrompt(agent),
+    messages: input.messages,
+    tools: AGENT_TOOLS,
+    kbChunks: hits.map((h) => h.content),
+    model: agent.model || undefined,
+  });
+
+  let text = result.text.trim();
+  const maxChars = agent.config.maxReplyChars;
+  if (maxChars && text.length > maxChars) text = text.slice(0, maxChars);
+
+  return {
+    text,
+    toolCalls: result.toolCalls,
+    hits,
+    retrieval: queryEmbedding ? "hybrid" : "fts",
+    result,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -577,46 +701,18 @@ export async function respondToInboundMessage(
     return { responded: false, reason: "capped" };
   }
 
-  // 4. Riwayat + retrieval KB dari teks pesan pemicu.
+  // 4+5. Riwayat → draft balasan lewat jalur bersama (retrieval KB dari
+  // teks pesan pemicu + prompt + provider). Error provider dicatat
+  // sebagai audit `agent.failed`, tidak pernah melempar keluar.
   const history = (await listMessages(db, ctx, conversationId, {
     limit: HISTORY_LIMIT,
   })) ?? [];
   const triggerText = message.contentText ?? "";
-  // Fase 12D: embed kueri SEKALI bila provider embedding aktif; error
-  // provider apa pun (jaringan, model, dimensi) ditelan di sini dan
-  // pencarian berjalan full-text murni — retrieval tidak boleh
-  // menggagalkan jawaban agent. Usage panggilan kueri dicatat
-  // embedKbQueryText sebagai baris kb_embedding (bukan agent_response,
-  // jadi tidak menyentuh cap harian).
-  let queryEmbedding: number[] | null = null;
-  if (input.embeddingProvider && triggerText.trim().length > 0) {
-    try {
-      queryEmbedding = await embedKbQueryText(db, input.embeddingProvider, {
-        tenantId,
-        text: triggerText,
-        refId: messageId,
-      });
-    } catch {
-      queryEmbedding = null;
-    }
-  }
-  const hits = await searchKbChunks(db, ctx, triggerText, KB_HIT_LIMIT, {
-    queryEmbedding,
-  });
-
-  const languageLine = agent.config.language
-    ? `\nBahasa balasan: ${agent.config.language}.`
-    : "\nJawab mengikuti bahasa lawan bicara.";
-  const system =
-    `${agent.systemPrompt.trim()}${languageLine}\n` +
-    "Kamu adalah agent layanan pelanggan. Jawab ringkas dan hanya berdasarkan fakta dari basis pengetahuan bila tersedia; jangan mengarang harga/fakta. " +
-    "Kamu boleh memakai tool tag_contact, move_pipeline_stage, send_payment_link (bila kontak ingin membeli), dan handoff_to_human bila relevan.";
-
-  // 5. Panggil provider — error dicatat, tidak pernah melempar keluar.
-  let result: Awaited<ReturnType<LlmProvider["chat"]>>;
+  let draft: AgentDraft;
   try {
-    result = await provider.chat({
-      system,
+    draft = await generateAgentDraft(db, provider, {
+      tenantId,
+      agent,
       messages: history
         .filter((m) => (m.contentText ?? "").trim().length > 0)
         .map((m) => ({
@@ -626,9 +722,9 @@ export async function respondToInboundMessage(
               : ("assistant" as const),
           content: m.contentText ?? "",
         })),
-      tools: AGENT_TOOLS,
-      kbChunks: hits.map((h) => h.content),
-      model: agent.model || undefined,
+      retrievalText: triggerText,
+      embeddingProvider: input.embeddingProvider,
+      usageRefId: messageId,
     });
   } catch (err) {
     const errorText = err instanceof Error ? err.message : String(err);
@@ -643,9 +739,8 @@ export async function respondToInboundMessage(
     return { responded: false, reason: "provider_error" };
   }
 
-  let text = result.text.trim();
-  const maxChars = agent.config.maxReplyChars;
-  if (maxChars && text.length > maxChars) text = text.slice(0, maxChars);
+  const { result, hits } = draft;
+  const text = draft.text;
   const auditMeta = {
     agentId: agent.id,
     provider: result.provider,
@@ -655,7 +750,7 @@ export async function respondToInboundMessage(
     // Fase 12D: mode retrieval yang benar-benar terjadi pada respons
     // ini ('hybrid' hanya bila vektor kueri berhasil dibuat DAN
     // pencarian memakainya) — jejak jujur untuk debug kualitas KB.
-    retrieval: queryEmbedding ? "hybrid" : "fts",
+    retrieval: draft.retrieval,
   };
 
   if (!text && result.toolCalls.length === 0) {
@@ -783,5 +878,244 @@ export async function respondToInboundMessage(
     mode: "auto",
     outboundMessageId,
     toolOutcomes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Resolusi provider LLM agent (dipakai proses API untuk playground)
+// ---------------------------------------------------------------------------
+
+export interface AgentLlmResolutionOptions {
+  /** Opsi resolver Panel Admin proses ini; absen = tanpa panel (env saja). */
+  platform?: PlatformSettingsOptions;
+  /** Nilai env LLM_PROVIDER proses ini: 'mock' | 'openrouter' | undefined. */
+  providerEnv?: string;
+}
+
+/**
+ * Provider LLM efektif untuk jalur agent di luar worker — semantik
+ * PERSIS resolver worker (Fase 6C): kunci OpenRouter efektif (Panel →
+ * env) ada → OpenRouter; tidak ada kunci → provider dari env
+ * (bawaan mock); LLM_PROVIDER=openrouter eksplisit tanpa kunci →
+ * createLlmProvider MELEMPAR (salah konfigurasi gagal keras, tidak
+ * diam-diam jatuh ke mock). Pemanggil API menangkap lemparan itu
+ * sebagai 502 AGENT_PROVIDER_ERROR.
+ */
+export async function resolveAgentLlmProvider(
+  db: Database,
+  opts: AgentLlmResolutionOptions,
+): Promise<LlmProvider> {
+  const orConfig = opts.platform
+    ? await resolveOpenRouterConfig(db, opts.platform)
+    : null;
+  return createLlmProvider({
+    provider: orConfig ? "openrouter" : opts.providerEnv,
+    openrouterApiKey: orConfig?.apiKey,
+    openrouterModel: orConfig?.model,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Playground (Fase 12E) — uji kering agent dari dashboard
+// ---------------------------------------------------------------------------
+
+/** refType usage_ledger untuk satu lari playground (TERPISAH dari cap & analytics). */
+export const AGENT_PLAYGROUND_USAGE_REF_TYPE = "agent_playground";
+
+/**
+ * Niat tool: bentuk terstruktur dari tool call model untuk playground.
+ * Ini yang AKAN dilakukan executor sungguhan — tag sudah ternormalisasi
+ * dengan fungsi yang sama, dan produk tautan bayar dicocokkan BACA-SAJA
+ * dengan pencocokan yang sama — tetapi tidak ada satu pun yang ditulis.
+ */
+export type AgentPlaygroundIntent =
+  | { kind: "add_tag"; tag: string }
+  | { kind: "set_stage"; stage: string | null }
+  | { kind: "handoff"; reason: string | null }
+  | {
+      kind: "create_payment_link";
+      productId: string | null;
+      productName: string | null;
+      query: string | null;
+    }
+  | { kind: "unknown"; toolName: string };
+
+export interface AgentPlaygroundUsageSummary {
+  provider: string;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  /** Biaya aktual USD dari provider; undefined bila tidak dilaporkan. */
+  costUsd?: number;
+}
+
+export type AgentPlaygroundOutcome =
+  | {
+      kind: "ok";
+      agentId: string;
+      mode: "auto" | "suggest";
+      replyText: string;
+      kbHits: KbSearchHit[];
+      intents: AgentPlaygroundIntent[];
+      retrieval: "hybrid" | "fts";
+      usage: AgentPlaygroundUsageSummary;
+    }
+  | { kind: "agent_not_found" }
+  | { kind: "provider_error"; error: string };
+
+/** Satu tool call model → satu niat playground (pencocokan produk = baca-saja). */
+async function toPlaygroundIntent(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  call: LlmToolCall,
+): Promise<AgentPlaygroundIntent> {
+  if (call.name === "tag_contact") {
+    const raw = typeof call.arguments.tag === "string" ? call.arguments.tag : "";
+    return { kind: "add_tag", tag: normalizeAgentTag(raw) || raw.trim().slice(0, 64) };
+  }
+  if (call.name === "move_pipeline_stage") {
+    return {
+      kind: "set_stage",
+      stage: typeof call.arguments.stage === "string" ? call.arguments.stage : null,
+    };
+  }
+  if (call.name === "handoff_to_human") {
+    return {
+      kind: "handoff",
+      reason:
+        typeof call.arguments.reason === "string"
+          ? call.arguments.reason.slice(0, 500)
+          : null,
+    };
+  }
+  if (call.name === "send_payment_link") {
+    const query =
+      typeof call.arguments.productName === "string"
+        ? call.arguments.productName
+        : null;
+    const match = await matchActiveProductForPayment(db, ctx, query ?? undefined);
+    return {
+      kind: "create_payment_link",
+      productId: match?.product.id ?? null,
+      productName: match?.product.name ?? null,
+      query,
+    };
+  }
+  return { kind: "unknown", toolName: call.name };
+}
+
+/**
+ * Satu lari PLAYGROUND untuk agent TERTENTU (dipilih pemilik di
+ * dashboard — berbeda dari runtime yang selalu memakai agent aktif
+ * tertua). Memakai jalur bersama `generateAgentDraft`, jadi prompt,
+ * retrieval hibrida, dan pemanggilan provider identik dengan produksi.
+ *
+ * Jaminan kering (keras):
+ * - tool call TIDAK dieksekusi — hanya dipetakan menjadi niat;
+ * - tidak ada baris percakapan/pesan/kontak/saran/tautan bayar ditulis;
+ * - cap 200 respons/hari TIDAK tersentuh (cap menghitung refType
+ *   `agent_response` saja);
+ * - pemakaian token TETAP tercatat jujur sebagai baris usage_ledger
+ *   refType `agent_playground` (meta.playground=true) — terpisah dari
+ *   agregat analytics Fase 9B yang menyaring `agent_response`.
+ *
+ * Riwayat percakapan berasal dari klien (hanya hidup di browser) dan
+ * diperlakukan sebagai konteks uji, bukan data tenant.
+ */
+export async function runAgentPlayground(
+  db: Database,
+  provider: LlmProvider,
+  input: {
+    tenantId: string;
+    agentId: string;
+    message: string;
+    history?: Array<{ role: "user" | "assistant"; content: string }>;
+    embeddingProvider?: EmbeddingProvider | null;
+  },
+): Promise<AgentPlaygroundOutcome> {
+  const { tenantId, agentId } = input;
+  const ctx = { tenantId };
+
+  const agent = await getAgent(db, ctx, agentId);
+  if (!agent) return { kind: "agent_not_found" };
+
+  const runId = crypto.randomUUID();
+  const historyMessages: LlmChatMessage[] = (input.history ?? [])
+    .filter((m) => m.content.trim().length > 0)
+    .slice(-(HISTORY_LIMIT - 1))
+    .map((m) => ({ role: m.role, content: m.content }));
+
+  let draft: AgentDraft;
+  try {
+    draft = await generateAgentDraft(db, provider, {
+      tenantId,
+      agent,
+      messages: [...historyMessages, { role: "user", content: input.message }],
+      retrievalText: input.message,
+      embeddingProvider: input.embeddingProvider,
+      usageRefId: runId,
+    });
+  } catch (err) {
+    return {
+      kind: "provider_error",
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    };
+  }
+
+  const intents: AgentPlaygroundIntent[] = [];
+  for (const call of draft.toolCalls) {
+    intents.push(await toPlaygroundIntent(db, ctx, call));
+  }
+
+  const { result } = draft;
+  const usage: AgentPlaygroundUsageSummary = {
+    provider: result.provider,
+    model: result.model,
+    tokensIn: result.usage.tokensIn,
+    tokensOut: result.usage.tokensOut,
+    ...(result.usage.costUsd !== undefined
+      ? { costUsd: result.usage.costUsd }
+      : {}),
+  };
+
+  // Metering jujur: token playground benar-benar terpakai di provider,
+  // jadi dicatat — dengan refType & penanda sendiri agar tidak pernah
+  // tercampur hitungan respons pelanggan (cap & analytics).
+  await withTenantDb(db, tenantId, async (tx) => {
+    const meta: Record<string, unknown> = {
+      agentId: agent.id,
+      provider: usage.provider,
+      model: usage.model,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      playground: true,
+      mode: agent.mode,
+    };
+    if (usage.costUsd !== undefined) {
+      meta.costUsd = usage.costUsd;
+      meta.costCurrency = "USD";
+    }
+    await tx.insert(usageLedger).values({
+      tenantId,
+      type: "ai_token",
+      qty: String(usage.tokensIn + usage.tokensOut),
+      costModel: "0",
+      costProvider: "0",
+      currency: "IDR",
+      refType: AGENT_PLAYGROUND_USAGE_REF_TYPE,
+      refId: runId,
+      meta,
+    });
+  });
+
+  return {
+    kind: "ok",
+    agentId: agent.id,
+    mode: agent.mode,
+    replyText: draft.text,
+    kbHits: draft.hits,
+    intents,
+    retrieval: draft.retrieval,
+    usage,
   };
 }

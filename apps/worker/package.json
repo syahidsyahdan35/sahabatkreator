@@ -28,6 +28,7 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "verify:agent-tools": "tsx scripts/verify-agent-tools.ts",
+    "verify:agent-playground": "tsx scripts/verify-agent-playground.ts",
     "verify:kb-embeddings": "tsx scripts/verify-kb-embeddings.ts",
     "verify:sequences": "tsx scripts/verify-sequences.ts",
     "verify:platform-settings": "tsx scripts/verify-platform-settings.ts",

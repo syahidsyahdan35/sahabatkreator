@@ -73,6 +73,9 @@ export const ErrorCodeSchema = z.enum([
   "KB_DOCUMENT_NO_TEXT",
   "KB_DOCUMENT_TYPE_UNSUPPORTED",
   "KB_DOCUMENT_TOO_LARGE",
+  // Fase 12E: playground agent — provider LLM gagal menjawab atau
+  // salah konfigurasi (mis. LLM_PROVIDER=openrouter tanpa kunci) → 502.
+  "AGENT_PROVIDER_ERROR",
   // Fase 9B: merge kontak ke dirinya sendiri → 422.
   "CONTACT_MERGE_SAME",
   // Fase 9C: kedalaman inbox tim — penerima tugas bukan member workspace
@@ -1363,6 +1366,108 @@ export const AgentListResponseSchema = z.object({
   agents: z.array(AgentResponseSchema),
 });
 export type AgentListResponse = z.infer<typeof AgentListResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// AI Playground (Fase 12E) — uji KERING agent dari dashboard hub /agents.
+// Balasan dihitung lewat jalur yang sama persis seperti runtime
+// (prompt agent + retrieval KB hibrida + provider LLM), tetapi tool call
+// TIDAK dieksekusi — dikembalikan sebagai "niat" terstruktur — dan tidak
+// ada percakapan/pesan/kontak/saran yang ditulis. Pemakaian token tetap
+// tercatat di usage_ledger dengan refType khusus `agent_playground`,
+// TERPISAH dari `agent_response`: tidak mengonsumsi cap 200 respons/hari
+// dan tidak masuk agregat analytics (dasbor 9B menyaring agent_response).
+// ---------------------------------------------------------------------------
+
+export const AgentPlaygroundHistoryMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().trim().min(1).max(4_000),
+});
+export type AgentPlaygroundHistoryMessage = z.infer<
+  typeof AgentPlaygroundHistoryMessageSchema
+>;
+
+export const AgentPlaygroundRequestSchema = z.object({
+  message: z.string().trim().min(1).max(4_000),
+  /** Riwayat uji sebelumnya (hanya hidup di klien; maks 20 giliran). */
+  history: z.array(AgentPlaygroundHistoryMessageSchema).max(20).optional(),
+});
+export type AgentPlaygroundRequest = z.infer<
+  typeof AgentPlaygroundRequestSchema
+>;
+
+export const AgentPlaygroundIntentKindSchema = z.enum([
+  "add_tag",
+  "set_stage",
+  "handoff",
+  "create_payment_link",
+  "unknown",
+]);
+export type AgentPlaygroundIntentKind = z.infer<
+  typeof AgentPlaygroundIntentKindSchema
+>;
+
+export const AgentPlaygroundIntentSchema = z.object({
+  kind: AgentPlaygroundIntentKindSchema,
+  /** add_tag: tag (ternormalisasi seperti executor) yang AKAN dipasang. */
+  tag: z.string().nullable().optional(),
+  /** set_stage: tahap tujuan yang diusulkan model. */
+  stage: z.string().nullable().optional(),
+  /** handoff: alasan yang diusulkan model. */
+  reason: z.string().nullable().optional(),
+  /**
+   * create_payment_link: produk yang AKAN dipakai, dari pencocokan
+   * BACA-SAJA yang sama seperti executor; null = tidak ada produk aktif.
+   */
+  productId: z.string().uuid().nullable().optional(),
+  productName: z.string().nullable().optional(),
+  /** create_payment_link: nama produk yang diminta model (query mentah). */
+  query: z.string().nullable().optional(),
+  /** unknown: nama tool mentah dari model yang tidak dikenal runtime. */
+  toolName: z.string().nullable().optional(),
+});
+export type AgentPlaygroundIntent = z.infer<
+  typeof AgentPlaygroundIntentSchema
+>;
+
+export const AgentPlaygroundKbHitSchema = z.object({
+  chunkId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  documentTitle: z.string(),
+  chunkIndex: z.number().int(),
+  /** Cuplikan isi chunk (dipotong server, maks 280 karakter). */
+  snippet: z.string(),
+  /** Jalur retrieval yang menemukan chunk ini (Fase 12D). */
+  sources: z.array(z.enum(["fts", "vector"])),
+});
+export type AgentPlaygroundKbHit = z.infer<
+  typeof AgentPlaygroundKbHitSchema
+>;
+
+export const AgentPlaygroundUsageSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  tokensIn: z.number().int(),
+  tokensOut: z.number().int(),
+  /** Biaya aktual provider (USD); null = provider tidak melaporkannya. */
+  costUsd: z.number().nullable(),
+});
+export type AgentPlaygroundUsage = z.infer<
+  typeof AgentPlaygroundUsageSchema
+>;
+
+export const AgentPlaygroundResponseSchema = z.object({
+  /** Teks balasan yang AKAN dikirim agent (mode auto) / diusulkan (suggest). */
+  replyText: z.string(),
+  mode: AgentModeSchema,
+  /** Mode retrieval yang benar-benar terjadi pada lari ini. */
+  retrieval: z.enum(["hybrid", "fts"]),
+  kbHits: z.array(AgentPlaygroundKbHitSchema),
+  intents: z.array(AgentPlaygroundIntentSchema),
+  usage: AgentPlaygroundUsageSchema,
+});
+export type AgentPlaygroundResponse = z.infer<
+  typeof AgentPlaygroundResponseSchema
+>;
 
 // ---------------------------------------------------------------------------
 // Knowledge Base (Fase 3A) — dokumen teks yang di-chunk untuk retrieval

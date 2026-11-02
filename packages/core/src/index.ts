@@ -152,12 +152,23 @@ export {
 export {
   respondToInboundMessage,
   executeAgentToolCall,
+  generateAgentDraft,
+  buildAgentSystemPrompt,
+  normalizeAgentTag,
+  resolveAgentLlmProvider,
+  runAgentPlayground,
   AGENT_DAILY_RESPONSE_CAP,
   AGENT_USAGE_REF_TYPE,
+  AGENT_PLAYGROUND_USAGE_REF_TYPE,
   type AgentToolContext,
   type AgentToolOutcome,
   type AgentRespondResult,
   type AgentSkipReason,
+  type AgentDraft,
+  type AgentLlmResolutionOptions,
+  type AgentPlaygroundIntent,
+  type AgentPlaygroundOutcome,
+  type AgentPlaygroundUsageSummary,
 } from "./agent-runtime";
 export {
   listSuggestions,
