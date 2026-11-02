@@ -13,6 +13,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
+import { resolveInboundReplyTargetId } from "./conversations";
 
 /**
  * Service domain WhatsApp (Fase 7B, RANCANGAN §4 & §12) — WhatsApp
@@ -243,6 +244,12 @@ export interface RecordWhatsAppInboundInput {
   contactName: string | null;
   /** wamid pesan masuk — id dedup provider. */
   providerMessageId: string;
+  /**
+   * Wamid pesan yang dikutip pesan ini (`messages[].context.id`, Fase
+   * 7B.5) — ditautkan ke baris target bila ditemukan di percakapan yang
+   * sama; selain itu pesan tetap tercatat tanpa tautan.
+   */
+  replyToProviderMessageId?: string | null;
   /** Tipe pesan ternormalisasi (enum message_type kita). */
   type: Message["type"];
   /** Isi teks; untuk media = caption bila ada, selain itu null. */
@@ -365,6 +372,19 @@ export async function recordWhatsAppInboundMessage(
     if (dupe)
       return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
+    // Fase 7B.5: tautkan kutipan (context.id) bila targetnya ada di
+    // percakapan ini — id majemuk target disusun dengan helper yang sama.
+    const replyToMessageId = input.replyToProviderMessageId
+      ? await resolveInboundReplyTargetId(
+          tx,
+          conversationId,
+          whatsAppProviderMessageId(
+            account.externalId,
+            input.replyToProviderMessageId,
+          ),
+        )
+      : null;
+
     // ON CONFLICT DO NOTHING: index uniknya global sedangkan SELECT
     // dedup terkurung RLS tenant ini (pelajaran 6A.1/7A).
     const [message] = await tx
@@ -377,6 +397,7 @@ export async function recordWhatsAppInboundMessage(
         type: input.type,
         contentText: input.text,
         providerMessageId: compositeId,
+        replyToMessageId,
         status: "received",
       })
       .onConflictDoNothing()

@@ -219,14 +219,26 @@ export function createPublicV1Routes(
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid message payload");
     }
     const auth = c.get("apiKeyAuth");
-    const queued = await queueOutboundMessageForApiKey(
+    const result = await queueOutboundMessageForApiKey(
       bundle.db,
       { tenantId: auth.tenantId },
       id,
       parsed.data,
       auth.apiKey.id,
     );
-    if (!queued) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    if (result.kind === "conversation_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    if (result.kind === "reply_target_invalid") {
+      // Fase 7B.5: paritas dengan endpoint balas dashboard.
+      return apiError(
+        c,
+        422,
+        "MESSAGE_REPLY_TARGET_INVALID",
+        "Reply target must be a message in this conversation",
+      );
+    }
+    const queued = result.message;
 
     // Jalur pengiriman sama persis dengan balasan dashboard: Fase 6G
     // menerbitkan nudge `message.queued` — apps/realtime mem-flush ke

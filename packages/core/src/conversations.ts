@@ -5,12 +5,13 @@ import {
   contacts,
   conversations,
   messages,
+  users,
   type Conversation,
   type Database,
   type Message,
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
-import { withTenantDb } from "./tx";
+import { withTenantDb, type DbTx } from "./tx";
 
 /**
  * Service domain percakapan & pesan inbox (Fase 1D, RANCANGAN §5.1 & §6).
@@ -23,6 +24,233 @@ import { withTenantDb } from "./tx";
  * `markOutboundMessageSent`; channel lain tetap `queued` sampai adapter
  * channel-nya tiba di fase masing-masing.
  */
+
+// ---------------------------------------------------------------------------
+// Kutipan balasan / reply quote (Fase 7B.5)
+// ---------------------------------------------------------------------------
+
+/** Batas cuplikan teks pesan target pada ringkasan kutipan. */
+export const REPLY_TO_PREVIEW_CHARS = 140;
+
+/**
+ * Ringkasan pesan yang dikutip — bentuk yang sama persis dengan kontrak
+ * API (`MessageReplyToSchema`); resolusi dilakukan di sini, server-side,
+ * agar semua permukaan (inbox, API publik v1, webchat) konsisten.
+ */
+export interface MessageReplyToSummary {
+  id: string;
+  direction: Message["direction"];
+  senderType: Message["senderType"];
+  type: Message["type"];
+  /** Nama pengirim target bila diketahui; null → UI memakai label cadangan per arah. */
+  authorLabel: string | null;
+  /** Teks target terpotong; null untuk non-teks tanpa caption. */
+  contentPreview: string | null;
+}
+
+/** Baris pesan + ringkasan kutipannya yang sudah teresolusi. */
+export interface MessageWithReplyTo extends Message {
+  replyTo: MessageReplyToSummary | null;
+}
+
+/**
+ * Menerjemahkan kolom `reply_to_message_id` sekumpulan baris pesan
+ * menjadi ringkasan kutipan, dalam transaksi tenant yang sedang berjalan
+ * (RLS menegakkan isolasi — target milik tenant lain tidak akan pernah
+ * terbaca di sini). Satu query batch untuk semua target + nama kontak
+ * (pesan masuk) dan nama user (pesan keluar dari dashboard) seperlunya.
+ * Target yang tidak ditemukan (sudah terhapus → FK SET NULL sebenarnya
+ * sudah men-null-kan kolomnya; ini jaring pengaman) menghasilkan null.
+ */
+async function attachReplyToSummaries(
+  tx: DbTx,
+  tenantId: string,
+  rows: Message[],
+): Promise<MessageWithReplyTo[]> {
+  const targetIds = [
+    ...new Set(
+      rows
+        .map((r) => r.replyToMessageId)
+        .filter((v): v is string => v !== null),
+    ),
+  ];
+  if (targetIds.length === 0) {
+    return rows.map((r) => ({ ...r, replyTo: null }));
+  }
+  const targets = await tx
+    .select({
+      id: messages.id,
+      conversationId: messages.conversationId,
+      direction: messages.direction,
+      senderType: messages.senderType,
+      senderName: messages.senderName,
+      type: messages.type,
+      contentText: messages.contentText,
+      sentByUserId: messages.sentByUserId,
+    })
+    .from(messages)
+    .where(
+      and(eq(messages.tenantId, tenantId), inArray(messages.id, targetIds)),
+    );
+
+  // Label penulis: sender_name (grup) menang; pesan masuk lain → nama
+  // kontak percakapan target; pesan keluar dashboard → nama user
+  // pengirim (jatuh ke email bila nama kosong, pola audit-log 7B.4).
+  const contactConvIds = [
+    ...new Set(
+      targets
+        .filter((t) => t.direction === "inbound" && !t.senderName)
+        .map((t) => t.conversationId),
+    ),
+  ];
+  const contactNameByConversation = new Map<string, string>();
+  if (contactConvIds.length > 0) {
+    const convRows = await tx
+      .select({ id: conversations.id, contactName: contacts.name })
+      .from(conversations)
+      .innerJoin(contacts, eq(conversations.contactId, contacts.id))
+      .where(
+        and(
+          eq(conversations.tenantId, tenantId),
+          inArray(conversations.id, contactConvIds),
+        ),
+      );
+    for (const r of convRows) {
+      contactNameByConversation.set(r.id, r.contactName);
+    }
+  }
+  const senderUserIds = [
+    ...new Set(
+      targets
+        .map((t) => t.sentByUserId)
+        .filter((v): v is string => v !== null),
+    ),
+  ];
+  const userLabelById = new Map<string, string>();
+  if (senderUserIds.length > 0) {
+    const userRows = await tx
+      .select({ id: users.id, name: users.name, email: users.email })
+      .from(users)
+      .where(inArray(users.id, senderUserIds));
+    for (const u of userRows) {
+      userLabelById.set(u.id, u.name?.trim() ? u.name : u.email);
+    }
+  }
+
+  const targetById = new Map(targets.map((t) => [t.id, t]));
+  return rows.map((r) => {
+    const target = r.replyToMessageId
+      ? targetById.get(r.replyToMessageId)
+      : undefined;
+    if (!target) return { ...r, replyTo: null };
+    const authorLabel =
+      target.senderName ??
+      (target.direction === "inbound"
+        ? (contactNameByConversation.get(target.conversationId) ?? null)
+        : target.sentByUserId
+          ? (userLabelById.get(target.sentByUserId) ?? null)
+          : null);
+    return {
+      ...r,
+      replyTo: {
+        id: target.id,
+        direction: target.direction,
+        senderType: target.senderType,
+        type: target.type,
+        authorLabel,
+        contentPreview: target.contentText
+          ? target.contentText.slice(0, REPLY_TO_PREVIEW_CHARS)
+          : null,
+      },
+    };
+  });
+}
+
+/**
+ * Varian publik `attachReplyToSummaries` untuk pemanggil yang memegang
+ * baris pesan di luar transaksi daftar (mis. sesi webchat yang membaca
+ * riwayatnya sendiri di core webchat.ts): membuka transaksi tenant
+ * sendiri. Baris dari tenant lain tidak akan teresolusi (RLS).
+ */
+export async function withReplyToSummaries(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  rows: Message[],
+): Promise<MessageWithReplyTo[]> {
+  if (rows.length === 0) return [];
+  return withTenantDb(db, ctx.tenantId, (tx) =>
+    attachReplyToSummaries(tx, ctx.tenantId, rows),
+  );
+}
+
+/**
+ * `provider_message_id` satu pesan dalam konteks tenant pemiliknya —
+ * dipakai poller pengiriman untuk MENURUNKAN id provider pesan yang
+ * dikutip dari baris targetnya saat kirim (Fase 7B.5: id provider
+ * kutipan tidak pernah disimpan duplikat). Null bila pesan tak ada.
+ */
+export async function getMessageProviderMessageId(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  messageId: string,
+): Promise<string | null> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select({ providerMessageId: messages.providerMessageId })
+      .from(messages)
+      .where(
+        and(eq(messages.tenantId, ctx.tenantId), eq(messages.id, messageId)),
+      )
+      .limit(1);
+    return row?.providerMessageId ?? null;
+  });
+}
+
+/**
+ * Resolusi target kutipan PESAN MASUK (Fase 7B.5): dari id majemuk
+ * provider pesan yang dikutip, temukan barisnya DI PERCAKAPAN YANG SAMA.
+ * Dipakai jalur pencatatan masuk telegram/meta/whatsapp di dalam
+ * transaksi tenant mereka. Target tak ditemukan (belum tercatat, milik
+ * percakapan lain, atau kutipan ke pesan yang sudah terhapus) → null:
+ * pesan masuk TETAP tercatat tanpa tautan — kutipan asing tidak boleh
+ * menggagalkan webhook.
+ */
+export async function resolveInboundReplyTargetId(
+  tx: DbTx,
+  conversationId: string,
+  compositeProviderMessageId: string,
+): Promise<string | null> {
+  const [target] = await tx
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.providerMessageId, compositeProviderMessageId),
+        eq(messages.conversationId, conversationId),
+      ),
+    )
+    .limit(1);
+  return target?.id ?? null;
+}
+
+/**
+ * Segmen mentah id pesan dari `provider_message_id` MAJEMUK kita
+ * (`telegram:<botId>:<message_id>`, `meta:<accountId>:<mid|wamid>`):
+ * semua sesudah titik dua KEDUA adalah id mentah provider (id mentah
+ * sendiri boleh memuat titik dua — pemotongan dibatasi dua segmen
+ * pertama). Null bila bentuknya tidak dikenal.
+ */
+export function extractRawProviderMessageId(
+  composite: string | null,
+): string | null {
+  if (!composite) return null;
+  const first = composite.indexOf(":");
+  if (first < 0) return null;
+  const second = composite.indexOf(":", first + 1);
+  if (second < 0) return null;
+  const raw = composite.slice(second + 1);
+  return raw.length > 0 ? raw : null;
+}
 
 export interface ConversationWithSummary extends Conversation {
   contactName: string;
@@ -128,7 +356,8 @@ export async function getConversation(
 
 /**
  * Pesan-pesan satu percakapan, kronologis menaik. `limit` mengambil N pesan
- * TERAKHIR lalu mengembalikannya dalam urutan kronologis.
+ * TERAKHIR lalu mengembalikannya dalam urutan kronologis. Setiap baris
+ * membawa ringkasan kutipannya yang sudah teresolusi (Fase 7B.5).
  * Null bila percakapan bukan milik tenant ini.
  */
 export async function listMessages(
@@ -136,7 +365,7 @@ export async function listMessages(
   ctx: Pick<TenantContext, "tenantId">,
   conversationId: string,
   input: { limit: number },
-): Promise<Message[] | null> {
+): Promise<MessageWithReplyTo[] | null> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [conv] = await tx
       .select({ id: conversations.id })
@@ -160,7 +389,7 @@ export async function listMessages(
       )
       .orderBy(desc(messages.createdAt))
       .limit(input.limit);
-    return rows.reverse();
+    return attachReplyToSummaries(tx, ctx.tenantId, rows.reverse());
   });
 }
 
@@ -202,13 +431,28 @@ interface OutboundMessageActor {
   auditMetaExtra?: Record<string, unknown>;
 }
 
+/**
+ * Hasil antrean pesan outbound (Fase 7B.5 memperluas kembalian null-able
+ * lama menjadi union berdiskriminasi agar penolakan target kutipan bisa
+ * dibedakan dari percakapan tak ditemukan):
+ * - `queued`: pesan terbuat; barisnya membawa ringkasan kutipan teresolusi.
+ * - `conversation_not_found`: percakapan bukan milik tenant ini → 404.
+ * - `reply_target_invalid`: `replyToMessageId` diberikan tetapi targetnya
+ *   tidak ada / milik tenant lain / berada di percakapan LAIN → 422
+ *   MESSAGE_REPLY_TARGET_INVALID. TIDAK ada tulisan apa pun.
+ */
+export type QueueOutboundMessageResult =
+  | { kind: "queued"; message: MessageWithReplyTo }
+  | { kind: "conversation_not_found" }
+  | { kind: "reply_target_invalid" };
+
 async function queueOutboundMessageWithActor(
   db: Database,
   tenantId: string,
   conversationId: string,
-  input: { contentText: string },
+  input: { contentText: string; replyToMessageId?: string },
   actor: OutboundMessageActor,
-): Promise<Message | null> {
+): Promise<QueueOutboundMessageResult> {
   return withTenantDb(db, tenantId, async (tx) => {
     const [conv] = await tx
       .select({ id: conversations.id })
@@ -220,7 +464,30 @@ async function queueOutboundMessageWithActor(
         ),
       )
       .limit(1);
-    if (!conv) return null;
+    if (!conv) return { kind: "conversation_not_found" } as const;
+
+    // Validasi target kutipan (Fase 7B.5): harus ada DI TENANT INI (RLS
+    // sudah menyembunyikan milik tenant lain dari SELECT ini) dan di
+    // PERCAKAPAN YANG SAMA. Pemeriksaan di dalam transaksi yang sama
+    // dengan insert — tidak ada jendela balapan di antaranya.
+    if (input.replyToMessageId) {
+      const [target] = await tx
+        .select({
+          id: messages.id,
+          conversationId: messages.conversationId,
+        })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.tenantId, tenantId),
+            eq(messages.id, input.replyToMessageId),
+          ),
+        )
+        .limit(1);
+      if (!target || target.conversationId !== conversationId) {
+        return { kind: "reply_target_invalid" } as const;
+      }
+    }
 
     const [message] = await tx
       .insert(messages)
@@ -233,6 +500,7 @@ async function queueOutboundMessageWithActor(
         contentText: input.contentText,
         status: "queued",
         sentByUserId: actor.sentByUserId,
+        replyToMessageId: input.replyToMessageId ?? null,
       })
       .returning();
 
@@ -251,11 +519,15 @@ async function queueOutboundMessageWithActor(
         conversationId,
         messageId: message.id,
         stub: true,
+        ...(input.replyToMessageId
+          ? { replyToMessageId: input.replyToMessageId }
+          : {}),
         ...actor.auditMetaExtra,
       },
     });
 
-    return message;
+    const [withReply] = await attachReplyToSummaries(tx, tenantId, [message]);
+    return { kind: "queued", message: withReply } as const;
   });
 }
 
@@ -263,15 +535,16 @@ async function queueOutboundMessageWithActor(
  * Membuat pesan outbound manual dari inbox (fondasi balasan manusia):
  * baris `messages` (direction=outbound, sender_type=user, status=queued),
  * memperbarui `conversations.last_message_at`, dan menulis audit
- * `message.queued` — semua dalam SATU transaksi tenant.
- * Null bila percakapan bukan milik tenant ini.
+ * `message.queued` — semua dalam SATU transaksi tenant. Hasilnya union
+ * `QueueOutboundMessageResult` (Fase 7B.5): lapisan API memetakan
+ * `conversation_not_found` → 404 dan `reply_target_invalid` → 422.
  */
 export async function queueOutboundMessage(
   db: Database,
   ctx: Pick<TenantContext, "tenantId" | "userId"> & { userId: string },
   conversationId: string,
-  input: { contentText: string },
-): Promise<Message | null> {
+  input: { contentText: string; replyToMessageId?: string },
+): Promise<QueueOutboundMessageResult> {
   return queueOutboundMessageWithActor(db, ctx.tenantId, conversationId, input, {
     auditActorType: "user",
     auditActorId: ctx.userId,
@@ -284,15 +557,16 @@ export async function queueOutboundMessage(
  * (bukan user dashboard) — `sent_by_user_id` kosong, audit tercatat dengan
  * actor_type 'api_key' dan actor_id = id baris api_keys, meta menandai
  * sumber 'public_api'. Alur antrean & pengirimannya identik dengan jalur
- * dashboard (poller API / hub webchat yang sama).
+ * dashboard (poller API / hub webchat yang sama). Validasi target kutipan
+ * Fase 7B.5 berlaku identik (paritas kontrak).
  */
 export async function queueOutboundMessageForApiKey(
   db: Database,
   ctx: Pick<TenantContext, "tenantId">,
   conversationId: string,
-  input: { contentText: string },
+  input: { contentText: string; replyToMessageId?: string },
   apiKeyId: string,
-): Promise<Message | null> {
+): Promise<QueueOutboundMessageResult> {
   return queueOutboundMessageWithActor(db, ctx.tenantId, conversationId, input, {
     auditActorType: "api_key",
     auditActorId: apiKeyId,

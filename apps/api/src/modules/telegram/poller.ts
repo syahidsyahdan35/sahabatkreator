@@ -1,5 +1,7 @@
 import {
   decryptChannelSecret,
+  extractRawProviderMessageId,
+  getMessageProviderMessageId,
   listQueuedTelegramDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
@@ -159,9 +161,27 @@ export function startTelegramDeliveryPoller(
           token,
         });
         try {
+          // Fase 7B.5: kutipan native — turunkan message_id numerik
+          // pesan target dari barisnya dalam konteks tenant ini (id
+          // provider kutipan tidak disimpan duplikat; antrean lintas
+          // tenant hanya membawa id baris target). Target tanpa id
+          // provider yang bisa diuraikan (mis. pesan webchat lama)
+          // → kirim polos tanpa reply_parameters.
+          let replyToMessageId: number | undefined;
+          if (delivery.replyToMessageId) {
+            const composite = await getMessageProviderMessageId(
+              bundle.db,
+              ctx,
+              delivery.replyToMessageId,
+            );
+            const raw = extractRawProviderMessageId(composite);
+            const numeric = raw !== null ? Number(raw) : Number.NaN;
+            if (Number.isSafeInteger(numeric)) replyToMessageId = numeric;
+          }
           const result = await client.sendMessage({
             chatId: delivery.chatExternalId,
             text: delivery.contentText,
+            ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
           });
           // Fase 6A.2: simpan id pesan provider (format majemuk yang
           // sama seperti jalur webhook) pada baris outbound — pantulan

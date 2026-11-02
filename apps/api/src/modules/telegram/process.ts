@@ -140,6 +140,10 @@ export async function processTelegramUpdate(
         chatTitle: post.chatTitle,
         // Sematkan id bot seperti jalur pesan: index unik global.
         providerMessageId: `telegram:${account.externalId}:${post.providerMessageId}`,
+        // Fase 7B.5: kutipan antar-postingan — bentuk majemuk yang sama.
+        replyToProviderMessageId: post.replyToProviderMessageId
+          ? `telegram:${account.externalId}:${post.replyToProviderMessageId}`
+          : null,
         text: post.text,
       });
     } catch (err) {
@@ -208,6 +212,10 @@ export async function processTelegramUpdate(
           // Index unik provider_message_id bersifat global → sematkan id
           // bot agar pesan dari bot berbeda tidak bertabrakan.
           providerMessageId: `telegram:${account.externalId}:${event.message.providerMessageId ?? event.providerEventId ?? ""}`,
+          // Fase 7B.5: reply_to_message pengirim — majemuk yang sama.
+          replyToProviderMessageId: event.message.replyToProviderMessageId
+            ? `telegram:${account.externalId}:${event.message.replyToProviderMessageId}`
+            : null,
           text: event.message.text,
         });
       } catch (err) {

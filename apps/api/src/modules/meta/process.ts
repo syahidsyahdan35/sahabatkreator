@@ -162,6 +162,8 @@ export async function processMetaWebhookPayload(
       recorded = await recordMetaInboundMessage(deps.db, account, {
         senderExternalId: event.senderExternalId,
         providerMessageId: event.providerMessageId,
+        // Fase 7B.5: message.reply_to.mid (mentah; core menyusun majemuk).
+        replyToProviderMessageId: event.replyToProviderMessageId,
         text: event.text,
       });
     } catch (err) {
@@ -355,6 +357,8 @@ async function handleWhatsAppWebhook(
           senderWaId: message.senderWaId,
           contactName: message.contactName,
           providerMessageId: message.providerMessageId,
+          // Fase 7B.5: messages[].context.id (wamid yang dikutip).
+          replyToProviderMessageId: message.replyToProviderMessageId,
           type: message.type,
           text: message.text,
         });

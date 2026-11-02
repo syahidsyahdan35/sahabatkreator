@@ -230,11 +230,17 @@ export class WhatsAppCloudClient {
    * Kirim pesan teks (Cloud API): `POST /{phone_number_id}/messages`.
    * Mengembalikan wamid (`messages[0].id`) — id yang nantinya
    * dicocokkan webhook statuses untuk delivered/read/failed.
+   *
+   * `contextMessageId` (Fase 7B.5): wamid pesan yang dikutip balasan
+   * ini → dikirim sebagai `context: { message_id }`, bentuk kutipan
+   * native Cloud API (pengguna melihat balasan menempel pada pesan
+   * yang dikutip). Tanpa nilai ini body tidak berubah sama sekali.
    */
   async sendTextMessage(input: {
     phoneNumberId: string;
     to: string;
     text: string;
+    contextMessageId?: string;
   }): Promise<{ providerMessageId: string }> {
     const body = await this.postJson<{
       messages?: Array<{ id?: string }>;
@@ -244,6 +250,9 @@ export class WhatsAppCloudClient {
       to: input.to,
       type: "text",
       text: { body: input.text },
+      ...(input.contextMessageId
+        ? { context: { message_id: input.contextMessageId } }
+        : {}),
     });
     const wamid = body.messages?.[0]?.id;
     if (typeof wamid !== "string" || !wamid) {
@@ -288,6 +297,12 @@ export interface WhatsAppInboundMessageEvent {
   contactName: string | null;
   /** wamid pesan masuk — id dedup provider. */
   providerMessageId: string;
+  /**
+   * Wamid pesan yang dikutip pesan ini (`messages[].context.id`, Fase
+   * 7B.5); null bila bukan balasan terkutip. WhatsApp menyertakan
+   * context pada SEMUA balasan terkutip pengguna (teks maupun media).
+   */
+  replyToProviderMessageId: string | null;
   type: WhatsAppInboundType;
   /** Teks pesan; untuk media = caption bila ada, selain itu null. */
   text: string | null;
@@ -331,6 +346,7 @@ interface WhatsAppWebhookPayload {
           id?: string;
           timestamp?: string;
           type?: string;
+          context?: { id?: string; from?: string };
           text?: { body?: string };
           image?: { caption?: string };
           video?: { caption?: string };
@@ -414,6 +430,10 @@ export function parseWhatsAppWebhookEvents(
           senderWaId: from,
           contactName: names.get(from) ?? null,
           providerMessageId: wamid,
+          replyToProviderMessageId:
+            typeof message.context?.id === "string" && message.context.id
+              ? message.context.id
+              : null,
           type,
           text,
           timestamp:
@@ -505,6 +525,7 @@ export class WhatsAppChannelAdapter implements ChannelAdapter {
         conversationExternalId: m.senderWaId,
         conversationKind: "private" as const,
         senderExternalId: m.senderWaId,
+        replyToProviderMessageId: m.replyToProviderMessageId ?? undefined,
         direction: "inbound" as const,
         // StandardMessageType channel-core tidak punya 'sticker'/'other'
         // — keduanya jatuh ke 'unknown' di permukaan adapter ini (core

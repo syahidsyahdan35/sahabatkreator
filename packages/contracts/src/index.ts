@@ -35,6 +35,9 @@ export const ErrorCodeSchema = z.enum([
   "LOG_PAYLOAD_TRUNCATED",
   "MESSAGE_NOT_FAILED",
   "MESSAGE_RETRY_UNSUPPORTED",
+  // Fase 7B.5: target kutipan balasan tidak sah (tak ada / tenant lain /
+  // percakapan lain) → 422 pada endpoint balas dashboard & API publik v1.
+  "MESSAGE_REPLY_TARGET_INVALID",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -252,6 +255,26 @@ export type ConversationListResponse = z.infer<
   typeof ConversationListResponseSchema
 >;
 
+/**
+ * Ringkasan pesan yang dikutip (Fase 7B.5): resolusi server-side dari
+ * `messages.reply_to_message_id` — klien TIDAK pernah menerima tautan
+ * mentahnya, hanya ringkasan siap tampil ini. `contentPreview` adalah
+ * teks target yang terpotong wajar; null untuk pesan non-teks tanpa
+ * caption (UI menampilkan label tipe dwibahasanya sendiri dari `type`).
+ * `authorLabel`: nama pengirim target bila diketahui (nama kontak /
+ * nama anggota grup dari sender_name / nama user pengirim); null bila
+ * tidak ada — UI memakai label cadangannya sendiri per arah.
+ */
+export const MessageReplyToSchema = z.object({
+  id: z.string().uuid(),
+  direction: MessageDirectionSchema,
+  senderType: MessageSenderTypeSchema,
+  type: MessageTypeSchema,
+  authorLabel: z.string().nullable(),
+  contentPreview: z.string().nullable(),
+});
+export type MessageReplyTo = z.infer<typeof MessageReplyToSchema>;
+
 export const MessageResponseSchema = z.object({
   id: z.string().uuid(),
   conversationId: z.string().uuid(),
@@ -265,6 +288,11 @@ export const MessageResponseSchema = z.object({
   providerMessageId: z.string().nullable(),
   status: MessageStatusSchema,
   sentByUserId: z.string().uuid().nullable(),
+  /**
+   * Pesan yang dikutip pesan ini (Fase 7B.5), atau null. Null juga bila
+   * targetnya sudah terhapus (FK SET NULL) — kutipan lepas dengan anggun.
+   */
+  replyTo: MessageReplyToSchema.nullable(),
   createdAt: z.string().datetime(),
 });
 export type MessageResponse = z.infer<typeof MessageResponseSchema>;
@@ -276,6 +304,12 @@ export type MessageListResponse = z.infer<typeof MessageListResponseSchema>;
 
 export const SendMessageRequestSchema = z.object({
   contentText: z.string().trim().min(1).max(4096),
+  /**
+   * Fase 7B.5: id pesan yang dikutip balasan ini (opsional). Server
+   * memvalidasi target ada, milik tenant yang sama, dan berada di
+   * PERCAKAPAN YANG SAMA — selain itu 422 MESSAGE_REPLY_TARGET_INVALID.
+   */
+  replyToMessageId: z.string().uuid().optional(),
 });
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 

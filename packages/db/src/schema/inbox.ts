@@ -13,6 +13,7 @@ import {
   uniqueIndex,
   uuid,
   varchar,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { users } from "./identity";
@@ -221,11 +222,26 @@ export const messages = pgTable(
     sentByUserId: uuid("sent_by_user_id").references(() => users.id, {
       onDelete: "set null",
     }),
+    /**
+     * Pesan yang dikutip pesan ini (Fase 7B.5 — reply quote): tautan ke
+     * baris `messages` LAIN dalam percakapan yang sama. ID provider dari
+     * pesan target TIDAK disalin ke sini — poller menurunkannya saat
+     * kirim dari `provider_message_id` baris target (sumber kebenaran
+     * tunggal, tidak bisa basi). ON DELETE SET NULL: purge channel
+     * (Fase 6I) menghapus baris target tanpa menggagalkan penghapusan
+     * dan tanpa menghapus balasan — kutipannya lepas dengan anggun
+     * (kolom menjadi NULL, persis perilaku tautan integration_log).
+     */
+    replyToMessageId: uuid("reply_to_message_id").references(
+      (): AnyPgColumn => messages.id,
+      { onDelete: "set null" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("messages_tenant_id_idx").on(t.tenantId),
     index("messages_conversation_created_idx").on(t.conversationId, t.createdAt),
+    index("messages_reply_to_message_id_idx").on(t.replyToMessageId),
     uniqueIndex("messages_provider_message_id_unique")
       .on(t.providerMessageId)
       .where(sql`${t.providerMessageId} IS NOT NULL`),

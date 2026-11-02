@@ -13,6 +13,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
+import { resolveInboundReplyTargetId } from "./conversations";
 
 /**
  * Service domain Telegram (Fase 6A, RANCANGAN §4) — channel Bot API.
@@ -189,6 +190,13 @@ export interface RecordTelegramInboundInput {
   chatTitle?: string | null;
   /** Id pesan unik global untuk dedup webhook: `telegram:<botId>:<message_id>`. */
   providerMessageId: string;
+  /**
+   * Id majemuk pesan yang dikutip pesan ini (Fase 7B.5):
+   * `telegram:<botId>:<reply_to_message.message_id>` — ditautkan ke
+   * baris target bila ditemukan di percakapan yang sama; selain itu
+   * pesan tetap tercatat tanpa tautan.
+   */
+  replyToProviderMessageId?: string | null;
   text: string;
 }
 
@@ -341,6 +349,15 @@ export async function recordTelegramInboundMessage(
     if (dupe)
       return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
+    // Fase 7B.5: tautkan kutipan bila targetnya ada di percakapan ini.
+    const replyToMessageId = input.replyToProviderMessageId
+      ? await resolveInboundReplyTargetId(
+          tx,
+          conversationId,
+          input.replyToProviderMessageId,
+        )
+      : null;
+
     // ON CONFLICT DO NOTHING (tanpa target = semua index unik; satu-
     // satunya index unik di messages adalah provider_message_id):
     // SELECT dedup di atas berjalan dalam konteks RLS tenant ini,
@@ -363,6 +380,7 @@ export async function recordTelegramInboundMessage(
         type: "text",
         contentText: input.text,
         providerMessageId: input.providerMessageId,
+        replyToMessageId,
         status: "received",
       })
       .onConflictDoNothing()
@@ -511,6 +529,8 @@ export interface RecordTelegramChannelPostInput {
   chatTitle?: string | null;
   /** Id dedup global: `telegram:<botId>:<message_id>` (pola jalur pesan). */
   providerMessageId: string;
+  /** Id majemuk postingan yang dikutip postingan ini (Fase 7B.5), bila ada. */
+  replyToProviderMessageId?: string | null;
   text: string;
 }
 
@@ -562,6 +582,16 @@ export async function recordTelegramChannelPost(
       { chatExternalId: input.chatExternalId, chatTitle: input.chatTitle },
     );
 
+    // Fase 7B.5: postingan channel juga bisa mengutip postingan lain di
+    // channel yang sama — tautkan bila targetnya ada di linimasa ini.
+    const replyToMessageId = input.replyToProviderMessageId
+      ? await resolveInboundReplyTargetId(
+          tx,
+          conversationId,
+          input.replyToProviderMessageId,
+        )
+      : null;
+
     // (2) Simpan postingan sebagai pesan masuk linimasa. sender_name =
     // judul channel: penulisnya channel itu sendiri (sender_chat).
     // ON CONFLICT DO NOTHING melindungi balapan index unik global
@@ -577,6 +607,7 @@ export async function recordTelegramChannelPost(
         type: "text",
         contentText: input.text,
         providerMessageId: input.providerMessageId,
+        replyToMessageId,
         status: "received",
       })
       .onConflictDoNothing()
@@ -598,6 +629,13 @@ export interface TelegramQueuedDelivery {
   messageId: string;
   conversationId: string;
   contentText: string | null;
+  /**
+   * Id baris pesan yang dikutip pesan ini (Fase 7B.5), atau null.
+   * Poller menurunkan id numerik Telegram targetnya dari baris itu
+   * dalam konteks tenant (getMessageProviderMessageId) — id provider
+   * TIDAK ikut disalin ke hasil pindai lintas tenant ini.
+   */
+  replyToMessageId: string | null;
   channelAccountId: string;
   /**
    * external_id akun = id numerik bot (Fase 6A.2): poller menyusun
@@ -638,6 +676,7 @@ export async function listQueuedTelegramDeliveries(
         messageId: messages.id,
         conversationId: messages.conversationId,
         contentText: messages.contentText,
+        replyToMessageId: messages.replyToMessageId,
         channelAccountId: channelAccounts.id,
         botExternalId: channelAccounts.externalId,
         encryptedBotToken: channelAccounts.accessTokenEncrypted,

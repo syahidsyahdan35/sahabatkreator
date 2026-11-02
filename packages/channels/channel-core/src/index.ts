@@ -52,6 +52,13 @@ export interface StandardMessage {
   direction: MessageDirection;
   type: StandardMessageType;
   text?: string;
+  /**
+   * Id provider pesan yang dikutip pesan ini (Fase 7B.5), dalam satuan
+   * mentah yang sama seperti `providerMessageId` (Telegram: message_id;
+   * Meta: mid; WhatsApp: wamid dari context.id). Lapisan core menyusun
+   * bentuk majemuknya dan menautkan ke baris target bila ditemukan.
+   */
+  replyToProviderMessageId?: string;
   /** Kunci objek media di R2 setelah diunduh (URL media provider kedaluwarsa). */
   mediaObjectKey?: string;
   sentAt: string;

@@ -427,15 +427,27 @@ export const api = {
       );
       return body.messages;
     },
-    /** POST .../conversations/:id/messages {contentText} → pesan outbound `queued`. */
+    /**
+     * POST .../conversations/:id/messages {contentText, replyToMessageId?}
+     * → pesan outbound `queued`. `replyToMessageId` (Fase 7B.5) mengutip
+     * pesan lain di percakapan yang sama; target tidak sah → 422
+     * MESSAGE_REPLY_TARGET_INVALID.
+     */
     sendMessage(
       tenantId: string,
       conversationId: string,
       contentText: string,
+      replyToMessageId?: string,
     ): Promise<MessageResponse> {
       return request<MessageResponse>(
         `/api/tenants/${tenantId}/conversations/${conversationId}/messages`,
-        { method: "POST", body: JSON.stringify({ contentText }) },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            contentText,
+            ...(replyToMessageId ? { replyToMessageId } : {}),
+          }),
+        },
       );
     },
   },

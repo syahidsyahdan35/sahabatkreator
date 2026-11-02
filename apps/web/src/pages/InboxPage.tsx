@@ -7,6 +7,7 @@ import {
 } from "react";
 import type {
   ConversationResponse,
+  MessageReplyTo,
   MessageResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
@@ -88,6 +89,13 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // Fase 7B.5 — balas dengan kutipan: target yang sedang dikutip
+  // (chip di atas composer) + id pesan yang sedang disorot sesaat
+  // setelah lompat dari klik blok kutipan.
+  const [quoteTarget, setQuoteTarget] = useState<MessageResponse | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
 
   const threadRef = useRef<HTMLDivElement | null>(null);
   const selectedRef = useRef<string | null>(null);
@@ -261,8 +269,11 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
   });
 
   // Pindah percakapan → utas dibuka dari pesan terbaru (menempel di bawah).
+  // Target kutipan juga dibersihkan: mengutip lintas percakapan tidak sah.
   useEffect(() => {
     stickToBottomRef.current = true;
+    setQuoteTarget(null);
+    setHighlightedId(null);
   }, [selectedId]);
 
   // Ikut turun ke pesan terbaru HANYA bila agen sedang menempel di bawah;
@@ -279,6 +290,26 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
       el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   };
 
+  /**
+   * Fase 7B.5: klik blok kutipan → gulir ke pesan asal + sorot sebentar.
+   * Pesan asal yang TIDAK ada di utas termuat → tidak melakukan apa-apa
+   * (bukan error — utas hanya memuat N pesan terakhir).
+   */
+  const jumpToQuotedMessage = (targetId: string) => {
+    const el = document.getElementById(`inbox-msg-${targetId}`);
+    if (!el) return;
+    stickToBottomRef.current = false;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedId(targetId);
+    if (highlightTimerRef.current) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(
+      () => setHighlightedId(null),
+      1600,
+    );
+  };
+
   const handleSend = async (e: FormEvent) => {
     e.preventDefault();
     const content = draft.trim();
@@ -290,10 +321,14 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
         tenantId,
         selectedId,
         content,
+        quoteTarget?.id,
       );
       // Agen yang baru mengirim balasan selalu dibawa ke pesan terbaru.
       stickToBottomRef.current = true;
       setDraft("");
+      // Kutipan terkirim → chip dibersihkan (hanya pada sukses; kirim
+      // yang gagal mempertahankan chip agar agen bisa mencoba lagi).
+      setQuoteTarget(null);
       // Tampilkan langsung pesan returned (status queued), lalu segarkan
       // utas & daftar dari server agar konsisten dengan sumber kebenaran.
       setMessages((prev) => [...prev, created]);
@@ -345,6 +380,29 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
 
   const selected =
     conversations.find((c) => c.id === selectedId) ?? null;
+
+  // Fase 7B.5: label penulis & cuplikan blok kutipan (dari ringkasan
+  // server `replyTo`) dan chip composer (dari pesan lokal yang dipilih).
+  // Penulis masuk tanpa nama eksplisit = kontak/judul percakapan ini;
+  // penulis keluar tanpa nama user teresolusi = label tim.
+  const contactDisplayName = selected?.title ?? selected?.contactName ?? "";
+  const quoteAuthorOfReplyTo = (replyTo: MessageReplyTo): string =>
+    replyTo.authorLabel ??
+    (replyTo.direction === "outbound"
+      ? t("inbox.quoteTeamLabel")
+      : contactDisplayName);
+  const quotePreviewOfReplyTo = (replyTo: MessageReplyTo): string =>
+    replyTo.contentPreview ??
+    (replyTo.type === "text"
+      ? t("inbox.mediaMessage")
+      : t(`inbox.messageType.${replyTo.type}` as TranslationKey));
+  const quoteAuthorOfMessage = (msg: MessageResponse): string =>
+    msg.senderName ??
+    (msg.direction === "outbound"
+      ? t("inbox.quoteTeamLabel")
+      : contactDisplayName);
+  const quotePreviewOfMessage = (msg: MessageResponse): string =>
+    msg.contentText ?? t("inbox.mediaMessage");
 
   return (
     <section>
@@ -501,18 +559,51 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                   ) : (
                     messages.map((msg) => {
                       const outbound = msg.direction === "outbound";
+                      const highlighted = highlightedId === msg.id;
                       return (
                         <div
                           key={msg.id}
-                          className={`flex ${outbound ? "justify-end" : "justify-start"}`}
+                          id={`inbox-msg-${msg.id}`}
+                          className={`group flex flex-col ${
+                            outbound ? "items-end" : "items-start"
+                          }`}
                         >
                           <div
-                            className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm md:max-w-[70%] ${
+                            className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm transition-shadow md:max-w-[70%] ${
                               outbound
                                 ? "rounded-br-sm bg-accent text-white"
                                 : "rounded-bl-sm bg-surface text-ink shadow-sm"
-                            }`}
+                            } ${highlighted ? "ring-2 ring-accent ring-offset-2 ring-offset-bg" : ""}`}
                           >
+                            {msg.replyTo ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  jumpToQuotedMessage(msg.replyTo!.id)
+                                }
+                                title={t("inbox.quoteJumpTitle")}
+                                className={`mb-1.5 block w-full rounded-lg border-l-2 px-2 py-1 text-left ${
+                                  outbound
+                                    ? "border-white/70 bg-white/15 hover:bg-white/25"
+                                    : "border-accent bg-elevated hover:bg-line/50"
+                                }`}
+                              >
+                                <span
+                                  className={`block truncate text-[11px] font-semibold ${
+                                    outbound ? "text-white" : "text-accent"
+                                  }`}
+                                >
+                                  {quoteAuthorOfReplyTo(msg.replyTo)}
+                                </span>
+                                <span
+                                  className={`block truncate text-xs ${
+                                    outbound ? "text-white/85" : "text-muted"
+                                  }`}
+                                >
+                                  {quotePreviewOfReplyTo(msg.replyTo)}
+                                </span>
+                              </button>
+                            ) : null}
                             {!outbound && msg.senderName ? (
                               <p className="mb-0.5 text-[11px] font-semibold text-accent">
                                 {msg.senderName}
@@ -541,6 +632,13 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                               ) : null}
                             </div>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => setQuoteTarget(msg)}
+                            className="mt-1 px-1 text-[11px] font-medium text-muted opacity-0 transition-opacity hover:text-accent focus-visible:opacity-100 group-hover:opacity-100"
+                          >
+                            ↩ {t("inbox.replyWithQuote")}
+                          </button>
                         </div>
                       );
                     })
@@ -551,11 +649,37 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                   onSubmit={handleSend}
                   className="border-t border-line bg-surface px-4 py-3"
                 >
+                  {quoteTarget ? (
+                    <div className="mb-2 flex items-start gap-2 rounded-lg border-l-2 border-accent bg-elevated px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[11px] font-semibold text-accent">
+                          {quoteAuthorOfMessage(quoteTarget)}
+                        </p>
+                        <p className="truncate text-xs text-muted">
+                          {quotePreviewOfMessage(quoteTarget)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        aria-label={t("inbox.quoteCancel")}
+                        title={t("inbox.quoteCancel")}
+                        onClick={() => setQuoteTarget(null)}
+                        className="shrink-0 rounded px-1 text-sm leading-none text-muted hover:text-ink"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : null}
                   <div className="flex items-end gap-2">
                     <textarea
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       onKeyDown={(e) => {
+                        if (e.key === "Escape" && quoteTarget) {
+                          // Esc membatalkan kutipan yang sedang disusun.
+                          setQuoteTarget(null);
+                          return;
+                        }
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
                           e.currentTarget.form?.requestSubmit();

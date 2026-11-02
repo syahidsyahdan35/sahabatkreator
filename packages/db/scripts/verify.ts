@@ -1277,5 +1277,63 @@ console.log(
   "[21] Fase 7B.1: integration_log — tanpa konteks 0 baris; insert tanpa flag ingest ditolak, dengan flag diterima lintas tenant; konteks A hanya baris A; flag platform hanya baris tenant NULL; prune ber-flag hanya membuang baris >30 hari: OK",
 );
 
+// ---------- 22. Fase 7B.5: messages.reply_to_message_id ----------
+// Kolom kutipan (migrasi 0029): (a) kolom ada di messages;
+// (b) tautan balasan→target tersimpan & terbaca dalam konteks tenant
+//     pemilik lewat policy tenant_isolation yang SUDAH ada (tidak ada
+//     policy baru — kolom otomatis ternaungi policy baris tabelnya);
+// (c) konteks tenant LAIN tidak melihat baris-baris itu sama sekali;
+// (d) FK ON DELETE SET NULL terbukti: menghapus pesan target membuat
+//     reply_to_message_id balasan menjadi NULL dan baris balasan TETAP
+//     ADA (purge 6I tidak gagal & riwayat kehilangan kutipan dengan
+//     anggun).
+const REPLY_TARGET_ID = "60606060-6060-4060-8060-606060606060";
+const REPLY_MSG_ID = "61616161-6161-4161-8161-616161616161";
+{
+  const colCheck = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_name = 'messages' AND column_name = 'reply_to_message_id'`,
+  );
+  assert.equal(colCheck.rows[0].n, "1");
+  await db.query(
+    `INSERT INTO messages (id, tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+     VALUES ($1, $3, $4, 'inbound', 'contact', 'text', 'Pesan target kutipan verify', 'received'),
+            ($2, $3, $4, 'outbound', 'user', 'text', 'Balasan berkutipan verify', 'queued')`,
+    [REPLY_TARGET_ID, REPLY_MSG_ID, TENANT_A, CONV_A],
+  );
+  await db.query(
+    `UPDATE messages SET reply_to_message_id = $1 WHERE id = $2`,
+    [REPLY_TARGET_ID, REPLY_MSG_ID],
+  );
+  const replyViews = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const own = await tx.query<{ id: string; reply: string | null }>(
+      `SELECT id, reply_to_message_id AS reply FROM messages
+        WHERE id = $1`,
+      [REPLY_MSG_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM messages WHERE id = $1`,
+      [REPLY_MSG_ID],
+    );
+    return { own, other };
+  });
+  assert.equal(replyViews.own.rows[0].reply, REPLY_TARGET_ID);
+  assert.equal(replyViews.other.rows[0].n, "0");
+  // Hapus target sebagai superuser → SET NULL, balasan tetap ada.
+  await db.query(`DELETE FROM messages WHERE id = $1`, [REPLY_TARGET_ID]);
+  const afterDelete = await db.query<{ reply: string | null }>(
+    `SELECT reply_to_message_id AS reply FROM messages WHERE id = $1`,
+    [REPLY_MSG_ID],
+  );
+  assert.equal(afterDelete.rows.length, 1);
+  assert.equal(afterDelete.rows[0].reply, null);
+  console.log(
+    "[22] Fase 7B.5: kolom messages.reply_to_message_id ada; tautan kutipan terbaca dalam konteks tenant pemilik lewat policy yang ada; tenant lain melihat 0 baris; hapus target → FK SET NULL (balasan tetap ada, kutipan lepas): OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

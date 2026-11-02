@@ -1,8 +1,21 @@
-import { MessageResponseSchema, type MessageResponse } from "@sahabat-kreator/contracts";
+import {
+  MessageResponseSchema,
+  type MessageReplyTo,
+  type MessageResponse,
+} from "@sahabat-kreator/contracts";
 import type { Message } from "@sahabat-kreator/db";
 
+/**
+ * Baris pesan yang bisa diserialkan: baris DB polos, atau baris yang
+ * sudah ditempeli ringkasan kutipan teresolusi oleh core (Fase 7B.5 —
+ * `MessageWithReplyTo`). Tanpa lampiran, `replyTo` dilaporkan null.
+ */
+export type SerializableMessage = Message & {
+  replyTo?: MessageReplyTo | null;
+};
+
 /** Serialisasi baris `messages` DB ke kontrak API (dipakai inbox & webchat). */
-export function serializeMessage(row: Message): MessageResponse {
+export function serializeMessage(row: SerializableMessage): MessageResponse {
   return MessageResponseSchema.parse({
     id: row.id,
     conversationId: row.conversationId,
@@ -15,6 +28,7 @@ export function serializeMessage(row: Message): MessageResponse {
     providerMessageId: row.providerMessageId,
     status: row.status,
     sentByUserId: row.sentByUserId,
+    replyTo: row.replyTo ?? null,
     createdAt: row.createdAt.toISOString(),
   });
 }

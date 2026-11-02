@@ -159,13 +159,25 @@ export function createInboxRoutes(
     if (!parsed.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid message payload");
     }
-    const queued = await queueOutboundMessage(
+    const result = await queueOutboundMessage(
       bundle.db,
       { tenantId: tenant.id, userId: appUser.id },
       id,
       parsed.data,
     );
-    if (!queued) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    if (result.kind === "conversation_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    if (result.kind === "reply_target_invalid") {
+      // Fase 7B.5: target kutipan harus pesan di percakapan yang sama.
+      return apiError(
+        c,
+        422,
+        "MESSAGE_REPLY_TARGET_INVALID",
+        "Reply target must be a message in this conversation",
+      );
+    }
+    const queued = result.message;
 
     // Fase 6G: nudge setelah commit — apps/realtime mem-flush pesan ini
     // ke pengunjung webchat yang terhubung (→ `sent`) dan dashboard

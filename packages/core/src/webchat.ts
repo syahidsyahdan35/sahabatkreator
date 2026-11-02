@@ -13,6 +13,10 @@ import {
   type Message,
 } from "@sahabat-kreator/db";
 import { withTenantDb } from "./tx";
+import {
+  withReplyToSummaries,
+  type MessageWithReplyTo,
+} from "./conversations";
 
 /**
  * Service domain webchat (Fase 1F) — channel milik sendiri (RANCANGAN §4).
@@ -112,7 +116,8 @@ export interface OpenWebchatSessionResult {
   conversationId: string;
   /** visitorId efektif (yang diberikan widget, atau yang dibuat server). */
   visitorId: string;
-  messages: Message[];
+  /** Riwayat sesi; tiap baris membawa ringkasan kutipannya (Fase 7B.5). */
+  messages: MessageWithReplyTo[];
 }
 
 export async function openWebchatSession(
@@ -122,7 +127,7 @@ export async function openWebchatSession(
 ): Promise<OpenWebchatSessionResult> {
   const visitorId =
     input.visitorId ?? `vis_${randomBytes(18).toString("base64url")}`;
-  return withTenantDb(db, account.tenantId, async (tx) => {
+  const session = await withTenantDb(db, account.tenantId, async (tx) => {
     // Identitas pengunjung pada akun channel ini sudah ada?
     const [identity] = await tx
       .select()
@@ -213,6 +218,12 @@ export async function openWebchatSession(
       messages: recent.reverse(),
     };
   });
+  // Fase 7B.5: lampirkan ringkasan kutipan pada riwayat sesi (transaksi
+  // tenant baca terpisah — resolusi batch core conversations).
+  return {
+    ...session,
+    messages: await withReplyToSummaries(db, account, session.messages),
+  };
 }
 
 /** Hasil upaya mencatat pesan masuk pengunjung (hotfix Disconnect Gate). */

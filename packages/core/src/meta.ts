@@ -14,6 +14,7 @@ import {
 import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
 import { storeProfilePhoto } from "./avatars";
+import { resolveInboundReplyTargetId } from "./conversations";
 
 /**
  * Service domain Meta (Fase 7A, RANCANGAN §4 & §12.1) — channel Messenger
@@ -259,6 +260,13 @@ export interface RecordMetaInboundInput {
   senderExternalId: string;
   /** Id pesan Meta (`message.mid`) untuk dedup; disimpan majemuk. */
   providerMessageId: string;
+  /**
+   * Mid pesan yang dikutip pesan ini (`message.reply_to.mid`, Fase
+   * 7B.5) dalam satuan mentah yang sama seperti providerMessageId —
+   * ditautkan ke baris target bila ditemukan di percakapan yang sama;
+   * selain itu pesan tetap tercatat tanpa tautan.
+   */
+  replyToProviderMessageId?: string | null;
   text: string;
 }
 
@@ -364,6 +372,16 @@ export async function recordMetaInboundMessage(
     if (dupe)
       return { message: dupe, contactId, identityCreated: false, duplicate: true };
 
+    // Fase 7B.5: tautkan kutipan (reply_to.mid) bila targetnya ada di
+    // percakapan ini — id majemuk target disusun dengan pola yang sama.
+    const replyToMessageId = input.replyToProviderMessageId
+      ? await resolveInboundReplyTargetId(
+          tx,
+          conversationId,
+          `meta:${account.externalId}:${input.replyToProviderMessageId}`,
+        )
+      : null;
+
     // ON CONFLICT DO NOTHING: SELECT dedup berjalan dalam konteks RLS
     // tenant ini sedangkan index-nya GLOBAL — kembaran milik tenant lain
     // tak terlihat oleh SELECT tetapi ditolak index; tanpa penjaga ini
@@ -379,6 +397,7 @@ export async function recordMetaInboundMessage(
         type: "text",
         contentText: input.text,
         providerMessageId: compositeId,
+        replyToMessageId,
         status: "received",
       })
       .onConflictDoNothing()
@@ -573,6 +592,12 @@ export interface MetaQueuedDelivery {
   messageId: string;
   conversationId: string;
   contentText: string | null;
+  /**
+   * Id baris pesan yang dikutip pesan ini (Fase 7B.5), atau null —
+   * poller menurunkan wamid/mid targetnya dari baris itu dalam konteks
+   * tenant (pola TelegramQueuedDelivery.replyToMessageId).
+   */
+  replyToMessageId: string | null;
   channelAccountId: string;
   provider: MetaDeliveryProvider;
   /** external_id akun: Page ID (messenger) / ID akun IG (instagram) — segmen path endpoint kirim. */
@@ -604,6 +629,7 @@ export async function listQueuedMetaDeliveries(
         messageId: messages.id,
         conversationId: messages.conversationId,
         contentText: messages.contentText,
+        replyToMessageId: messages.replyToMessageId,
         channelAccountId: channelAccounts.id,
         provider: channelAccounts.provider,
         accountExternalId: channelAccounts.externalId,

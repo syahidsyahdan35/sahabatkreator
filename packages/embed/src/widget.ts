@@ -41,6 +41,12 @@ interface WidgetStrings {
   errorText: string;
   retry: string;
   sendFailed: string;
+  /** Label cadangan penulis kutipan untuk pesan pengunjung sendiri. */
+  quoteYou: string;
+  /** Label cadangan penulis kutipan untuk pesan tim workspace. */
+  quoteTeam: string;
+  /** Cuplikan kutipan untuk pesan non-teks tanpa caption. */
+  quoteMedia: string;
 }
 
 const STRINGS: Record<"en" | "id", WidgetStrings> = {
@@ -54,6 +60,9 @@ const STRINGS: Record<"en" | "id", WidgetStrings> = {
     errorText: "Couldn't connect. Check your connection, or try again.",
     retry: "Retry",
     sendFailed: "Failed to send — tap to retry",
+    quoteYou: "You",
+    quoteTeam: "Team",
+    quoteMedia: "Media message",
   },
   id: {
     openLabel: "Chat dengan kami",
@@ -65,8 +74,20 @@ const STRINGS: Record<"en" | "id", WidgetStrings> = {
     errorText: "Tidak dapat terhubung. Periksa koneksi Anda, atau coba lagi.",
     retry: "Coba lagi",
     sendFailed: "Gagal terkirim — ketuk untuk coba lagi",
+    quoteYou: "Anda",
+    quoteTeam: "Tim",
+    quoteMedia: "Pesan media",
   },
 };
+
+/** Ringkasan pesan yang dikutip (kontrak API Fase 7B.5, `replyTo`). */
+interface ChatReplyTo {
+  id: string;
+  direction: "inbound" | "outbound";
+  type: string;
+  authorLabel: string | null;
+  contentPreview: string | null;
+}
 
 interface ChatMessage {
   id: string;
@@ -74,6 +95,8 @@ interface ChatMessage {
   contentText: string | null;
   status: string;
   createdAt: string;
+  /** Kutipan pesan lain (Fase 7B.5); null/absen = tanpa kutipan. */
+  replyTo?: ChatReplyTo | null;
 }
 
 interface SessionResponse {
@@ -273,7 +296,32 @@ interface SessionResponse {
     const bubble = document.createElement("div");
     bubble.dataset.mine = mine ? "1" : "0";
     bubble.style.cssText = `max-width:80%;padding:8px 12px;border-radius:14px;font-size:14px;line-height:1.4;white-space:pre-wrap;word-break:break-word;align-self:${mine ? "flex-end" : "flex-start"};`;
-    bubble.textContent = msg.contentText ?? "";
+    // Fase 7B.5: blok kutipan di dalam gelembung bila payload membawa
+    // replyTo (balasan dashboard yang mengutip pesan pengunjung, atau
+    // pesan pengunjung yang tercatat mengutip — render sama untuk
+    // riwayat sesi maupun sinkronisasi realtime). Warna netral
+    // semi-transparan agar terbaca di gelembung terang maupun biru,
+    // tema terang maupun gelap. Semua teks via textContent.
+    if (msg.replyTo) {
+      const quote = document.createElement("div");
+      quote.style.cssText =
+        "border-left:3px solid rgba(127,127,127,.55);background:rgba(127,127,127,.16);border-radius:6px;padding:4px 8px;margin-bottom:6px;font-size:12px;line-height:1.35;white-space:normal;";
+      const quoteAuthor = document.createElement("div");
+      quoteAuthor.style.cssText =
+        "font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      quoteAuthor.textContent =
+        msg.replyTo.authorLabel ??
+        (msg.replyTo.direction === "inbound" ? t.quoteYou : t.quoteTeam);
+      const quotePreview = document.createElement("div");
+      quotePreview.style.cssText =
+        "opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      quotePreview.textContent = msg.replyTo.contentPreview ?? t.quoteMedia;
+      quote.append(quoteAuthor, quotePreview);
+      bubble.appendChild(quote);
+    }
+    const textEl = document.createElement("div");
+    textEl.textContent = msg.contentText ?? "";
+    bubble.appendChild(textEl);
     messagesEl.appendChild(bubble);
     applyTheme();
     messagesEl.scrollTop = messagesEl.scrollHeight;

@@ -80,6 +80,11 @@ export interface TelegramMessage {
   chat: TelegramChat;
   date?: number;
   text?: string;
+  /**
+   * Pesan yang dibalas pesan ini (Fase 7B.5): hanya `message_id`-nya
+   * yang kita pakai — isi target diambil dari baris kita sendiri.
+   */
+  reply_to_message?: { message_id: number };
 }
 
 export interface TelegramUpdate {
@@ -230,14 +235,24 @@ export class TelegramBotApiClient {
    * id user pada chat privat, id grup (negatif) pada grup — pemanggil
    * mengambilnya dari `conversations.provider_chat_id`, BUKAN dari
    * identitas pengirim pesan terakhir (Fase 6A.1).
+   *
+   * `replyToMessageId` (Fase 7B.5): message_id NUMERIK pesan yang
+   * dikutip dalam chat yang sama → dikirim sebagai
+   * `reply_parameters: { message_id }` (parameter Bot API saat ini;
+   * menggantikan `reply_to_message_id` lama). Tanpa nilai ini body
+   * tidak berubah sama sekali dari perilaku sebelumnya.
    */
   async sendMessage(input: {
     chatId: string;
     text: string;
+    replyToMessageId?: number;
   }): Promise<{ providerMessageId: string }> {
     const result = await this.call<TelegramMessage>("sendMessage", {
       chat_id: input.chatId,
       text: input.text,
+      ...(input.replyToMessageId !== undefined
+        ? { reply_parameters: { message_id: input.replyToMessageId } }
+        : {}),
     });
     return { providerMessageId: String(result.message_id) };
   }
@@ -261,6 +276,8 @@ export interface TelegramChannelPost {
   chatExternalId: string;
   /** Judul channel saat postingan terbit. */
   chatTitle: string | null;
+  /** message_id postingan yang dikutip postingan ini (Fase 7B.5); null bila tidak mengutip. */
+  replyToProviderMessageId: string | null;
   text: string;
   sentAt: string;
 }
@@ -287,6 +304,10 @@ export function parseTelegramChannelPost(
     providerMessageId: String(post.message_id),
     chatExternalId: String(post.chat.id),
     chatTitle: post.chat.title ?? null,
+    replyToProviderMessageId:
+      typeof post.reply_to_message?.message_id === "number"
+        ? String(post.reply_to_message.message_id)
+        : null,
     text: post.text,
     sentAt:
       typeof post.date === "number"
@@ -339,6 +360,10 @@ export function parseTelegramUpdate(payload: unknown): StandardEvent[] {
         direction: "inbound",
         type: "text",
         text: message.text,
+        replyToProviderMessageId:
+          typeof message.reply_to_message?.message_id === "number"
+            ? String(message.reply_to_message.message_id)
+            : undefined,
         sentAt,
       },
       raw: payload,

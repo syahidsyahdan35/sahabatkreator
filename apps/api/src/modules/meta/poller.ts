@@ -1,5 +1,7 @@
 import {
   decryptChannelSecret,
+  extractRawProviderMessageId,
+  getMessageProviderMessageId,
   listQueuedMetaDeliveries,
   markOutboundMessageFailed,
   markOutboundMessageSent,
@@ -164,6 +166,25 @@ export function startMetaDeliveryPoller(
           continue;
         }
         try {
+          // Fase 7B.5: kutipan keluar. Id mentah target (wamid/mid)
+          // diturunkan dari baris targetnya dalam konteks tenant ini —
+          // tidak pernah disimpan duplikat di antrean lintas tenant.
+          // - WhatsApp: diteruskan sebagai context.message_id (native).
+          // - Messenger/IG: Send API TIDAK mendokumentasikan parameter
+          //   kutipan keluar (lihat catatan keterbatasan di
+          //   MetaGraphClient.sendMessage) → id ini SENGAJA tidak
+          //   dipakai di cabang itu; pesan tetap terkirim polos dan
+          //   blok kutipannya hidup di inbox kita.
+          let quotedRawId: string | null = null;
+          if (delivery.replyToMessageId) {
+            quotedRawId = extractRawProviderMessageId(
+              await getMessageProviderMessageId(
+                bundle.db,
+                ctx,
+                delivery.replyToMessageId,
+              ),
+            );
+          }
           // Cabang per provider: WhatsApp memakai Cloud API (klien
           // channel-whatsapp, respons wamid); Messenger/IG memakai
           // Send API (klien channel-messenger, respons mid).
@@ -179,6 +200,7 @@ export function startMetaDeliveryPoller(
                 phoneNumberId: delivery.accountExternalId,
                 to: delivery.recipientExternalId,
                 text: delivery.contentText,
+                ...(quotedRawId ? { contextMessageId: quotedRawId } : {}),
               })
             ).providerMessageId;
           } else {

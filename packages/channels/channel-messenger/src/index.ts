@@ -490,6 +490,18 @@ export class MetaGraphClient {
    * menolak dan pemanggil menandai pesan failed dengan kode Graph,
    * TANPA retry tanpa henti). `accountId` = Page ID (messenger) atau
    * ID akun IG (instagram) — endpoint yang sama, token Page yang sama.
+   *
+   * KUTIPAN KELUAR (Fase 7B.5) — KETERBATASAN TERDOKUMENTASI: referensi
+   * resmi Send API untuk objek `message` hanya mendokumentasikan
+   * `text`, `attachment`, `quick_replies`, dan `metadata` — TIDAK ada
+   * parameter balasan-terkutip untuk pengiriman Page/IG; `reply_to`
+   * hanya ada di payload WEBHOOK (arah masuk, diparse di bawah).
+   * Karena itu metode ini SENGAJA tidak menerima parameter kutipan:
+   * tautan kutipan tetap tersimpan di baris pesan kita dan tampil
+   * sebagai blok kutipan di inbox, tetapi balasan terkirim ke pengguna
+   * Messenger/IG sebagai pesan biasa tanpa kutipan native. Jangan
+   * menambahkan field tak terdokumentasi ke body ini — risikonya
+   * penolakan Graph pada pesan yang seharusnya terkirim polos.
    */
   async sendMessage(input: {
     accountExternalId: string;
@@ -546,6 +558,14 @@ export interface MetaMessagingEvent {
   senderExternalId: string;
   /** message.mid — id dedup provider. */
   providerMessageId: string;
+  /**
+   * Mid pesan yang dikutip pesan ini (`message.reply_to.mid`, Fase
+   * 7B.5); null bila pesan bukan balasan terkutip. Webhook Meta memang
+   * menyertakan field ini saat pengguna membalas pesan tertentu —
+   * arah MASUK didukung penuh, berbeda dari arah keluar (lihat catatan
+   * keterbatasan pada MetaGraphClient.sendMessage).
+   */
+  replyToProviderMessageId: string | null;
   /** Teks pesan; null untuk event non-teks (lampiran/stiker/like). */
   text: string | null;
   /** Pantulan pesan yang KITA kirim (message.is_echo) — pemanggil melewatinya. */
@@ -563,6 +583,7 @@ interface MetaWebhookPayload {
         mid?: string;
         text?: string;
         is_echo?: boolean;
+        reply_to?: { mid?: string };
       };
       timestamp?: number;
     }>;
@@ -595,6 +616,10 @@ export function parseMetaWebhookEvents(payload: unknown): MetaMessagingEvent[] {
         entryExternalId: entry.id,
         senderExternalId: senderId,
         providerMessageId: message.mid,
+        replyToProviderMessageId:
+          typeof message.reply_to?.mid === "string" && message.reply_to.mid
+            ? message.reply_to.mid
+            : null,
         text: typeof message.text === "string" ? message.text : null,
         isEcho: message.is_echo === true,
         timestamp:
@@ -657,6 +682,7 @@ export class MessengerChannelAdapter implements ChannelAdapter {
           direction: "inbound" as const,
           type: "text" as const,
           text: e.text as string,
+          replyToProviderMessageId: e.replyToProviderMessageId ?? undefined,
           sentAt: e.timestamp
             ? new Date(e.timestamp).toISOString()
             : new Date().toISOString(),
