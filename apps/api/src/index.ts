@@ -245,7 +245,17 @@ routes.route("/", createAvatarsRoutes(authBundle));
 routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
 routes.route("/", createAgentsRoutes(authBundle, realtimePublisher));
-routes.route("/", createKnowledgeRoutes(authBundle));
+// Fase 12D: knowledge menerima deps resolver Panel Admin + env
+// embedding agar /kb/stats melaporkan status indeks semantik yang
+// benar-benar di-resolve proses ini (selaras worker).
+routes.route(
+  "/",
+  createKnowledgeRoutes(authBundle, {
+    platform: platformOptions,
+    embeddingProviderEnv: env.EMBEDDING_PROVIDER,
+    embeddingModelEnv: env.OPENROUTER_EMBEDDING_MODEL,
+  }),
+);
 // Modul products (Fase 4A) — katalog produk & tautan bayar /tenants/:tenantId/products|payment-links.
 routes.route(
   "/",

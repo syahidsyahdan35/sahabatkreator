@@ -538,6 +538,11 @@ export const id: Resources = {
     filesEmpty: "Belum ada berkas yang diunggah.",
     fileDeleteTitle: "Hapus berkas ini?",
     fileDeleteBody: "“{name}” beserta dokumen yang dibuat darinya (termasuk potongannya) akan dihapus permanen. Tindakan ini tidak dapat dibatalkan.",
+    semanticTitle: "Pencarian semantik",
+    semanticActive: "Aktif ({provider} · {model}) — agent juga menemukan pengetahuan berdasarkan makna, jadi pertanyaan dengan kata berbeda tetap bisa cocok. {coverage}",
+    semanticInactive: "Nonaktif — belum ada kunci provider AI yang terkonfigurasi, jadi agent hanya mencari berdasarkan kata kunci persis. {coverage}",
+    semanticCoverage: "{embedded} dari {total} potongan sudah ter-embed.",
+    semanticCoverageNone: "Belum ada potongan.",
   },
   products: {
     title: "Produk",

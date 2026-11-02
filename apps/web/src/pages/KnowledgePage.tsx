@@ -8,6 +8,7 @@ import {
 import type {
   KbDocumentResponse,
   KbFileDocumentResponse,
+  KbStatsResponse,
 } from "@sahabat-kreator/contracts";
 import {
   formatNumber,
@@ -48,6 +49,7 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
 
   const [documents, setDocuments] = useState<KbDocumentResponse[]>([]);
   const [files, setFiles] = useState<KbFileDocumentResponse[]>([]);
+  const [stats, setStats] = useState<KbStatsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -68,13 +70,17 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
     setLoading(true);
     setError(null);
     try {
-      const [list, fileList] = await Promise.all([
+      const [list, fileList, kbStats] = await Promise.all([
         api.kb.listDocuments(tenantId),
         api.kb.listFiles(tenantId),
+        // Statistik semantik bersifat informatif — kegagalannya tidak
+        // boleh menggagalkan daftar dokumen; tampilkan tanpa kartu.
+        api.kb.getStats(tenantId).catch(() => null),
       ]);
       if (requestSeq.current !== seq) return;
       setDocuments(list);
       setFiles(fileList);
+      setStats(kbStats);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
@@ -166,6 +172,37 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
           {t("knowledge.chunkNote")}
         </p>
       </div>
+
+      {stats ? (
+        <div className="mt-4 rounded-xl border border-line bg-surface p-4">
+          <h2 className="text-sm font-semibold text-ink">
+            {t("knowledge.semanticTitle")}
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            {stats.semanticSearch.active
+              ? t("knowledge.semanticActive", {
+                  provider: stats.semanticSearch.provider ?? "",
+                  model: stats.semanticSearch.model ?? "",
+                  coverage:
+                    stats.totalChunks > 0
+                      ? t("knowledge.semanticCoverage", {
+                          embedded: formatNumber(stats.embeddedChunks, locale),
+                          total: formatNumber(stats.totalChunks, locale),
+                        })
+                      : t("knowledge.semanticCoverageNone"),
+                })
+              : t("knowledge.semanticInactive", {
+                  coverage:
+                    stats.totalChunks > 0
+                      ? t("knowledge.semanticCoverage", {
+                          embedded: formatNumber(stats.embeddedChunks, locale),
+                          total: formatNumber(stats.totalChunks, locale),
+                        })
+                      : t("knowledge.semanticCoverageNone"),
+                })}
+          </p>
+        </div>
+      ) : null}
 
       <div className="mt-6 rounded-xl border border-line bg-surface p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

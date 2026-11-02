@@ -1424,6 +1424,24 @@ export type KbFileDocumentListResponse = z.infer<
   typeof KbFileDocumentListResponseSchema
 >;
 
+/**
+ * Statistik indeks KB (Fase 12D): cakupan embedding chunk + status
+ * pencarian semantik SEBAGAIMANA di-resolve proses API (provider yang
+ * sama dengan yang dipakai worker: mock paksa via env, atau OpenRouter
+ * dari kunci Panel Admin → env; tanpa kunci → active=false dan agent
+ * mencari full-text saja). `provider`/`model` null bila nonaktif.
+ */
+export const KbStatsResponseSchema = z.object({
+  totalChunks: z.number().int().nonnegative(),
+  embeddedChunks: z.number().int().nonnegative(),
+  semanticSearch: z.object({
+    active: z.boolean(),
+    provider: z.string().nullable(),
+    model: z.string().nullable(),
+  }),
+});
+export type KbStatsResponse = z.infer<typeof KbStatsResponseSchema>;
+
 // ---------------------------------------------------------------------------
 // Agent suggestions (Fase 3A) — draf balasan dari agent mode 'suggest'.
 // Approve = kirim teks saran sebagai pesan outbound agent (status saran

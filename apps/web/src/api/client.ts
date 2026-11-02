@@ -71,6 +71,7 @@ import type {
   KbDocumentResponse,
   KbFileDocumentListResponse,
   KbFileDocumentResponse,
+  KbStatsResponse,
   MessageListResponse,
   MessageResponse,
   MetaOAuthCompleteResponse,
@@ -837,6 +838,12 @@ export const api = {
     async deleteFile(tenantId: string, fileId: string): Promise<void> {
       await request<unknown>(`/api/tenants/${tenantId}/kb/files/${fileId}`, {
         method: "DELETE",
+      });
+    },
+    /** GET /api/tenants/:tenantId/kb/stats → cakupan embedding + status semantik (Fase 12D). */
+    getStats(tenantId: string): Promise<KbStatsResponse> {
+      return request<KbStatsResponse>(`/api/tenants/${tenantId}/kb/stats`, {
+        method: "GET",
       });
     },
   },

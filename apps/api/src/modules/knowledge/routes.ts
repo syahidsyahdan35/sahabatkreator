@@ -6,6 +6,7 @@ import {
   KbDocumentResponseSchema,
   KbFileDocumentListResponseSchema,
   KbFileDocumentResponseSchema,
+  KbStatsResponseSchema,
   type KbDocumentResponse,
   type KbFileDocumentResponse,
 } from "@sahabat-kreator/contracts";
@@ -15,13 +16,16 @@ import {
   deleteKbFile,
   extractKbFileText,
   getKbDocument,
+  getKbEmbeddingStats,
   importKbFile,
   KB_FILE_MAX_BYTES,
   listKbDocuments,
   listKbFiles,
   resolveKbFileKind,
+  resolveEmbeddingProvider,
   type KbDocumentWithChunkCount,
   type KbFileWithEntry,
+  type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppContext, type AppVariables } from "../../http";
@@ -60,9 +64,11 @@ function serializeFile(row: KbFileWithEntry): KbFileDocumentResponse {
  *   POST   /tenants/:tenantId/kb/files            unggah berkas (multipart, Fase 12C) → 201
  *   GET    /tenants/:tenantId/kb/files            daftar berkas lampiran
  *   DELETE /tenants/:tenantId/kb/files/:id        hapus berkas + entri turunannya → 204
+ *   GET    /tenants/:tenantId/kb/stats            statistik chunk + status indeks semantik (Fase 12D)
  * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND).
  * Retrieval-nya sendiri berjalan di worker saat agent menjawab
- * (full-text Postgres — lihat @sahabat-kreator/core kb.ts).
+ * (full-text Postgres; hibrida full-text + vektor sejak Fase 12D bila
+ * provider embedding aktif — lihat @sahabat-kreator/core kb.ts).
  *
  * Lampiran berkas (12C): hanya PDF/TXT/MD ≤5MB; teks hasil ekstraksi
  * menjadi entri dokumen biasa (judul = nama berkas) sehingga halaman
@@ -70,7 +76,18 @@ function serializeFile(row: KbFileWithEntry): KbFileDocumentResponse {
  * teks yang bisa diekstrak (PDF pindaian, berkas rusak) ditolak 422
  * KB_DOCUMENT_NO_TEXT dan TIDAK disimpan sama sekali.
  */
-export function createKnowledgeRoutes(bundle: AuthBundle | null) {
+
+/** Dependensi status semantik (Fase 12D): resolver Panel Admin proses API + env embedding. */
+export interface KnowledgeRoutesDeps {
+  platform?: PlatformSettingsOptions;
+  embeddingProviderEnv?: string;
+  embeddingModelEnv?: string;
+}
+
+export function createKnowledgeRoutes(
+  bundle: AuthBundle | null,
+  deps: KnowledgeRoutesDeps = {},
+) {
   const app = new Hono<{ Variables: AppVariables }>();
   const base = "/tenants/:tenantId/kb/documents";
 
@@ -84,6 +101,7 @@ export function createKnowledgeRoutes(bundle: AuthBundle | null) {
     app.post("/tenants/:tenantId/kb/files", notConfigured);
     app.get("/tenants/:tenantId/kb/files", notConfigured);
     app.delete("/tenants/:tenantId/kb/files/:id", notConfigured);
+    app.get("/tenants/:tenantId/kb/stats", notConfigured);
     return app;
   }
 
@@ -266,6 +284,41 @@ export function createKnowledgeRoutes(bundle: AuthBundle | null) {
       return apiError(c, 404, "NOT_FOUND", "Knowledge file not found");
     }
     return c.body(null, 204);
+  });
+
+  // ——— Statistik indeks semantik (Fase 12D) ———
+  // Status provider di-resolve dengan resolver yang sama seperti
+  // worker (cache panel ±60 dtk di core membuatnya murah per request):
+  // halaman Knowledge menampilkan keadaan yang benar-benar akan
+  // dipakai jalur agent, bukan tebakan dari konfigurasi statis.
+  app.get("/tenants/:tenantId/kb/stats", async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const stats = await getKbEmbeddingStats(bundle.db, {
+      tenantId: tenant.id,
+    });
+    let semanticSearch = {
+      active: false,
+      provider: null as string | null,
+      model: null as string | null,
+    };
+    if (deps.platform) {
+      const provider = await resolveEmbeddingProvider(bundle.db, {
+        platform: deps.platform,
+        providerEnv: deps.embeddingProviderEnv,
+        modelEnv: deps.embeddingModelEnv,
+      }).catch(() => null);
+      if (provider) {
+        semanticSearch = {
+          active: true,
+          provider: provider.name,
+          model: provider.model,
+        };
+      }
+    }
+    return c.json(
+      KbStatsResponseSchema.parse({ ...stats, semanticSearch }),
+    );
   });
 
   return app;

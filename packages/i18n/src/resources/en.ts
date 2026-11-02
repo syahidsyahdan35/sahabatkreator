@@ -539,6 +539,11 @@ export const en = {
     filesEmpty: "No files uploaded yet.",
     fileDeleteTitle: "Delete this file?",
     fileDeleteBody: "“{name}” and the document created from it (including its chunks) will be removed permanently. This cannot be undone.",
+    semanticTitle: "Semantic search",
+    semanticActive: "Active ({provider} · {model}) — agents also find knowledge by meaning, so differently-worded questions can still match. {coverage}",
+    semanticInactive: "Inactive — no AI provider key is configured, so agents search by exact keywords only. {coverage}",
+    semanticCoverage: "{embedded} of {total} chunks embedded.",
+    semanticCoverageNone: "No chunks yet.",
   },
   products: {
     title: "Products",
