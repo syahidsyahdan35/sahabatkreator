@@ -4534,3 +4534,121 @@ en+id penuh.
   tidak ada undo/redo, tidak ada ekspor/impor graf — kandidat
   lanjutan; (3) satu flow tetap satu trigger & bentuk graf v1 8A —
   builder tidak menambah kemampuan engine apa pun.
+
+## Fase 9A — Paket Quick-Win I: Saved Replies, Spintax, Smart Delay, Batching AI + Rider Toggle Password (2026-11-02)
+
+Empat fitur kecil dari riset repo referensi (user: "kerjakan
+rekomendasimu saja") + satu rider permintaan user di tengah fase.
+Commit: `008b81b` (spintax + smart delay), `c808bb6` (saved replies
++ rider), `ffd5c28` (batching), `4a82cbd` (fix batching — lihat
+di bawah).
+
+- **Saved Replies (macro `/`)**: migrasi 0033 `saved_replies`
+  (tenant, title, body, `created_by_user_id` FK SET NULL) + RLS
+  `tenant_isolation` (staging kini 40 tabel / 52 policy; PGlite
+  verify seksi [26]). API `/tenants/:tenantId/saved-replies`: baca +
+  buat untuk SEMUA member; edit/hapus hanya pembuat ATAU owner/admin
+  (ditegakkan di core `saved-replies.ts` → 403; non-member 404).
+  Audit `saved_reply.created/updated/deleted` + label dwibahasa di
+  viewer audit. UI di dalam Inbox: draft diawali `/` membuka pemilih
+  (filter judul/isi, ArrowUp/Down, Enter memilih — bukan mengirim,
+  Esc menutup, entri "Kelola…" di bawah); memilih MENGGANTI seluruh
+  draft dengan body dan `{name}` diganti KLIEN saat itu juga dari
+  nama kontak percakapan (WYSIWYG); panel kelola menempel di form
+  composer (daftar + form buat/edit + hapus dua langkah).
+- **Spintax — satu helper render bersama**: `renderMessageText`
+  (`packages/core/src/render-text.ts`) adalah satu-satunya jalur
+  render teks keluar otomatis: substitusi `{name}` DULU (supaya
+  pilihan spintax yang memuat `{name}` tetap satu grup), lalu grup
+  `{a|b|...}` dipilih acak per render (regex `\{[^{}]+}` — TANPA
+  nesting; grup satu pilihan & kurung tak berpasangan dibiarkan apa
+  adanya; render TIDAK PERNAH gagal gara-gara spintax). Terpasang di
+  4 titik: balasan keyword automation, langkah sequence, node flow
+  `send_message`, dispatch broadcast (per penerima = render terpisah
+  → variasi menyebar antar-penerima). Balasan manual dari dashboard
+  TIDAK diproses (teks harfiah user).
+- **Smart Delay (node delay flow)**: kontrak delay bertambah
+  opsional `random: {min, max}` (bilangan bulat, satuan node yang
+  sama; `random` mengalahkan `amount`; `amount` tetap fallback &
+  wajib ada di skema). Validasi aktivasi: integer, 1 ≤ min ≤ max ≤
+  100_000, pelanggaran = issue `DELAY_RANDOM_INVALID` (422
+  FLOW_GRAPH_INVALID). Eksekutor memilih integer inklusif acak dan
+  mencatat `{random:{min,max,unit}, chosenAmount, delayMs, resumeAt}`
+  di detail langkah — bisa diaudit dari tab Run builder. Random
+  rusak di graf aktif lama → jatuh ke `amount`, run tidak gagal.
+  Builder: mode radio Tetap/Acak pada panel delay + ringkasan
+  rentang di node.
+- **Batching balasan AI**: env `AGENT_BATCH_WINDOW_MS`
+  (0..120_000, default 5000) — job `agent.respond` kini dijadwalkan
+  worker dengan delay sebesar jendela itu; saat job berjalan, bila
+  ada pesan inbound kontak yang LEBIH BARU di percakapan yang sama,
+  job menyerah: audit `agent.batched` {conversationId,
+  triggerMessageId, supersededByMessageId}, return reason
+  `"batched"`, TANPA memanggil LLM dan TANPA mengonsumsi cap
+  harian. Hanya job pesan terbaru yang menjawab (riwayat dibaca
+  saat eksekusi → jawaban mencakup seluruh rentetan). Mode suggest
+  berbagi semantik; node flow `ai_response` TIDAK ikut (flag hanya
+  dinyalakan jalur job agent.respond); automation/flow TIDAK
+  tertunda sama sekali. **Trade-off terdokumentasi: balasan agent
+  kini sengaja ±satu jendela lebih lambat.**
+- **BUG yang tertangkap rantai staging (fix `4a82cbd`)**: versi
+  pertama cek "pesan lebih baru" memakai `gt(createdAt,
+  message.createdAt)` polos — Postgres `timestamptz` berpresisi
+  mikrodetik, Date JS hanya milidetik (terpotong saat dibaca),
+  sehingga baris pemicu cocok dengan dirinya sendiri dan SEMUA job
+  menyerah (audit menunjukkan supersededBy == trigger). Fix:
+  kecualikan eksplisit `ne(messages.id, messageId)`. Pelajaran:
+  jangan pernah membandingkan timestamp DB dengan salinan JS-nya
+  tanpa mengecualikan baris itu sendiri.
+- **RIDER — toggle lihat password** (permintaan user 17:51):
+  komponen bersama `PasswordInput` (ikon mata stroke konsisten
+  dengan ikon aplikasi; tombol `type="button"` — tidak pernah
+  men-submit form; state per field; default tersembunyi; aria-label
+  + title dari `common.showPassword`/`common.hidePassword` en+id).
+  Terpasang di SEMUA field password web: Login, Register, field
+  rahasia Panel Admin, dan 4 field token di modal connect Channels
+  (Telegram/Messenger/Instagram/WhatsApp). Semantik keamanan tidak
+  berubah: nilai tersimpan tidak pernah dikembalikan server —
+  toggle hanya memperlihatkan teks yang SEDANG diketik. Halaman
+  Settings tidak punya form ganti password (tidak ada yang diubah
+  di sana).
+- **Pelajaran deploy (penting)**: API & worker staging berjalan
+  dari `apps/*/dist/index.js` (bundle tsup), BUKAN dari src — build
+  SEMUA dist (api+worker+web) di salinan /tmp sebelum rsync; rsync
+  src saja membuat staging menjalankan kode lama secara diam-diam
+  (rantai pertama 9A gagal persis karena ini: saved-replies 404,
+  spintax literal, validasi delay absen). Verifikasi cepat sesudah
+  deploy: `grep -c <string-baru> apps/worker/dist/index.js` di
+  server.
+- Verifikasi (tanpa Playwright, sesuai keputusan user — UI diuji
+  user sendiri): typecheck semua paket hijau di salinan /tmp; PGlite
+  verify SEMUA LULUS (26 seksi); build web/api/worker hijau; bundle
+  publik `index-BdGlP0yE.js` memuat string rider dwibahasa ("Show
+  password"/"Tampilkan kata sandi") + "Saved replies"/"Smart
+  Delay". **Rantai dari server 51/51 PASS dalam satu run bersih**
+  (mock Telegram 8410, satu tenant uji): saved replies CRUD +
+  gerbang kepemilikan (member edit/hapus milik owner 403; owner
+  menimpa milik member 200; non-member 404) + audit
+  created:2/updated:2/deleted:1; spintax 8 kontak → semua balasan
+  anggota himpunan sah dengan `{name}` benar & ≥2 varian, teks polos
+  persis, kurung rusak terkirim apa adanya; smart delay 2–4 dtk →
+  run waiting→completed, `chosenAmount ∈ [2,4]` tercatat, aktivasi
+  min>max 422 DELAY_RANDOM_INVALID; regresi sequence 2 langkah +
+  broadcast spintax per penerima selesai; batching: 3 pesan beruntun
+  → TEPAT 1 `agent.responded` + 2 `agent.batched` + 1 baris usage
+  ai_token, pesan tunggal tetap dijawab sesudah jendela, keyword
+  automation membalas seketika dan TIDAK dijawab agent. Channel
+  asli user (@botaramyid_bot) tetap connected; `.env.staging`
+  pulih byte-identik (sha256 `9c1ded2a…` sebelum = sesudah), port
+  mock tertutup.
+- Batas jujur: (1) isi balasan agent memakai LLM OpenRouter ASLI
+  (kunci panel milik user): pada kedua run burst, satu-satunya
+  respons agent memilih tool `handoff_to_human` (KB kosong) sehingga
+  tidak ada teks keluar — itu keputusan konten LLM (perilaku 3A
+  terdokumentasi), bukan kegagalan batching; jaminan batching
+  dibuktikan dari audit/usage yang deterministik; (2) bukti visual
+  pemilih `/`, panel kelola, mode Acak builder, dan toggle mata
+  menunggu uji user — yang terbukti di sini kontrak API + bundle;
+  (3) jendela batch adalah konstanta env per-deployment, bukan
+  per-tenant; (4) spintax tanpa nesting dan tanpa bobot pilihan —
+  kandidat lanjutan bila dibutuhkan.
