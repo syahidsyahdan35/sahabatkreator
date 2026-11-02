@@ -625,7 +625,10 @@ function RevokeApiKeyModal({
  * menegakkan; UI menyembunyikan kontrol untuk peran lain). Tautan
  * undangan ditampilkan SEKALI sesudah dibuat — server hanya menyimpan
  * hash tokennya, jadi panel "tautan siap" adalah satu-satunya tempat
- * tautan itu pernah terlihat; hilang → cabut & undang ulang.
+ * tautan itu pernah terlihat di UI; hilang → cabut & undang ulang.
+ * Fase 11B: undangan juga dikirim lewat email (Resend) bila platform
+ * mengaturnya — panel menyatakan status antre emailnya dari respons
+ * pembuatan, dan daftar menampilkan status kirim per undangan.
  */
 function roleLabelKey(role: MemberRole): TranslationKey {
   switch (role) {
@@ -664,6 +667,8 @@ function TeamSection({
   const [createdLink, setCreatedLink] = useState<{
     url: string;
     email: string;
+    /** Fase 11B: status antre email undangan dari respons pembuatan. */
+    emailDelivery: "queued" | "not_configured" | null;
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<TeamMemberResponse | null>(
@@ -718,6 +723,7 @@ function TeamSection({
       setCreatedLink({
         url: created.inviteUrl ?? "",
         email: created.email,
+        emailDelivery: created.emailDelivery,
       });
       setCopied(false);
       setInviteEmail("");
@@ -881,7 +887,12 @@ function TeamSection({
                 {t("settings.team.linkReadyTitle")}
               </div>
               <p className="mt-1 text-sm text-muted">
-                {t("settings.team.linkReadyBody", { email: createdLink.email })}
+                {t(
+                  createdLink.emailDelivery === "queued"
+                    ? "settings.team.linkReadyBodyEmailed"
+                    : "settings.team.linkReadyBody",
+                  { email: createdLink.email },
+                )}
               </p>
               <div className="mt-3 break-all rounded-lg bg-surface p-3 font-mono text-xs text-ink">
                 {createdLink.url}
@@ -932,6 +943,13 @@ function TeamSection({
                             date: formatDateTime(invitation.expiresAt, locale),
                           })}`
                         : ""}
+                      {invitation.emailSentAt
+                        ? ` · ${t("settings.team.emailSentLabel", {
+                            date: formatDateTime(invitation.emailSentAt, locale),
+                          })}`
+                        : invitation.emailError
+                          ? ` · ${t("settings.team.emailFailedLabel")}`
+                          : ""}
                     </div>
                   </div>
                   <span className="rounded-full bg-elevated px-2.5 py-1 text-xs font-medium text-ink">

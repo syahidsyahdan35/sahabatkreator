@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   IntegrationLogResponse,
+  PlatformEmailInfo,
   PlatformMetaInfo,
   PlatformSettingKey,
   PlatformSettingStatus,
@@ -29,6 +30,7 @@ const TESTABLE: ReadonlySet<PlatformSettingKey> = new Set([
   "openrouter_api_key",
   "r2_access_key_id",
   "r2_secret_access_key",
+  "resend_api_key",
 ]);
 
 /**
@@ -80,6 +82,9 @@ const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
   meta_app_id: "admin.metaAppIdLabel",
   meta_ig_config_id: "admin.metaIgConfigIdLabel",
   meta_wa_config_id: "admin.metaWaConfigIdLabel",
+  resend_api_key: "admin.resendApiKeyLabel",
+  resend_from_email: "admin.resendFromEmailLabel",
+  resend_from_name: "admin.resendFromNameLabel",
 };
 
 /**
@@ -97,6 +102,7 @@ export function AdminPage({ t, locale }: AdminPageProps) {
   const [statuses, setStatuses] = useState<PlatformSettingStatus[]>([]);
   const [r2Info, setR2Info] = useState<PlatformR2Info | null>(null);
   const [metaInfo, setMetaInfo] = useState<PlatformMetaInfo | null>(null);
+  const [emailInfo, setEmailInfo] = useState<PlatformEmailInfo | null>(null);
   const [redirectCopied, setRedirectCopied] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +118,7 @@ export function AdminPage({ t, locale }: AdminPageProps) {
       setStatuses(body.settings);
       setR2Info(body.r2);
       setMetaInfo(body.meta);
+      setEmailInfo(body.email);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
@@ -342,6 +349,73 @@ export function AdminPage({ t, locale }: AdminPageProps) {
             locale={locale}
             settingKey="meta_wa_config_id"
             status={byKey("meta_wa_config_id")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
+          />
+        </div>
+      </section>
+
+      {/*
+        Fase 11B — email transaksional Resend. Kunci API rahasia (baris
+        password + tombol Uji via GET /domains); identitas pengirim
+        BUKAN rahasia — nilai efektifnya ditampilkan seperti identifier
+        Meta, dan barisnya teks biasa, dimuat ulang sesudah diubah agar
+        tampilan efektifnya segar.
+      */}
+      <section className="mt-8">
+        <h2 className="text-base font-semibold text-ink">
+          {t("admin.resendTitle")}
+        </h2>
+        <p className="mt-1 max-w-2xl text-sm text-muted">
+          {t("admin.resendBody")}
+        </p>
+        {emailInfo ? (
+          <dl className="mt-3 grid max-w-2xl grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.resendFromEmailLabel")}
+              </dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {emailInfo.fromEmail ?? "—"}
+              </dd>
+            </div>
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.resendFromNameLabel")}
+              </dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {emailInfo.fromName ?? "—"}
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+        <div className="mt-4 space-y-3">
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="resend_api_key"
+            status={byKey("resend_api_key")}
+            onStatusChanged={onStatusChanged}
+          />
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="resend_from_email"
+            status={byKey("resend_from_email")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
+          />
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="resend_from_name"
+            status={byKey("resend_from_name")}
             secret={false}
             onStatusChanged={(next) => {
               onStatusChanged(next);
@@ -704,6 +778,9 @@ function SettingRow({
                 : ""}
               {typeof testResult.info.limitRemaining === "number"
                 ? ` · ${t("admin.testInfoLimitRemaining")}: ${testResult.info.limitRemaining}`
+                : ""}
+              {typeof testResult.info.domains === "number"
+                ? ` · ${t("admin.resendTestInfoDomains")}: ${testResult.info.domains}`
                 : ""}
             </span>
           ) : null}
