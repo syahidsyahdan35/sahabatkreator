@@ -131,6 +131,21 @@ const EnvSchema = z.object({
   R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   /** Override nama bucket R2; default diturunkan dari NODE_ENV (lihat R2_BUCKET_NAMES). */
   R2_BUCKET: z.string().min(1).optional(),
+  /**
+   * Email transaksional via Resend (keputusan user 2026-11-02; Fase 11B)
+   * — FALLBACK env saja; sumber utama adalah Panel Admin (kunci
+   * `resend_api_key` / `resend_from_email` / `resend_from_name` di
+   * platform_settings, resolusi panel → env seperti kunci lain).
+   */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  RESEND_FROM_EMAIL: z.string().min(1).optional(),
+  RESEND_FROM_NAME: z.string().min(1).optional(),
+  /**
+   * Base URL API Resend (Fase 11B). Default https://api.resend.com di
+   * kode klien core; override hanya untuk mock rantai uji — pola yang
+   * sama dengan TELEGRAM_API_BASE / META_API_BASE.
+   */
+  RESEND_API_BASE: z.string().url().optional(),
 });
 
 /**

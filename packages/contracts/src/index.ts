@@ -459,6 +459,22 @@ export const InvitationResponseSchema = z.object({
    * Null di semua permukaan lain.
    */
   inviteUrl: z.string().nullable(),
+  /**
+   * Status pengiriman email undangan (Fase 11B) — HANYA bermakna pada
+   * respons PEMBUATAN: "queued" = email diantrekan ke job pengiriman
+   * (Resend terkonfigurasi), "not_configured" = email platform belum
+   * diatur sehingga undangan hanya bisa dibagikan lewat tautan salin.
+   * Null pada daftar (keadaan kirim di sana dibaca dari emailSentAt /
+   * emailError di bawah).
+   */
+  emailDelivery: z.enum(["queued", "not_configured"]).nullable(),
+  /** Waktu email undangan benar-benar terkirim (Fase 11B); null bila belum. */
+  emailSentAt: z.string().datetime().nullable(),
+  /**
+   * Ringkasan kegagalan kirim terakhir (kode provider + pesan singkat,
+   * TANPA token/isi email); null bila belum pernah gagal / sudah terkirim.
+   */
+  emailError: z.string().nullable(),
   expiresAt: z.string().datetime(),
   createdAt: z.string().datetime(),
 });
@@ -1919,6 +1935,14 @@ export const PlatformSettingKeySchema = z.enum([
   "meta_app_id",
   "meta_ig_config_id",
   "meta_wa_config_id",
+  // Fase 11B: email transaksional via Resend (keputusan user 2026-11-02).
+  // `resend_api_key` adalah RAHASIA (pola kunci lain: status saja yang
+  // dipertukarkan). `resend_from_email` / `resend_from_name` adalah
+  // identitas pengirim — BUKAN rahasia; nilai efektifnya ditampilkan di
+  // panel lewat PlatformEmailInfo agar bisa diverifikasi pemilik.
+  "resend_api_key",
+  "resend_from_email",
+  "resend_from_name",
 ]);
 export type PlatformSettingKey = z.infer<typeof PlatformSettingKeySchema>;
 
@@ -1961,10 +1985,23 @@ export const PlatformMetaInfoSchema = z.object({
 });
 export type PlatformMetaInfo = z.infer<typeof PlatformMetaInfoSchema>;
 
+/**
+ * Info email BUKAN rahasia (Fase 11B): identitas pengirim Resend efektif
+ * (panel → env) DITAMPILKAN agar pemilik bisa memverifikasinya. Kunci
+ * API Resend sendiri rahasia dan tidak pernah muncul di kontrak mana pun
+ * (hanya statusnya, seperti kunci lain).
+ */
+export const PlatformEmailInfoSchema = z.object({
+  fromEmail: z.string().nullable(),
+  fromName: z.string().nullable(),
+});
+export type PlatformEmailInfo = z.infer<typeof PlatformEmailInfoSchema>;
+
 export const PlatformSettingsResponseSchema = z.object({
   settings: z.array(PlatformSettingStatusSchema),
   r2: PlatformR2InfoSchema,
   meta: PlatformMetaInfoSchema,
+  email: PlatformEmailInfoSchema,
 });
 export type PlatformSettingsResponse = z.infer<
   typeof PlatformSettingsResponseSchema

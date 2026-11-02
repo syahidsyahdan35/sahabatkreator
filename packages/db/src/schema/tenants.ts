@@ -81,6 +81,18 @@ export const invitations = pgTable(
      * revoked_at NULL & expires_at > now(); selain itu terminal.
      */
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /**
+     * Pengiriman email undangan (Fase 11B, Resend): waktu email benar-
+     * benar terkirim oleh job `team.invitation_email`. NULL = belum
+     * terkirim (belum diantrekan / masih retry / tidak terkonfigurasi).
+     */
+    emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
+    /**
+     * Ringkasan kegagalan kirim terakhir (Fase 11B): kode provider +
+     * pesan singkat terpotong — TIDAK PERNAH berisi token atau isi
+     * email. Dikosongkan lagi saat kirim berhasil.
+     */
+    emailError: varchar("email_error", { length: 255 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

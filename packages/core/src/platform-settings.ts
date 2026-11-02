@@ -60,6 +60,13 @@ export const PLATFORM_SETTING_KEYS = [
   "meta_app_id",
   "meta_ig_config_id",
   "meta_wa_config_id",
+  // Fase 11B: email transaksional Resend (keputusan user 2026-11-02).
+  // resend_api_key = rahasia (tidak pernah keluar dari modul ini);
+  // resend_from_email / resend_from_name = identitas pengirim, BUKAN
+  // rahasia — lihat PLATFORM_PUBLIC_CONFIG_KEYS di bawah.
+  "resend_api_key",
+  "resend_from_email",
+  "resend_from_name",
 ] as const;
 
 /** Kunci platform yang nilainya identifier PUBLIK (Fase 7D, lihat atas). */
@@ -67,6 +74,10 @@ export const PLATFORM_PUBLIC_CONFIG_KEYS = [
   "meta_app_id",
   "meta_ig_config_id",
   "meta_wa_config_id",
+  // Fase 11B: identitas pengirim email (nama + alamat tampil di setiap
+  // email yang diterima orang — memang publik menurut sifatnya).
+  "resend_from_email",
+  "resend_from_name",
 ] as const;
 
 export type PlatformPublicConfigKey =
@@ -80,21 +91,28 @@ export type PlatformPublicConfig = Record<PlatformPublicConfigKey, string | null
  * karena App ID & config ID bukan kredensial — UI admin menampilkannya
  * agar pemilik platform bisa memverifikasi isian panelnya, dan endpoint
  * info OAuth membagikannya ke UI connect (URL dialog dibangun server,
- * tetapi identifier-nya sendiri publik).
+ * tetapi identifier-nya sendiri publik). Fase 11B: identitas pengirim
+ * email Resend ikut dikembalikan dari fungsi yang sama (sifatnya sama:
+ * nilai tampil, bukan rahasia).
  */
 export async function getPlatformPublicConfig(
   db: Database,
   opts: PlatformSettingsOptions,
 ): Promise<PlatformPublicConfig> {
-  const [appId, igConfigId, waConfigId] = await Promise.all([
-    getProviderSecret(db, "meta_app_id", opts),
-    getProviderSecret(db, "meta_ig_config_id", opts),
-    getProviderSecret(db, "meta_wa_config_id", opts),
-  ]);
+  const [appId, igConfigId, waConfigId, resendFromEmail, resendFromName] =
+    await Promise.all([
+      getProviderSecret(db, "meta_app_id", opts),
+      getProviderSecret(db, "meta_ig_config_id", opts),
+      getProviderSecret(db, "meta_wa_config_id", opts),
+      getProviderSecret(db, "resend_from_email", opts),
+      getProviderSecret(db, "resend_from_name", opts),
+    ]);
   return {
     meta_app_id: appId,
     meta_ig_config_id: igConfigId,
     meta_wa_config_id: waConfigId,
+    resend_from_email: resendFromEmail,
+    resend_from_name: resendFromName,
   };
 }
 

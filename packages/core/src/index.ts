@@ -506,6 +506,21 @@ export {
   type Invitation,
 } from "./team";
 export {
+  RESEND_DEFAULT_API_BASE,
+  INVITATION_EMAIL_OUTBOX_TYPE,
+  resolveEmailConfig,
+  sendEmail,
+  buildInvitationEmail,
+  queueInvitationEmail,
+  deliverInvitationEmail,
+  type ResolvedEmailConfig,
+  type SendEmailInput,
+  type SendEmailResult,
+  type InvitationEmailContent,
+  type InvitationEmailDeps,
+  type InvitationEmailDeliveryResult,
+} from "./email";
+export {
   PLATFORM_SETTING_KEYS,
   PLATFORM_PUBLIC_CONFIG_KEYS,
   PLATFORM_SETTINGS_CACHE_TTL_MS,

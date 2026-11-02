@@ -52,6 +52,7 @@ export const BROADCAST_DISPATCH_JOB = "broadcast.dispatch";
 export const FLOW_STEP_JOB = "flow.step";
 export const COMMENT_EVALUATE_JOB = "comment.evaluate";
 export const KB_EMBED_JOB = "kb.embed";
+export const TEAM_INVITATION_EMAIL_JOB = "team.invitation_email";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -153,6 +154,24 @@ export interface KbEmbedJobData {
   outboxEventId: string;
 }
 
+/**
+ * Job Fase 11B: kirim email SATU undangan tim lewat Resend. Di-enqueue
+ * oleh relay outbox dari event `team.invitation_email_requested`
+ * (ditulis lapisan API sesudah undangan tercipta, hanya bila email
+ * platform terkonfigurasi). `tokenEnc` adalah token undangan sebagai
+ * CIPHERTEXT envelope AES-256-GCM (secret env CHANNEL_TOKEN_SECRET) —
+ * token mentah tidak pernah masuk antrean/DB; tabel invitations tetap
+ * hanya menyimpan hash-nya. jobId deterministik dari id event outbox;
+ * core idempoten (email_sent_at + status pending diperiksa ulang),
+ * jadi eksekusi ulang aman.
+ */
+export interface InvitationEmailJobData {
+  tenantId: string;
+  invitationId: string;
+  tokenEnc: string;
+  outboxEventId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -191,6 +210,11 @@ export function kbEmbedJobId(outboxEventId: string): string {
   return `kb-embed-${outboxEventId}`;
 }
 
+/** jobId deterministik email undangan dari id event outbox. */
+export function invitationEmailJobId(outboxEventId: string): string {
+  return `invitation-email-${outboxEventId}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -208,7 +232,8 @@ export type MainJobData =
   | BroadcastDispatchJobData
   | FlowStepJobData
   | CommentEvaluateJobData
-  | KbEmbedJobData;
+  | KbEmbedJobData
+  | InvitationEmailJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -382,6 +407,31 @@ export async function enqueueKbEmbed(
     ...options,
   });
   return job.id ?? kbEmbedJobId(data.outboxEventId);
+}
+
+/**
+ * Meng-enqueue pengiriman email untuk satu undangan dari event
+ * `team.invitation_email_requested`. Aman dipanggil berulang: jobId
+ * diturunkan dari id event outbox. attempts 3 + backoff eksponensial =
+ * retry wajar untuk kegagalan provider sesaat; kegagalan permanen
+ * berakhir sebagai job gagal yang terlihat di log DAN tercatat di
+ * `invitations.email_error` — undangan sendiri tetap sah lewat tautan
+ * salin, jadi email yang gagal tidak menggantungkan apa pun.
+ */
+export async function enqueueInvitationEmail(
+  queue: MainQueue,
+  data: InvitationEmailJobData,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(TEAM_INVITATION_EMAIL_JOB, data, {
+    jobId: invitationEmailJobId(data.outboxEventId),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? invitationEmailJobId(data.outboxEventId);
 }
 
 export {

@@ -38,8 +38,13 @@ import type { MemberRole } from "./tenants";
  *   menyetel `app.invitation_token_hash`, policy membuka tepat baris itu.
  *   Penulisan keanggotaan lalu berjalan dalam konteks tenant baris
  *   tersebut (pola lengan lookup 0006/0012/0016).
- * - Email sungguhan TIDAK dikirim fase ini (belum ada provider email):
- *   tautan disalin manual dari Settings — UI menyatakannya apa adanya.
+ * - Email undangan (Fase 11B): lapisan API mengantrekan pengiriman
+ *   lewat event outbox `team.invitation_email_requested` ke job
+ *   `team.invitation_email` (modul `email.ts`) yang mengirim via Resend
+ *   bila platform terkonfigurasi; hasil kirim tercatat di kolom
+ *   `email_sent_at` / `email_error` baris ini. Modul ini sendiri tetap
+ *   tidak tahu email — invariant hash-only token dijaga dengan
+ *   mengenkripsi token ke payload outbox (lihat email.ts).
  *
  * Invariant kepemilikan (ditegakkan DI SINI, bukan hanya UI):
  * - Peran `owner` tidak bisa diberikan, diturunkan, atau dikeluarkan

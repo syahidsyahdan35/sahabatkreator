@@ -2269,5 +2269,60 @@ function oneHotVector(index: number): string {
   );
 }
 
+// ---------- 35. Fase 11B: kolom status email undangan (migrasi generate) ----------
+{
+  // Kolom email_sent_at + email_error (migrasi 0001_invitation_email,
+  // hasil `pnpm db:generate`) ada di invitations.
+  const cols = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'invitations'
+        AND column_name IN ('email_sent_at', 'email_error')`,
+  );
+  assert.equal(cols.rows[0].count, "2");
+
+  // Baris undangan baru: kedua kolom NULL secara bawaan; nilai yang
+  // ditulis job email terbaca dalam konteks tenant pemilik dan tidak
+  // terlihat dari tenant lain (isolasi invitations tidak berubah).
+  const EMAIL_HASH =
+    "11b111111111111111111111111111111111111111111111111111111111aaaa";
+  await db.query(
+    `INSERT INTO invitations (tenant_id, email, role, token_hash, expires_at, email_error)
+     VALUES ($1, 'invitee-11b@example.com', 'agent', $2, now() + interval '7 days',
+             'RESEND_HTTP_500: mock failure')`,
+    [TENANT_A, EMAIL_HASH],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const own = await tx.query<{ email_error: string; email_sent_at: unknown }>(
+      `SELECT email_error, email_sent_at FROM invitations WHERE token_hash = $1`,
+      [EMAIL_HASH],
+    );
+    await tx.query(
+      `UPDATE invitations SET email_sent_at = now(), email_error = NULL
+        WHERE token_hash = $1`,
+      [EMAIL_HASH],
+    );
+    const after = await tx.query<{ ok: boolean }>(
+      `SELECT (email_sent_at IS NOT NULL AND email_error IS NULL) AS ok
+         FROM invitations WHERE token_hash = $1`,
+      [EMAIL_HASH],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM invitations WHERE token_hash = $1`,
+      [EMAIL_HASH],
+    );
+    return { own, after, other };
+  });
+  assert.equal(views.own.rows[0].email_error, "RESEND_HTTP_500: mock failure");
+  assert.equal(views.own.rows[0].email_sent_at, null);
+  assert.equal(views.after.rows[0].ok, true);
+  assert.equal(views.other.rows[0].n, "0");
+  console.log(
+    "[35] Fase 11B: invitations.email_sent_at/email_error ada (migrasi hasil generate); status kirim tertulis & terbaca dalam konteks pemilik, tenant lain 0 baris: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");
