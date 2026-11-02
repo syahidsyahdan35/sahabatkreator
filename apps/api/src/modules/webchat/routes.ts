@@ -57,6 +57,35 @@ export function createWebchatRoutes(
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
+  /**
+   * CORS permisif KHUSUS endpoint publik webchat (hotfix 2026-11-02).
+   *
+   * Widget ini memang dirancang dipasang di website LAIN (kasus utama
+   * produk — pemilik workspace menempel snippet di situsnya sendiri) dan
+   * juga dibuka dari halaman file:// (Origin: null). Tanpa
+   * `Access-Control-Allow-Origin` pada respons aktual, browser memblokir
+   * SEMUA panggilan widget lintas-origin walau preflight-nya lolos —
+   * widget macet di "Connecting…" di situs tenant.
+   *
+   * Permisif aman di sini karena endpoint ini publik BY DESIGN:
+   * autentikasinya siteKey publik + token pengunjung HMAC (header
+   * Bearer), BUKAN cookie sesi dashboard — tidak ada kredensial ambient
+   * yang bisa disalahgunakan lintas origin. Header dipasang juga pada
+   * respons error (404/401/…) agar browser menyampaikan error yang benar
+   * ke widget, bukan kegagalan jaringan yang buram. Endpoint
+   * tenant/dashboard TIDAK mendapat perlakuan ini.
+   */
+  app.use("/webchat/*", async (c, next) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    if (c.req.method === "OPTIONS") {
+      c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      c.header("Access-Control-Max-Age", "86400");
+      return c.body(null, 204);
+    }
+    await next();
+  });
+
   const notConfigured = (c: Parameters<typeof apiError>[0]) =>
     apiError(c, 503, "INTERNAL_ERROR", "Webchat is not configured");
   const configured = Boolean(bundle && opts.secret);

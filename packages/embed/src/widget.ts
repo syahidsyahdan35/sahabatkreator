@@ -3,14 +3,21 @@
  *
  * Cara pasang di situs tenant:
  *   <script src="https://botara.my.id/widget.js" data-site-key="wc_..."></script>
- * Opsi: data-lang="id" (default "en"), data-title="Chat dengan kami",
+ * Opsi: data-lang="id"|"en" (default: deteksi dari <html lang>, lalu
+ * bahasa browser, terakhir "en"), data-title="Chat dengan kami",
  * data-api-base="https://botara.my.id" (default: origin file widget ini).
  *
  * Perilaku:
  * - Tombol chat melayang + panel percakapan, tema mengikuti sistem
- *   pengunjung (prefers-color-scheme terang/gelap).
+ *   pengunjung (prefers-color-scheme terang/gelap). Root widget adalah
+ *   flex column rata kanan — tombol TIDAK bergeser saat panel membuka.
  * - Sesi dibuka lewat POST /api/webchat/:siteKey/session; token pengunjung
  *   + visitorId persisten disimpan di localStorage SITUS ASAL.
+ * - Tahan gangguan (hotfix 2026-11-02): pembuatan sesi yang gagal dicoba
+ *   ulang otomatis dengan backoff + tombol "Coba lagi", status koneksi
+ *   ditampilkan jujur (connecting/connected/error), pemulihan saat tab
+ *   aktif lagi / browser online lagi, dan pesan yang gagal terkirim
+ *   berlabel tap-to-retry. Widget tidak pernah gagal diam-diam.
  * - Pesan keluar masuk lewat REST; balasan masuk secara realtime lewat
  *   WebSocket, dengan polling cadangan bila WS gagal.
  * - Semua teks pesan dirender dengan textContent (tidak ada innerHTML dari
@@ -24,6 +31,9 @@ interface WidgetStrings {
   send: string;
   connecting: string;
   emptyState: string;
+  errorText: string;
+  retry: string;
+  sendFailed: string;
 }
 
 const STRINGS: Record<"en" | "id", WidgetStrings> = {
@@ -34,6 +44,9 @@ const STRINGS: Record<"en" | "id", WidgetStrings> = {
     send: "Send",
     connecting: "Connecting…",
     emptyState: "Say hello — we usually reply in a moment.",
+    errorText: "Couldn't connect. Check your connection, or try again.",
+    retry: "Retry",
+    sendFailed: "Failed to send — tap to retry",
   },
   id: {
     openLabel: "Chat dengan kami",
@@ -42,6 +55,9 @@ const STRINGS: Record<"en" | "id", WidgetStrings> = {
     send: "Kirim",
     connecting: "Menghubungkan…",
     emptyState: "Sapa kami — biasanya dibalas sebentar lagi.",
+    errorText: "Tidak dapat terhubung. Periksa koneksi Anda, atau coba lagi.",
+    retry: "Coba lagi",
+    sendFailed: "Gagal terkirim — ketuk untuk coba lagi",
   },
 };
 
@@ -66,8 +82,17 @@ interface SessionResponse {
     console.warn("[sahabat-kreator] widget: atribut data-site-key wajib diisi");
     return;
   }
-  const lang = script.dataset.lang === "id" ? "id" : "en";
-  const t = STRINGS[lang as "en" | "id"];
+  // Bahasa: data-lang eksplisit menang; lalu atribut lang halaman;
+  // lalu bahasa browser pengunjung; default Inggris.
+  const docLang = document.documentElement.lang || "";
+  const navLang = navigator.language || "";
+  const lang: "en" | "id" =
+    script.dataset.lang === "id" || script.dataset.lang === "en"
+      ? script.dataset.lang
+      : (docLang || navLang).toLowerCase().startsWith("id")
+        ? "id"
+        : "en";
+  const t = STRINGS[lang];
   const apiBase = (
     script.dataset.apiBase || new URL(script.src).origin
   ).replace(/\/$/, "");
@@ -137,8 +162,11 @@ interface SessionResponse {
 
   // ---------- DOM ----------
   const root = document.createElement("div");
+  // Root = flex column RATA KANAN: tombol chat selalu berlabuh di pojok
+  // kanan bawah. Tanpa ini, saat panel membuka root melebar mengikuti
+  // panel dan tombol (flow normal di bawah panel) melompat ke kiri.
   root.style.cssText =
-    "position:fixed;right:20px;bottom:20px;z-index:2147483000;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;";
+    "position:fixed;right:20px;bottom:20px;z-index:2147483000;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;display:flex;flex-direction:column;align-items:flex-end;gap:12px;";
 
   const button = document.createElement("button");
   button.type = "button";
@@ -149,7 +177,7 @@ interface SessionResponse {
 
   const panel = document.createElement("div");
   panel.style.cssText =
-    "display:none;width:min(360px,calc(100vw - 32px));height:min(520px,calc(100vh - 120px));border-radius:16px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.3);flex-direction:column;margin-bottom:12px;";
+    "display:none;width:min(360px,calc(100vw - 32px));height:min(520px,calc(100vh - 120px));border-radius:16px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.3);flex-direction:column;";
 
   const header = document.createElement("div");
   header.style.cssText =
@@ -174,8 +202,10 @@ interface SessionResponse {
   input.type = "text";
   input.placeholder = t.placeholder;
   input.maxLength = 4096;
+  // font-size 16px WAJIB: di bawah itu iOS Safari auto-zoom saat input
+  // difokuskan, dan seluruh halaman tampak "bergeser" setiap kali diklik.
   input.style.cssText =
-    "flex:1;border-radius:9999px;padding:10px 14px;font-size:14px;outline:none;border:1px solid;";
+    "flex:1;border-radius:9999px;padding:10px 14px;font-size:16px;outline:none;border:1px solid;";
   const sendBtn = document.createElement("button");
   sendBtn.type = "submit";
   sendBtn.textContent = t.send;
@@ -183,7 +213,21 @@ interface SessionResponse {
     "border:none;border-radius:9999px;padding:10px 16px;font-size:14px;font-weight:600;color:#fff;background:#2563eb;cursor:pointer;";
   form.append(input, sendBtn);
 
-  panel.append(header, messagesEl, form);
+  // Bar status koneksi di dalam panel (di atas form): menampilkan keadaan
+  // connecting/error secara jujur — widget TIDAK BOLEH gagal diam-diam
+  // di "Connecting…" selamanya (keluhan pengguna, hotfix 2026-11-02).
+  const statusEl = document.createElement("div");
+  statusEl.style.cssText =
+    "display:none;padding:8px 12px;font-size:13px;text-align:center;border-top:1px solid;";
+  const statusText = document.createElement("span");
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.textContent = t.retry;
+  retryBtn.style.cssText =
+    "margin-left:8px;border:1px solid;border-radius:9999px;padding:2px 10px;font-size:12px;font-weight:600;background:transparent;cursor:pointer;color:inherit;";
+  statusEl.append(statusText, retryBtn);
+
+  panel.append(header, messagesEl, statusEl, form);
   root.append(panel, button);
   document.body.appendChild(root);
 
@@ -193,6 +237,8 @@ interface SessionResponse {
     panel.style.color = p.text;
     header.style.background = p.header;
     form.style.borderTopColor = p.border;
+    statusEl.style.borderTopColor = p.border;
+    statusEl.style.color = p.muted;
     input.style.background = p.inputBg;
     input.style.color = p.text;
     input.style.borderColor = p.border;
@@ -275,14 +321,85 @@ interface SessionResponse {
     }
   }
 
+  // ---------- Status koneksi yang jujur: connecting / connected / error ----------
+  type ConnState = "idle" | "connecting" | "connected" | "error";
+  function setConnState(next: ConnState): void {
+    if (next === "connected" || next === "idle") {
+      statusEl.style.display = "none";
+      return;
+    }
+    statusEl.style.display = "block";
+    statusText.textContent = next === "connecting" ? t.connecting : t.errorText;
+    retryBtn.style.display = next === "error" ? "" : "none";
+  }
+
+  // ---------- Pembuatan sesi dengan retry otomatis ----------
+  // Kegagalan sesaat (API restart saat deploy, jaringan pengunjung
+  // berkedip, halaman dibuka tepat saat server sibuk) TIDAK BOLEH
+  // membuat widget mati sampai reload manual: sesi dicoba ulang dengan
+  // backoff 1s → 2s → 5s → 10s → 15s (lalu tetap 15s) sampai berhasil,
+  // dan selama itu panel menampilkan status error + tombol coba lagi.
+  const RETRY_DELAYS_MS = [1000, 2000, 5000, 10000, 15000];
+  let retryStep = 0;
+  let retryTimer: number | null = null;
+  let sessionAttemptRunning = false;
+
+  function clearRetryTimer(): void {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  async function attemptSession(): Promise<void> {
+    if (token || sessionAttemptRunning) return;
+    sessionAttemptRunning = true;
+    setConnState("connecting");
+    try {
+      await ensureSession(true);
+      retryStep = 0;
+      clearRetryTimer();
+      setConnState("connected");
+      connectWs();
+      void syncMessages();
+    } catch {
+      setConnState("error");
+      const delay =
+        RETRY_DELAYS_MS[Math.min(retryStep, RETRY_DELAYS_MS.length - 1)];
+      retryStep += 1;
+      clearRetryTimer();
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void attemptSession();
+      }, delay);
+    } finally {
+      sessionAttemptRunning = false;
+    }
+  }
+
+  retryBtn.addEventListener("click", () => {
+    retryStep = 0;
+    clearRetryTimer();
+    void attemptSession();
+  });
+
   async function syncMessages(): Promise<void> {
-    if (!token) return;
-    const res = await apiFetch("/api/webchat/messages");
+    if (!token) {
+      // Polling ikut memicu pembuatan sesi — jalur pemulihan kedua
+      // selain timer backoff (mis. tab yang lama tidak aktif).
+      void attemptSession();
+      return;
+    }
+    let res: Response;
+    try {
+      res = await apiFetch("/api/webchat/messages");
+    } catch {
+      return; // jaringan berkedip — polling berikutnya mencoba lagi
+    }
     if (res.status === 401) {
       token = null;
       saveStore({ visitorId });
-      await ensureSession(true);
-      connectWs();
+      void attemptSession();
       return;
     }
     if (!res.ok) return;
@@ -342,29 +459,18 @@ interface SessionResponse {
   }
 
   // ---------- Interaksi ----------
-  async function openPanel(): Promise<void> {
+  function openPanel(): void {
     opened = true;
     panel.style.display = "flex";
     applyTheme();
-    if (messagesEl.childElementCount === 0) {
-      const loading = document.createElement("div");
-      loading.style.cssText = "text-align:center;font-size:13px;padding:16px 8px;";
-      loading.style.color = palette().muted;
-      loading.textContent = t.connecting;
-      messagesEl.appendChild(loading);
-    }
-    try {
-      await ensureSession();
+    if (token) {
+      // Token tersimpan dari kunjungan sebelumnya: langsung terhubung,
+      // lalu sinkronkan riwayat (WS juga mem-flush balasan yang menunggu).
+      setConnState("connected");
       connectWs();
-      if (messagesEl.firstChild && messagesEl.childElementCount === 1 && seen.size === 0) {
-        // Hanya teks "connecting" — bersihkan bila sesi tanpa pesan.
-        if ((messagesEl.firstChild as HTMLElement).textContent === t.connecting) {
-          messagesEl.textContent = "";
-          showEmptyState();
-        }
-      }
-    } catch {
-      startPolling();
+      void syncMessages();
+    } else {
+      void attemptSession();
     }
     input.focus();
   }
@@ -380,18 +486,79 @@ interface SessionResponse {
   }
   button.addEventListener("click", () => {
     if (opened) closePanel();
-    else void openPanel();
+    else openPanel();
   });
   closeBtn.addEventListener("click", closePanel);
 
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = "";
-    void (async () => {
-      await ensureSession();
-      const res = await apiFetch("/api/webchat/messages", {
+  // Pemulihan otomatis tanpa reload: tab kembali aktif atau browser
+  // kembali online → bila sesi belum terbentuk, coba lagi SEGERA
+  // (tanpa menunggu sisa backoff); bila sudah, sinkronkan pesan.
+  function recoverWhenBack(): void {
+    if (!token) {
+      retryStep = 0;
+      clearRetryTimer();
+      void attemptSession();
+    } else if (opened) {
+      void syncMessages();
+    }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) recoverWhenBack();
+  });
+  window.addEventListener("online", recoverWhenBack);
+
+  // ---------- Kirim pesan: gelembung lokal + indikator gagal ----------
+  // Pesan langsung tampil sebagai gelembung lokal; bila pengiriman
+  // gagal, gelembung menjadi redup dengan label "gagal — ketuk untuk
+  // coba lagi" dan ketukan mengirim ulang. Tidak ada kegagalan diam.
+  function appendLocalBubble(text: string): HTMLDivElement {
+    if (messagesEl.dataset.empty === "1") {
+      messagesEl.textContent = "";
+      delete messagesEl.dataset.empty;
+    }
+    const bubble = document.createElement("div");
+    bubble.dataset.mine = "1";
+    bubble.style.cssText =
+      "max-width:80%;padding:8px 12px;border-radius:14px;font-size:14px;line-height:1.4;white-space:pre-wrap;word-break:break-word;align-self:flex-end;";
+    const textEl = document.createElement("div");
+    textEl.textContent = text;
+    const failEl = document.createElement("div");
+    failEl.style.cssText =
+      "display:none;font-size:11px;margin-top:4px;text-decoration:underline;";
+    failEl.textContent = t.sendFailed;
+    bubble.append(textEl, failEl);
+    messagesEl.appendChild(bubble);
+    applyTheme();
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return bubble;
+  }
+
+  function markSendFailed(bubble: HTMLDivElement, text: string): void {
+    bubble.style.opacity = "0.65";
+    bubble.style.cursor = "pointer";
+    const failEl = bubble.lastElementChild as HTMLElement | null;
+    if (failEl) failEl.style.display = "block";
+    bubble.onclick = () => {
+      bubble.onclick = null;
+      bubble.style.opacity = "";
+      bubble.style.cursor = "default";
+      if (failEl) failEl.style.display = "none";
+      void deliverMessage(bubble, text);
+    };
+  }
+
+  async function deliverMessage(
+    bubble: HTMLDivElement,
+    text: string,
+  ): Promise<void> {
+    try {
+      if (!token) {
+        setConnState("connecting");
+        await ensureSession(true);
+        setConnState("connected");
+        connectWs();
+      }
+      let res = await apiFetch("/api/webchat/messages", {
         method: "POST",
         body: JSON.stringify({ contentText: text }),
       });
@@ -399,16 +566,30 @@ interface SessionResponse {
         token = null;
         saveStore({ visitorId });
         await ensureSession(true);
+        setConnState("connected");
         connectWs();
-        const retry = await apiFetch("/api/webchat/messages", {
+        res = await apiFetch("/api/webchat/messages", {
           method: "POST",
           body: JSON.stringify({ contentText: text }),
         });
-        if (retry.ok) appendMessage((await retry.json()) as ChatMessage);
-        return;
       }
-      if (res.ok) appendMessage((await res.json()) as ChatMessage);
-    })();
+      if (!res.ok) throw new Error(`send failed: ${res.status}`);
+      const msg = (await res.json()) as ChatMessage;
+      bubble.remove();
+      appendMessage(msg);
+    } catch {
+      if (!token) void attemptSession();
+      markSendFailed(bubble, text);
+    }
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    const bubble = appendLocalBubble(text);
+    void deliverMessage(bubble, text);
   });
 
   applyTheme();
