@@ -3199,3 +3199,194 @@ berubah); commit fitur `5019db9`.
 - Batas jujur: bukti visual modal (pemilih, sheet mobile, sorotan
   kartu) menunggu uji user sesuai pembagian kerja — yang terbukti di
   sini adalah typecheck, build/bundle tersaji, dan regresi API.
+
+## Update Fase 7B.2 — Penanganan Kegagalan: Replay Webhook + Pusat Pesan Gagal (2026-11-02)
+
+Di atas log integrasi 7B.1: event webhook yang gagal kini bisa
+DIPROSES ULANG dari log, dan pesan keluar yang gagal terkumpul di satu
+pusat dengan tombol kirim ulang. Commit fitur `dd446c7`
+(`feat(logs): phase 7B.2 failure handling — webhook replay + failed
+message center with retry`). TANPA migrasi — skema 7B.1/1D sudah cukup.
+
+### Replay webhook (proses ulang event masuk)
+
+- **Jalur yang sama, bukan jalur palsu:** pemrosesan update Telegram
+  yang sudah lolos gerbang diekstrak dari route ke
+  `apps/api/src/modules/telegram/process.ts`
+  (`processTelegramUpdate`), dan pemrosesan payload Meta (dispatch
+  WhatsApp vs messaging Page/IG) ke `apps/api/src/modules/meta/
+  process.ts` (`processMetaWebhookPayload`). Route live memanggil
+  fungsi yang sama persis (perilaku respons tidak berubah); replay
+  memanggilnya lagi dengan payload tersimpan. Error core per event
+  tetap dicatat `error` lalu dilempar — route 500 seperti sebelumnya,
+  replay menangkapnya dan melaporkan outcome `error`.
+- **Kelayakan (core `evaluateIntegrationLogReplayEligibility`, ditegakkan
+  server; UI hanya mencerminkan):** hanya baris `direction='in'` dengan
+  `signature_valid === true` dan outcome `error` atau
+  `ignored_disconnected`, dengan payload tersimpan LENGKAP. Payload
+  null/penanda truncated → 422 `LOG_PAYLOAD_TRUNCATED`; selain itu →
+  422 `LOG_REPLAY_NOT_ALLOWED`. Event yang gagal verifikasi TIDAK
+  PERNAH direplay — memprosesnya akan mengkhianati makna tanda tangan.
+- **Endpoint:** `POST /tenants/:tenantId/logs/:logId/replay` — sesi +
+  membership + owner/admin (penjaga yang sama seperti baca log);
+  non-member 404, member biasa 403. Baris tenant-NULL (unresolved)
+  tidak terjangkau endpoint tenant dan fase ini TIDAK menyediakan
+  replay platform-admin untuknya (batas terdokumentasi di bawah).
+- **Keamanan lintas tenant:** Telegram ditargetkan dari
+  `channel_account_id` baris sumber dan akun WAJIB milik tenant yang
+  sama (hilang/pindah → 422). Payload Meta satu hit bisa memuat event
+  banyak tenant → prosesor dijalankan ber-scope `tenantScopeId`:
+  event yang ter-resolve ke tenant lain / tak ter-resolve DILEWATI
+  SENYAP (jejaknya sudah ditulis saat hit live); baris agregat
+  platform tidak ditulis dari replay.
+- **Append-only & provenance:** baris sumber tidak pernah diubah.
+  Baris baru hasil replay membawa akhiran `· replay of log <id8>` di
+  summary-nya; aksi operator ditulis ke audit `integration.replay`
+  (meta: sourceLogId, provider, outcomes — tanpa payload). Respons:
+  `{ replayed: true, sourceLogId, outcomes[] }` = outcome baris-baris
+  baru berurutan.
+- **Idempotensi:** dedup `provider_message_id` di core membuat replay
+  event yang ternyata sudah tercatat menghasilkan `duplicate` tanpa
+  pesan/outbox/automation/agent ganda — terbukti di rantai (replay
+  kedua dari baris sumber yang sama).
+
+### Pusat pesan keluar gagal + retry
+
+- **Cakupan jujur:** status `failed` pada pesan keluar HANYA dihasilkan
+  poller telegram & poller Meta (messenger/instagram/whatsapp;
+  termasuk kegagalan terminal status WhatsApp dari webhook Meta) —
+  itulah provider di `RETRYABLE_FAILED_PROVIDERS` (core). **Webchat
+  tidak punya pesan `failed`**: flush gateway realtime hanya menandai
+  `sent`, dan pesan untuk pengunjung luring/disconnected tetap
+  `queued` — jadi webchat tidak tampil di pusat gagal dan tidak ada
+  retry palsu untuknya (terbukti live di rantai T8).
+- **API (owner/admin, penjaga yang sama):** `GET
+  /tenants/:tenantId/failed-messages` (filter provider + paginasi
+  kursor keyset; konteks channel/kontak/preview ±280 char/error_code)
+  dan `POST /tenants/:tenantId/failed-messages/:messageId/retry`.
+- **Retry (core `retryFailedOutboundMessage`):** satu transaksi
+  tenant; pesan harus outbound `failed`; akun channel harus ada,
+  tidak di-trash, dan `connected` (selain itu 409
+  `CHANNEL_DISCONNECTED`); transisi `failed` → `queued` ATOMIK
+  kondisional pada status (balapan poller tidak menimpa
+  `sent/delivered/read`; status sudah berubah → 409
+  `MESSAGE_NOT_FAILED`); isi/percakapan/provider_message_id tidak
+  diubah, `error_code` dibersihkan sebagai bagian transisi (sejarah
+  kegagalan tetap di integration_log + audit `message.failed`); audit
+  `message.retry` (actor user, meta previousErrorCode). Pengiriman
+  sungguhan tetap oleh poller yang ada pada siklus berikutnya —
+  tidak ada pengirim paralel baru.
+- **Kode kontrak baru:** `LOG_REPLAY_NOT_ALLOWED`,
+  `LOG_PAYLOAD_TRUNCATED`, `MESSAGE_NOT_FAILED`,
+  `MESSAGE_RETRY_UNSUPPORTED` (+ `CHANNEL_DISCONNECTED` kini juga
+  diterjemahkan UI di errorText).
+
+### UI (halaman /logs)
+
+- Dua tab: "Log event" (isi 7B.1, tak berubah) dan "Pesan gagal"
+  (panel baru `FailedMessagesPanel`): filter provider, daftar lintas
+  provider, tombol "Kirim ulang" dengan dialog konfirmasi dwibahasa
+  yang memperingatkan risiko duplikat ambigu (provider sebenarnya
+  menerima tetapi respons hilang). Sesudah retry panel memuat ulang
+  dan TIDAK mengklaim terkirim — pesan hilang dari daftar hanya saat
+  percobaan poller berikutnya membuktikan status barunya (refresh
+  polling mengganti daftar, bukan menggabungkan, selama hanya halaman
+  pertama yang dimuat).
+- Panel detail baris log yang eligible menampilkan tombol "Proses
+  ulang" → dialog konfirmasi (event lama dapat memicu automation/
+  balasan AI sekarang; dedup mencegah pesan ganda) → hasil outcome
+  ditampilkan diterjemahkan, daftar dimuat ulang.
+
+### Deploy
+
+Build api+web di VM → commit `dd446c7` → push → rsync repo
+(`.env.staging` dikecualikan & utuh) → 4 service direstart (bunuh PID
+systemd milik ubuntu) → health ok; bundle publik
+**`index-BLFHbZr9.js`** identik build lokal & memuat UI 7B.2. Tanpa
+migrasi (jurnal tetap 29 baris; 34 tabel / 45 policy).
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+
+- Lokal: typecheck SEMUA paket hijau; build api (tsup) + web hijau.
+- **Rantai dari server terhadap staging publik: 64/64 PASS** (tenant
+  uji `fase7b2-*@sk.test` run ber-suffix unik; mock Telegram 8410 +
+  Graph 8411; jendela `TELEGRAM_API_BASE`/`META_API_BASE` +
+  `META_APP_SECRET` uji yang diketahui rantai — panel `meta_app_secret`
+  terverifikasi KOSONG sebelumnya sehingga env yang berkuasa;
+  `.env.staging` dipulihkan **byte-identik** (sha256, diverifikasi
+  driver) dan mock dimatikan sesudahnya):
+  - T1 sanity live: connect telegram via mock (secret tertangkap dari
+    setWebhook mock) → webhook 200 → percakapan + log `recorded`.
+  - T2 replay telegram dari baris `error` TERSEMAI (payload lengkap,
+    signature_valid true): replay → `recorded`, pesan tercatat TEPAT
+    1x; replay baris sumber yang sama lagi → `duplicate`, tetap 1x;
+    provenance `replay of log` ≥2 baris; audit `integration.replay`
+    ≥2; replay atas baris hasil `recorded` → 422.
+  - T3 penolakan: `rejected_signature` → 422 NOT_ALLOWED; payload
+    truncated → 422 `LOG_PAYLOAD_TRUNCATED`; payload null → 422 yang
+    sama; member 'agent' (disemai DB) → 403; non-member → 404; id
+    tenant A ditempuh via tenant B → 404.
+  - T4 skenario live penuh Meta: connect messenger (mock Graph) →
+    disconnect → DM bertanda tangan → log `ignored_disconnected` →
+    reconnect (revive baris sama) → replay → `recorded`, DM tercatat
+    tepat 1x → replay ulang → `duplicate`.
+  - T5 telegram gagal→retry: mock sendMessage 400 → pesan `failed`
+    (kode `telegram_http_400` dibaca dari pusat gagal); daftar failed
+    + filter provider + isolasi tenant B + member 403; retry saat
+    mock masih gagal → `queued` → poller mengambil → `failed` lagi;
+    mock sehat → retry → `sent` (mock menerima tepat 3 percobaan);
+    retry pesan sent → 409 `MESSAGE_NOT_FAILED`; audit
+    `message.retry` tepat 2 untuk pesan itu; log out `sent` baru ada.
+  - T6 messenger gagal→retry: Graph 400 kode 100 → `failed`
+    `meta_graph_100`; retry sesudah mock sehat → `sent` (tepat 2
+    percobaan tercatat mock).
+  - T7 retry saat channel disconnected → 409 `CHANNEL_DISCONNECTED`
+    (lalu reconnect untuk kebersihan).
+  - T8 webchat: sesi pengunjung + pesan masuk + balasan dashboard →
+    balasan tetap `queued` (BUKAN `failed`) saat pengunjung luring,
+    dan tidak muncul di pusat gagal.
+- Insiden proses (bukan produk): run rantai pertama kehilangan output
+  karena koneksi SSH putus di tengah; keadaan server diverifikasi
+  bersih (env pulih oleh trap driver, mock mati). Dua asersi awal
+  rantai membaca `errorCode` dari serializer pesan inbox — field itu
+  memang tidak diekspos `MessageResponseSchema` (desain lama); asersi
+  dipindah ke endpoint pusat gagal (permukaan yang benar) dan run
+  bersih menghasilkan 64/64. Penangkapan id `RETURNING` psql juga
+  sempat tercemar tag `INSERT 0 1` pada run pertama — diperbaiki di
+  helper rantai; probe manual membuktikan replay telegram sehat
+  sebelum run ulang.
+- Channel asli user TIDAK tersentuh: telegram `8fb9b81c`
+  (@botaramyid_bot) tetap connected, `10be58d5` tetap disconnected,
+  keduanya tidak di-trash; tenant asli user memiliki 0 baris
+  integration_log.
+
+### Batas jujur
+
+- Bukti visual tab "Pesan gagal", tombol replay, dan dialognya
+  menunggu uji user (aturan pembagian kerja) — yang terbukti: API,
+  kontrak, bundle tersaji, dan seluruh rantai perilaku.
+- Replay menembakkan jalur live TERMASUK efek sampingnya: pesan hasil
+  replay masuk outbox `message.received` dan dapat memicu keyword
+  automation / respons AI / sequence seperti pesan baru — memang
+  itulah makna "proses ulang", dan dialog UI memperingatkannya.
+  Untuk WhatsApp, replay juga dapat menerapkan ulang statuses
+  (monoton maju saja di core, jadi aman).
+- Risiko duplikat retry yang ambigu tetap ada secara inheren: bila
+  provider sebenarnya menerima percobaan sebelumnya tetapi responsnya
+  hilang (timeout), kirim ulang dapat mengantar pesan yang sama dua
+  kali ke kontak. Kegagalan eksplisit (4xx Graph/Bot API) tidak
+  ambigu. UI memperingatkan ini sebelum retry.
+- Baris `error` dengan `errorCode='invalid_json'` tidak bisa direplay
+  (payload tidak tersimpan — tidak ada yang bisa diproses ulang);
+  penolakannya memakai kode `LOG_PAYLOAD_TRUNCATED` dengan pesan
+  "payload tidak lengkap", sesuai kontrak fase ini.
+- Replay untuk baris tenant-NULL (unresolved) oleh platform admin
+  TIDAK termasuk fase ini: baris-baris itu tidak ber-tenant sehingga
+  tidak ada konteks aman untuk memprosesnya ulang dari endpoint
+  tenant; jalur masuknya pun kini sudah jauh lebih jarang gagal
+  (resolusi akun bersifat deterministik dari payload). Dicatat
+  sebagai kandidat lanjutan bila volume event unresolved membenarkan.
+- Skenario replay Telegram diuji dari baris tersemai (menginduksi
+  `processing_error` live secara deterministik tidak praktis tanpa
+  merusak data), sedangkan skenario Meta `ignored_disconnected`
+  diuji LIVE penuh dari webhook bertanda tangan sampai tercatat.
