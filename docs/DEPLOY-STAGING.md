@@ -5170,3 +5170,128 @@ melengkapinya dengan `revoked_at` + seluruh siklus hidupnya).
   SUDAH member lewat jalur lain: undangan ditutup & peran lama
   dipertahankan (perilaku terpilih di core; tidak diuji rantai).
   (4) Daftar member/undangan tanpa pagination (skala tim kini kecil).
+
+## Fase 10A — Template WhatsApp + Broadcast WA (2026-11-02)
+
+Migrasi **0036** teraplikasi di staging (jurnal DB terverifikasi
+**37 entri**; total **42 tabel, 55 policy**). WhatsApp kini bisa
+di-broadcast — secara eksklusif lewat template pesan resmi Meta,
+satu-satunya bentuk proaktif yang sah di luar jendela layanan 24 jam.
+
+### Keputusan desain
+
+- **Cermin lokal `whatsapp_templates`**: daftar template Meta
+  (GET /{waba-id}/message_templates) disinkronkan ke tabel cermin per
+  akun — unik (channel_account_id, name, language); `components`
+  jsonb disimpan apa adanya dari Meta; `body_text` + `variable_count`
+  adalah turunan lokal dari komponen BODY untuk pratinjau &
+  pemetaan parameter. Status = status Meta saat sinkron terakhir
+  (bukan kebenaran abadi — gerbang broadcast memeriksanya apa
+  adanya, dan sinkron ulang adalah cara menyegarkannya). Sinkron
+  bersifat mengganti: baris yang tidak lagi dikembalikan Meta
+  dihapus. RLS hanya `tenant_isolation` — semua akses dalam konteks
+  tenant (tidak ada scan lintas tenant; poller tidak membaca tabel
+  ini). Hapus mengikuti semantik Meta: DELETE berbasis NAMA
+  menghapus semua bahasa, cermin melakukan hal yang sama.
+- **Gerbang template di core broadcasts**: broadcast provider
+  whatsapp WAJIB menunjuk template cermin pada akun yang sama
+  berstatus APPROVED — diperiksa saat buat/edit (422
+  BROADCAST_TEMPLATE_REQUIRED / BROADCAST_TEMPLATE_NOT_APPROVED;
+  id tak dikenal 404), diperiksa ULANG saat jadwalkan, dan sekali
+  lagi saat dispatch (gagal di dispatch → broadcast `failed`
+  berkode yang sama). Kolom baru: `broadcasts.whatsapp_template_id`
+  (FK ON DELETE SET NULL — template terhapus dari cermin membuat
+  draft-nya wajib memilih ulang) + `template_variable_sources`
+  jsonb string[]; `BroadcastResponse.messageText` untuk WA menampung
+  snapshot teks BODY template. Provider lain membersihkan penunjukan
+  template. Webchat tetap satu-satunya provider yang ditolak
+  (BROADCAST_CHANNEL_UNSUPPORTED).
+- **Pemetaan variabel v1**: posisi {{n}} mengambil sumber ke-n dari
+  `template_variable_sources` — `"name"` = nama kontak, nilai lain =
+  kunci `contacts.custom_fields`; posisi 1 tanpa sumber jatuh ke
+  `"name"`. Nilai kosong / kunci tidak ada / posisi tanpa sumber →
+  penerima di-skip `template_variable_missing`; identitas tanpa
+  alamat → `missing_phone_number`. TIDAK PERNAH mengarang string
+  kosong ke variabel template.
+- **Kirim template**: dispatch mematerialisasi pesan keluar biasa
+  bertipe `template` dengan `messages.template_payload` jsonb baru
+  {name, languageCode, bodyParams} dan `content_text` = render
+  pratinjau BODY berparameter (yang dibaca manusia di inbox). Poller
+  Meta membaca `template_payload` dari scan pengiriman yang sama
+  (kolom ditambahkan ke `listQueuedMetaDeliveries`) dan mengirim
+  `POST /{phone-number-id}/messages` type=template lewat metode
+  klien baru `sendTemplateMessage`. Aturan 24 jam messenger/IG
+  (`isMeta`) tidak berubah dan tidak menyentuh jalur WA.
+- **UI di halaman Broadcasts** (bukan Channels — Channels sudah
+  2.280 baris dan berurusan dengan koneksi; template adalah alat
+  kirim): seksi "Template WhatsApp" mengelola cermin per akun
+  (pemilih akun + sinkron + formulir buat sederhana + hapus dua
+  langkah, chip status berwarna), dan formulir broadcast mode WA
+  menukar kotak teks bebas dengan pemilih template APPROVED +
+  pratinjau body + input sumber variabel per posisi. Audit
+  `whatsapp_template.synced/created/deleted` + kategori/target/label
+  viewer dwibahasa. Error Graph diterjemahkan 422
+  META_TEMPLATE_INVALID (pesan Graph mentah hanya ke log server;
+  token tidak pernah bocor).
+
+### Verifikasi Fase 10A
+
+- PGlite verify: **29/29 seksi LULUS** termasuk [29] baru
+  (whatsapp_templates terisolasi per tenant + insert silang ditolak
+  + tanpa konteks 0 baris; unik (akun, nama, bahasa) menolak ganda;
+  ketiga kolom baru ada; hitungan kini 42 tabel / 55 policy).
+  Typecheck SEMUA paket hijau; build semua dist hijau; bundle API
+  memuat `whatsapp-templates`/`BROADCAST_TEMPLATE_REQUIRED`/
+  `sendTemplateMessage`, bundle web memuat namespace
+  `whatsappTemplates`, bundle worker memuat jalur dispatch template.
+- Rantai dari server (tenant uji `fase10a-*@sk.test`, mock Graph +
+  Telegram lokal lewat jendela `META_API_BASE`/`TELEGRAM_API_BASE`,
+  env dipulihkan byte-identik sha `9c1ded2a…` + API restart
+  sesudahnya): **47 PASS / 0 FAIL**. Yang terbukti: connect WA via
+  mock; sinkron menarik 4 template (APPROVED ×2 dengan variable
+  count 2 & 1, PENDING, REJECTED); buat template → mock menerima
+  payload benar (nama/kategori/contoh variabel BUTTONS) → 201
+  PENDING; penolakan Graph → 422 META_TEMPLATE_INVALID; hapus → 204
+  + DELETE by-name tercatat di mock + cermin bersih; gerbang
+  broadcast (tanpa template 422 REQUIRED; REJECTED & PENDING 422
+  NOT_APPROVED); broadcast template 2 variabel terkirim
+  type=template dengan parameter per penerima persis
+  ([Sari, "promo spesial"], [Citra, "diskon 20%"]); penerima tanpa
+  nilai variabel → skipped template_variable_missing; opted-out →
+  skipped opted_out; pesan tersimpan type=template dengan
+  content_text pratinjau ter-render; broadcast template 1 variabel
+  tanpa sumber → {{1}} jatuh ke nama kontak, dan 3 penerima TANPA
+  riwayat pesan masuk tetap terkirim (aturan 24 jam terbukti tidak
+  berlaku untuk template WA); member (peran agent via undangan) bisa
+  membaca template tetapi 403 untuk sinkron & buat broadcast;
+  isolasi lintas tenant 404; regresi broadcast Telegram terkirim
+  dengan {name} tersubstitusi.
+- Catatan proses rantai: run pertama berhenti di regresi Telegram
+  karena mock getMe memakai id bot tetap yang sudah terhubung di
+  tenant uji fase lama (penjaga satu-bot bekerja sebagaimana
+  mestinya) — mock diperbaiki menurunkan id bot dari token, run
+  kedua 47/47. Jendela mock: channel asli user terverifikasi utuh
+  sesudahnya (Telegram @botaramyid_bot + Page Messenger tetap
+  connected); berkas mock/rantai tetap di /tmp server sebagai
+  artefak uji, tidak masuk repo.
+
+### Batas jujur Fase 10A
+
+- **Bukti live menunggu WABA asli user terhubung** — seluruh
+  verifikasi fase ini memakai mock Graph; bentuk respons Meta asli
+  untuk message_templates (paging, status tambahan seperti
+  PAUSED/DISABLED, penolakan pembuatan) belum pernah dilihat.
+  Status asing dari Meta disimpan apa adanya di cermin (varchar)
+  dan tampil sebagai chip netral di UI; hanya APPROVED yang bisa
+  dipakai broadcast.
+- Sinkron menarik SATU halaman (limit 200) — WABA dengan template
+  lebih dari itu butuh paging lanjutan.
+- Broadcast v1 hanya mengisi parameter BODY. Template dengan
+  variabel HEADER (hanya bisa lahir dari sinkron — formulir buat
+  melarang variabel header) akan ditolak Graph saat pengiriman per
+  penerima dan penerimanya berakhir failed berkode Graph, bukan
+  skipped.
+- Contoh variabel formulir buat dipisahkan koma — nilai contoh yang
+  mengandung koma tidak bisa diungkapkan di v1.
+- UI 10A belum diuji klik — menunggu uji UI user seperti fase-fase
+  sebelumnya; bundle web terverifikasi memuat string baru.
