@@ -33,7 +33,10 @@ import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
-import { runIntegrationLogReplay } from "./replay";
+import {
+  runIntegrationLogReplay,
+  runPlatformIntegrationLogReplay,
+} from "./replay";
 
 export interface LogsRoutesOptions {
   /** Allowlist mentah env PLATFORM_ADMIN_EMAILS (koma-terpisah). */
@@ -119,6 +122,11 @@ function toListInput(query: IntegrationLogListQuery): ListIntegrationLogsInput {
  *        lewat jalur pemrosesan webhook live (lihat ./replay.ts);
  *        tidak eligible → 422 LOG_REPLAY_NOT_ALLOWED /
  *        LOG_PAYLOAD_TRUNCATED; akun sumber hilang → 422.
+ *   POST /logs/unresolved/:logId/replay      (Fase 13A — platform admin)
+ *        replay baris tenant-NULL yang eligible lewat jalur live TANPA
+ *        konteks tenant (akun di-resolve ulang dari payload/id akun);
+ *        non-admin → 404 seperti daftar unresolved; auditnya baris
+ *        platform `integration.replay`.
  *   GET  /tenants/:tenantId/failed-messages  pusat pesan keluar `failed`
  *   POST /tenants/:tenantId/failed-messages/:messageId/retry
  *        antrekan ulang failed → queued secara atomik (core); channel
@@ -159,6 +167,9 @@ export function createLogsRoutes(
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
     );
     app.post(`${tenantBase}/:logId/replay`, (c) =>
+      apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
+    );
+    app.post("/logs/unresolved/:logId/replay", (c) =>
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured"),
     );
     app.get("/tenants/:tenantId/failed-messages", (c) =>
@@ -263,6 +274,55 @@ export function createLogsRoutes(
     const row = await getUnresolvedIntegrationLog(bundle.db, logId);
     if (!row) return apiError(c, 404, "NOT_FOUND", "Log entry not found");
     return c.json(serializeLogDetail(row));
+  });
+
+  // Fase 13A: replay baris tenant-NULL — gerbang platform admin yang
+  // sama seperti daftar/detail unresolved (non-admin 404), kelayakan
+  // yang sama seperti replay tenant, mesin di ./replay.ts.
+  app.post("/logs/unresolved/:logId/replay", async (c) => {
+    const appUser = c.get("appUser");
+    if (!isPlatformAdminEmail(appUser.email, opts.platformAdminEmails)) {
+      return apiError(c, 404, "NOT_FOUND", "Not found");
+    }
+    const logId = c.req.param("logId");
+    if (!z.string().uuid().safeParse(logId).success) {
+      return apiError(c, 404, "NOT_FOUND", "Log entry not found");
+    }
+    const row = await getUnresolvedIntegrationLog(bundle.db, logId);
+    if (!row) return apiError(c, 404, "NOT_FOUND", "Log entry not found");
+    const eligibility = evaluateIntegrationLogReplayEligibility(row);
+    if (!eligibility.ok) {
+      return apiError(
+        c,
+        422,
+        eligibility.code,
+        eligibility.code === "LOG_PAYLOAD_TRUNCATED"
+          ? "The stored payload for this entry is incomplete and cannot be replayed"
+          : "This log entry cannot be replayed",
+      );
+    }
+    if (!opts.replay) {
+      return apiError(c, 503, "INTERNAL_ERROR", "Replay is not configured");
+    }
+    const result = await runPlatformIntegrationLogReplay(
+      { bundle, ...opts.replay },
+      row,
+      appUser.id,
+    );
+    if (result.kind === "account_unavailable") {
+      return apiError(
+        c,
+        422,
+        "LOG_REPLAY_NOT_ALLOWED",
+        "The channel account for this event no longer exists",
+      );
+    }
+    const body = IntegrationLogReplayResponseSchema.parse({
+      replayed: true,
+      sourceLogId: row.id,
+      outcomes: result.outcomes,
+    });
+    return c.json(body);
   });
 
   // ---------------------------------------------------------------------

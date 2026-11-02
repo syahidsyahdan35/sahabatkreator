@@ -1,6 +1,7 @@
 import {
   recordIntegrationLog,
   recordIntegrationReplayAudit,
+  recordPlatformIntegrationReplayAudit,
   resolveTelegramAccountById,
   type IntegrationLogInboundOutcome,
   type RecordIntegrationLogInput,
@@ -145,6 +146,112 @@ export async function runIntegrationLogReplay(
     // Audit gagal tidak membatalkan replay yang sudah terjadi;
     // kegagalannya terlihat di log server, bukan ditelan senyap.
     console.error(`[logs] gagal menulis audit replay baris ${row.id}`, err);
+  }
+
+  return { kind: "done", outcomes };
+}
+
+/**
+ * Replay PLATFORM atas baris tenant-NULL (Fase 13A — sisa 7B.2 yang
+ * tidak terjangkau endpoint tenant di atas): baris sumber lahir tanpa
+ * tenant (event gagal SEBELUM atribusi tenant — mis. error pemrosesan
+ * payload Meta agregat), jadi replay-nya meniru jalur webhook LIVE
+ * tanpa konteks tenant:
+ * - Telegram: akun ditargetkan dari `channel_account_id` baris sumber
+ *   lewat lengan resolusi sempit yang sama; tenant efektif adalah
+ *   tenant AKUN itu (bukan dari baris). Tanpa id akun / akun hilang →
+ *   `account_unavailable` (422 di route).
+ * - Meta: prosesor dijalankan TANPA `tenantScopeId` — persis webhook
+ *   live: tiap event men-resolve akunnya sendiri lewat lengan
+ *   provider_external_lookup; event yang akunnya kini ada terproses ke
+ *   tenant pemiliknya, sisanya tercatat lagi sebagai baris baru.
+ * Auditnya baris PLATFORM (`integration.replay`, tenant NULL,
+ * meta.platform) lewat core — termasuk daftar tenant yang akhirnya
+ * ter-resolve dari baris-baris baru yang ditulis replay. Baris sumber
+ * tetap append-only seperti jalur tenant.
+ */
+export async function runPlatformIntegrationLogReplay(
+  deps: ReplayServiceDeps,
+  row: IntegrationLogRow,
+  userId: string,
+): Promise<ReplayRunResult> {
+  const { bundle } = deps;
+
+  const outcomes: IntegrationLogInboundOutcome[] = [];
+  const resolvedTenantIds = new Set<string>();
+  const provenance = ` · replay of log ${row.id.slice(0, 8)}`;
+  const log = async (entry: RecordIntegrationLogInput): Promise<void> => {
+    outcomes.push(entry.outcome as IntegrationLogInboundOutcome);
+    if (entry.tenantId) resolvedTenantIds.add(entry.tenantId);
+    try {
+      await recordIntegrationLog(bundle.db, {
+        ...entry,
+        summary: entry.summary
+          ? `${entry.summary}${provenance}`
+          : `replay of log ${row.id.slice(0, 8)}`,
+      });
+    } catch {
+      // Sengaja ditelan: log tidak boleh menjatuhkan pemrosesan.
+    }
+  };
+
+  try {
+    if (row.provider === "telegram") {
+      if (!row.channelAccountId) return { kind: "account_unavailable" };
+      const account = await resolveTelegramAccountById(
+        bundle.db,
+        row.channelAccountId,
+      );
+      if (!account) return { kind: "account_unavailable" };
+      resolvedTenantIds.add(account.tenantId);
+      await processTelegramUpdate(
+        {
+          db: bundle.db,
+          publisher: deps.publisher,
+          channelTokenSecret: deps.channelTokenSecret,
+          telegramApiBase: deps.telegramApiBase,
+          log,
+        },
+        account,
+        row.payload,
+      );
+    } else {
+      // TANPA tenantScopeId — semantik webhook live (lihat docstring).
+      await processMetaWebhookPayload(
+        {
+          db: bundle.db,
+          publisher: deps.publisher,
+          channelTokenSecret: deps.channelTokenSecret,
+          metaApiBase: deps.metaApiBase,
+          graphApiVersion: deps.graphApiVersion,
+          log,
+        },
+        row.payload,
+      );
+    }
+  } catch (err) {
+    // Sama seperti jalur tenant: prosesor mencatat baris `error`
+    // sebelum melempar; outcome itu sudah melewati sink di atas.
+    console.error(
+      `[logs] replay platform baris ${row.id} berakhir dengan error pemrosesan`,
+      err,
+    );
+    if (outcomes.length === 0) outcomes.push("error");
+  }
+
+  try {
+    await recordPlatformIntegrationReplayAudit(bundle.db, {
+      userId,
+      sourceLogId: row.id,
+      provider: row.provider,
+      outcomes,
+      resolvedTenantIds: [...resolvedTenantIds],
+    });
+  } catch (err) {
+    console.error(
+      `[logs] gagal menulis audit replay platform baris ${row.id}`,
+      err,
+    );
   }
 
   return { kind: "done", outcomes };

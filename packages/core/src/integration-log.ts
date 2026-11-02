@@ -470,3 +470,42 @@ export async function recordIntegrationReplayAudit(
     });
   });
 }
+
+/**
+ * Audit replay PLATFORM atas baris tenant-NULL (Fase 13A — menutup sisa
+ * 7B.2): baris sumber tidak ber-tenant, jadi auditnya juga baris
+ * PLATFORM (`tenant_id` NULL, aksi `integration.replay` yang sama,
+ * `meta.platform: true`) yang hanya bisa ditulis/dibaca dalam transaksi
+ * ber-flag `app.platform_settings='admin'` (policy `platform_audit`,
+ * pola 6C). `resolvedTenantIds` mencatat tenant yang akhirnya ter-resolve
+ * oleh pemrosesan ulang (akun telegram pemilik baris / event Meta yang
+ * kini menemukan akunnya) — bisa kosong bila replay tetap tak menemukan
+ * tenant. Seperti audit replay tenant: BOLEH melempar agar kegagalannya
+ * terlihat, TANPA payload/secret.
+ */
+export async function recordPlatformIntegrationReplayAudit(
+  db: Database,
+  input: {
+    userId: string;
+    sourceLogId: string;
+    provider: string;
+    outcomes: IntegrationLogOutcome[];
+    resolvedTenantIds: string[];
+  },
+): Promise<void> {
+  await withPlatformLogTx(db, async (tx) => {
+    await tx.insert(auditLogs).values({
+      tenantId: null,
+      actorType: "user",
+      actorId: input.userId,
+      action: "integration.replay",
+      meta: {
+        platform: true,
+        sourceLogId: input.sourceLogId,
+        provider: input.provider,
+        outcomes: input.outcomes,
+        resolvedTenantIds: input.resolvedTenantIds,
+      },
+    });
+  });
+}

@@ -354,6 +354,7 @@ export {
   isIntegrationLogPayloadTruncated,
   evaluateIntegrationLogReplayEligibility,
   recordIntegrationReplayAudit,
+  recordPlatformIntegrationReplayAudit,
   type IntegrationLogDirection,
   type IntegrationLogInboundOutcome,
   type IntegrationLogOutboundOutcome,
