@@ -26,7 +26,7 @@ const USER_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const PLAN_ID = "99999999-9999-4999-8999-999999999999";
 
-// Ekstensi `vector` (pgvector) didaftarkan eksplisit: migrasi 0009 menjalankan
+// Ekstensi `vector` (pgvector) didaftarkan eksplisit: baseline 0000 menjalankan
 // CREATE EXTENSION vector dan membuat kolom vector(1536) di kb_chunks.
 // Di staging ekstensi yang sama tersedia dari image pgvector/pgvector:pg16.
 const db = new PGlite({ extensions: { vector } });
@@ -35,7 +35,7 @@ const db = new PGlite({ extensions: { vector } });
 const files = (await readdir(migrationsDir))
   .filter((f) => f.endsWith(".sql"))
   .sort();
-assert.ok(files.length >= 2, `diharapkan >=2 file migrasi, ditemukan ${files.length}`);
+assert.ok(files.length >= 1, `diharapkan >=1 file migrasi, ditemukan ${files.length}`);
 for (const file of files) {
   const sqlText = await readFile(path.join(migrationsDir, file), "utf8");
   await db.exec(sqlText.replaceAll("--> statement-breakpoint", ""));
@@ -155,6 +155,8 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada comments (Fase 10B, migrasi 0037) = 56.
 // + tenant_isolation pada kb_source_documents (Fase 12C, migrasi
 //   0039) = 57.
+// Sejak Fase 11A.1 seluruh provenance di atas tiba lewat SATU file
+// baseline (squash 0000-0040); hitungan akhirnya tetap 57.
 assert.equal(Number(policies.rows[0].count), 57);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
@@ -2019,7 +2021,8 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
 }
 
 // ---------- 31. Fase 12A: flow_runs.trigger_message_id NULLABLE ----------
-// Migrasi 0038 (prasyarat node goto_flow): (a) kolom trigger_message_id
+// Dulu migrasi 0038 (prasyarat node goto_flow), kini bagian baseline:
+// (a) kolom trigger_message_id
 // kini is_nullable = YES; (b) run goto (trigger NULL) bisa ditulis dalam
 // konteks tenant pemilik; (c) DUA run NULL pada flow yang sama sama-sama
 // diterima — index unik parsial memang mengabaikan NULL, sehingga
@@ -2062,12 +2065,12 @@ const GOTO_RUN_2 = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2";
   assert.equal(views.own.rows[0].n, "2");
   assert.equal(views.other.rows[0].n, "0");
   console.log(
-    "[31] Fase 12A: flow_runs.trigger_message_id nullable (migrasi 0038) — run goto tanpa pesan pemicu tersimpan; dua run NULL pada flow sama diterima (unik parsial abaikan NULL); tenant lain 0 baris: OK",
+    "[31] Fase 12A: flow_runs.trigger_message_id nullable (baseline; dulu migrasi 0038) — run goto tanpa pesan pemicu tersimpan; dua run NULL pada flow sama diterima (unik parsial abaikan NULL); tenant lain 0 baris: OK",
   );
 }
 
 // ---------- 32. Fase 12C: lampiran berkas KB (kb_source_documents) ----------
-// Migrasi 0039: (a) kolom kb_documents.source_document_id nullable ada;
+// Dulu migrasi 0039, kini bagian baseline: (a) kolom kb_documents.source_document_id nullable ada;
 // (b) baris berkas + entri turunan + chunk bisa ditulis dalam konteks
 // tenant pemilik, byte bytea terbaca kembali utuh; (c) tenant lain 0
 // baris dan insert lintas tenant ditolak RLS; (d) menghapus baris
@@ -2150,7 +2153,7 @@ const KB_MANUAL_12C = "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3";
   assert.equal(after.rows[0].chunks, "0");
   assert.equal(after.rows[0].manual, "1");
   console.log(
-    "[32] Fase 12C: kb_source_documents (migrasi 0039) — berkas+entri+chunk tertulis dalam konteks pemilik, bytea utuh, tenant lain 0 baris & insert lintas ditolak RLS; hapus berkas men-cascade entri+chunk, entri manual tetap: OK",
+    "[32] Fase 12C: kb_source_documents (baseline; dulu migrasi 0039) — berkas+entri+chunk tertulis dalam konteks pemilik, bytea utuh, tenant lain 0 baris & insert lintas ditolak RLS; hapus berkas men-cascade entri+chunk, entri manual tetap: OK",
   );
 }
 
@@ -2224,9 +2227,10 @@ function oneHotVector(index: number): string {
   );
 }
 
-// ---------- 34. Fase 11A: normalisasi skema (migrasi 0040) ----------
+// ---------- 34. Fase 11A + 11A.1: normalisasi & baseline squash ----------
 {
-  // Dua kolom warisan yang dijatuhkan 0040 tidak boleh ada lagi.
+  // Dua kolom warisan yang dijatuhkan 0040 (pra-squash) tidak boleh ada
+  // lagi — ketiadaannya kini bagian dari baseline 0000.
   const dropped = await db.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM information_schema.columns
       WHERE table_schema = 'public'
@@ -2235,7 +2239,7 @@ function oneHotVector(index: number): string {
   );
   assert.equal(dropped.rows[0].count, "0");
 
-  // 12 index FK baru dari 0040 semuanya terpasang.
+  // 12 index FK baru dari 0040 (kini bagian baseline) semuanya terpasang.
   const idx = await db.query<{ indexname: string }>(
     `SELECT indexname FROM pg_indexes
       WHERE schemaname = 'public' AND indexname IN (
@@ -2261,7 +2265,7 @@ function oneHotVector(index: number): string {
   assert.equal(counts.rows[0].tables, "44");
   assert.equal(counts.rows[0].policies, "57");
   console.log(
-    "[34] Fase 11A: migrasi 0040 — contacts.avatar_url & messages.provider_cost terjatuhkan, 12 index FK baru terpasang, tabel tetap 44 & policy tetap 57: OK",
+    "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel tetap 44 & policy tetap 57: OK",
   );
 }
 
