@@ -5791,3 +5791,65 @@ Dokumen lengkap: `docs/DB-MIGRATION-BASELINE-11A1.md`. Ringkasan:
   smoke ringkas di DB buangan baseline (API+worker rantai, LLM mock):
   **13 PASS / 0 FAIL** (register → workspace → KB → agen membalas
   mengutip fakta KB → webchat → v1 scope 200/403).
+
+## Fase 11B — Integrasi Email Resend (2026-11-03)
+
+- **Pengaturan platform**: Panel Admin `/admin` bertambah seksi
+  "Email (Resend)": `resend_api_key` (rahasia AES + tombol Uji →
+  `GET /domains` Resend; kode jujur `RESEND_AUTH_FAILED` /
+  `RESEND_UNREACHABLE` / `NOT_CONFIGURED`; info = jumlah domain) dan
+  identitas pengirim PUBLIK `resend_from_email` / `resend_from_name`
+  (ditampilkan sebagai nilai efektif, pola identifier Meta 7D).
+  Resolver panel→env seperti kunci lain; env cadangan
+  `RESEND_API_KEY` / `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` +
+  override basis URL `RESEND_API_BASE` (bawaan https://api.resend.com)
+  untuk mock rantai.
+- **Layanan email di core** (`packages/core/src/email.ts`): `sendEmail`
+  REST fetch polos; tanpa kunci/identitas → status eksplisit
+  `not_configured` (bukan error lempar); kegagalan provider →
+  `{code, message}` terstruktur (nama error Resend / `RESEND_HTTP_*` /
+  `RESEND_UNREACHABLE`), kunci tak pernah masuk log/hasil.
+- **Undangan tim terkirim**: pembuatan undangan mengantrekan event
+  outbox `team.invitation_email_requested` → job BullMQ
+  `team.invitation_email` (3 percobaan, backoff eksponensial). Tabel
+  `invitations` tetap hash-only — token mentah hanya hidup sebagai
+  ciphertext AES-GCM (`CHANNEL_TOKEN_SECRET`) di payload outbox, dan
+  hanya muncul di email penerima + respons buat. Isi email DWIBAHASA
+  satu pesan (EN utama, ID di bawah). Respons buat menyatakan
+  `emailDelivery: "queued" | "not_configured"`; hasil kirim tercatat
+  di kolom baru `email_sent_at` / `email_error` (ringkas, tanpa
+  token/isi). Kegagalan kirim TIDAK menggagalkan undangan; pengiriman
+  ulang manual TIDAK dibuat fase ini.
+- **Migrasi HASIL `pnpm db:generate`** (dogfooding 11A.1): skema diubah
+  di `packages/db/src/schema/tenants.ts` → generate menghasilkan
+  `0001_invitation_email.sql` (2 `ALTER TABLE` murni) +
+  `meta/0001_snapshot.json`; jurnal migrasi kini **2 entri**; generate
+  ulang membuktikan "No schema changes". PGlite verify bertambah
+  seksi [35] (kolom ada + isolasi tenant).
+- **Sinkronisasi kontrak**: permukaan admin/dashboard saja — TIDAK ada
+  perubahan API v1/SDK/MCP (tim/undangan dashboard-only per matriks
+  15A); `pnpm check:drift` lulus.
+- **Verifikasi**: typecheck monorepo hijau; PGlite SEMUA LULUS (35
+  seksi); build semua dist + grep bundle (`resend_api_key`,
+  `team.invitation_email`, label UI); deploy staging: migrasi
+  teraplikasi (jurnal 2, kolom ada), 4 service restart, health ok,
+  `.env.staging` byte-identik (`9c1ded2a…`). Rantai terisolasi di
+  server (DB buangan + API/worker :3212 + Redis DB 9 + mock Resend
+  lokal): **30/31 PASS** — panel set/test baik & salah jujur, undangan
+  queued → mock menangkap email (from = identitas panel, subject =
+  nama workspace, text memuat inviteUrl persis, dwibahasa),
+  `email_sent_at` terisi, payload outbox tanpa token mentah, terima
+  undangan dari tautan bekerja, tanpa kunci → `not_configured` tanpa
+  email, mock 500 → `email_error` tercatat + tepat 3 percobaan +
+  undangan tetap sah & bisa diterima, regresi 9C (409 member, cabut
+  204). Satu FAIL = probe URL publik DARI dalam server (hairpin
+  Cloudflare); health publik terverifikasi ok dari VM + localhost
+  server. Rantai dibersihkan total (DB di-drop, Redis DB 9 di-flush,
+  port bebas).
+- **Batas jujur**: staging saat deploy TIDAK lagi perawan — user sudah
+  mulai ujicoba ulang dari awal (1 akun/workspace + sebagian kunci
+  panel terisi); data itu TIDAK disentuh fase ini. Bukti LIVE Resend
+  menunggu user membuat akun Resend + verifikasi domain pengirim
+  (DNS), lalu mengisi kunci lewat Panel Admin. Email reset password
+  BELUM diwire ke Resend — kandidat lanjutan (perlu hook pengiriman
+  Better Auth), tidak dikerjakan diam-diam di fase ini.
