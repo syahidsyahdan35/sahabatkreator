@@ -20,6 +20,10 @@ import type {
   CreateBroadcastRequest,
   ScheduleBroadcastRequest,
   UpdateBroadcastRequest,
+  CreateWhatsAppTemplateRequest,
+  SyncWhatsAppTemplatesResponse,
+  WhatsAppTemplateListResponse,
+  WhatsAppTemplateResponse,
   ChannelAccountListResponse,
   ChannelAccountResponse,
   ContactDuplicatesResponse,
@@ -1027,6 +1031,46 @@ export const api = {
       return request<BroadcastRecipientListResponse>(
         `/api/tenants/${tenantId}/broadcasts/${broadcastId}/recipients${qs ? `?${qs}` : ""}`,
         { method: "GET" },
+      );
+    },
+  },
+  whatsappTemplates: {
+    /** GET /api/tenants/:tenantId/whatsapp-templates?channelAccountId= → cermin lokal (Fase 10A). */
+    list(
+      tenantId: string,
+      channelAccountId: string,
+    ): Promise<WhatsAppTemplateListResponse> {
+      const params = new URLSearchParams({ channelAccountId });
+      return request<WhatsAppTemplateListResponse>(
+        `/api/tenants/${tenantId}/whatsapp-templates?${params.toString()}`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/whatsapp-templates/sync → tarik dari Meta (owner/admin). */
+    sync(
+      tenantId: string,
+      channelAccountId: string,
+    ): Promise<SyncWhatsAppTemplatesResponse> {
+      return request<SyncWhatsAppTemplatesResponse>(
+        `/api/tenants/${tenantId}/whatsapp-templates/sync`,
+        { method: "POST", body: JSON.stringify({ channelAccountId }) },
+      );
+    },
+    /** POST /api/tenants/:tenantId/whatsapp-templates → buat di Meta + cermin (owner/admin). */
+    create(
+      tenantId: string,
+      input: CreateWhatsAppTemplateRequest,
+    ): Promise<WhatsAppTemplateResponse> {
+      return request<WhatsAppTemplateResponse>(
+        `/api/tenants/${tenantId}/whatsapp-templates`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/whatsapp-templates/:id → hapus di Meta + cermin (owner/admin). */
+    async remove(tenantId: string, templateId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/whatsapp-templates/${templateId}`,
+        { method: "DELETE" },
       );
     },
   },

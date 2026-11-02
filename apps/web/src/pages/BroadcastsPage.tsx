@@ -6,6 +6,8 @@ import type {
   BroadcastStatus,
   ChannelAccountResponse,
   ChannelProvider,
+  CreateWhatsAppTemplateRequest,
+  WhatsAppTemplateResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
@@ -37,6 +39,9 @@ const SUPPORTED_PROVIDERS: ReadonlySet<ChannelProvider> = new Set([
   "telegram",
   "messenger",
   "instagram",
+  // Fase 10A: WhatsApp didukung lewat template resmi (pemilih template
+  // di formulir); webchat tetap satu-satunya yang tidak didukung.
+  "whatsapp",
 ]);
 
 const STATUS_CHIP: Record<
@@ -87,13 +92,50 @@ const SKIP_REASON_LABEL_KEYS: Record<string, TranslationKey> = {
   opted_out: "broadcasts.skipReasonOptedOut",
   outside_24h_window: "broadcasts.skipReasonOutside24h",
   message_deleted: "broadcasts.skipReasonMessageDeleted",
+  template_variable_missing: "broadcasts.skipReasonTemplateVariableMissing",
+  missing_phone_number: "broadcasts.skipReasonMissingPhone",
 };
 
 const DISPATCH_ERROR_LABEL_KEYS: Record<string, TranslationKey> = {
   CHANNEL_DISCONNECTED: "broadcasts.dispatchErrorCHANNEL_DISCONNECTED",
   AUDIENCE_EMPTY: "broadcasts.dispatchErrorAUDIENCE_EMPTY",
   CHANNEL_UNSUPPORTED: "broadcasts.dispatchErrorCHANNEL_UNSUPPORTED",
+  BROADCAST_TEMPLATE_REQUIRED: "broadcasts.dispatchErrorBROADCAST_TEMPLATE_REQUIRED",
+  BROADCAST_TEMPLATE_NOT_APPROVED:
+    "broadcasts.dispatchErrorBROADCAST_TEMPLATE_NOT_APPROVED",
 };
+
+/** Chip status persetujuan template Meta (Fase 10A). */
+function TemplateStatusChip({
+  t,
+  status,
+}: {
+  t: Translate;
+  status: string;
+}) {
+  const known: Record<string, { labelKey: TranslationKey; className: string }> = {
+    APPROVED: {
+      labelKey: "whatsappTemplates.statusApproved",
+      className: "bg-success-soft text-success",
+    },
+    PENDING: {
+      labelKey: "whatsappTemplates.statusPending",
+      className: "bg-warning-soft text-warning",
+    },
+    REJECTED: {
+      labelKey: "whatsappTemplates.statusRejected",
+      className: "bg-danger-soft text-danger",
+    },
+  };
+  const chip = known[status];
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${chip?.className ?? "bg-surface-2 text-muted"}`}
+    >
+      {chip ? t(chip.labelKey) : status}
+    </span>
+  );
+}
 
 function StatusChip({ t, status }: { t: Translate; status: BroadcastStatus }) {
   const chip = STATUS_CHIP[status];
@@ -123,13 +165,17 @@ type View =
  * Halaman Broadcasts (Fase 7C): daftar kampanye siaran + formulir buat/
  * edit draf + panel detail berisi statistik & daftar penerima.
  *
- * Keputusan v1 yang terlihat di UI (jujur, dwibahasa): WhatsApp &
- * webchat tampil NONAKTIF beralasan di pemilih channel (WA menunggu
- * template resmi; webchat tanpa semantik push); penerima Meta di luar
- * jendela 24 jam tampil sebagai `skipped` beralasan, bukan gagal.
- * Mutasi hanya untuk owner/admin (selaras API); member biasa membaca.
- * Konfirmasi batal/hapus memakai pola dua langkah sebaris (klik →
- * tombol berubah menjadi konfirmasi), konsisten tanpa modal global.
+ * Keputusan v1 yang terlihat di UI (jujur, dwibahasa): webchat tampil
+ * NONAKTIF beralasan di pemilih channel (tanpa semantik push);
+ * WhatsApp (Fase 10A) mengirim TEMPLATE resmi yang disetujui —
+ * formulirnya menukar kotak teks bebas dengan pemilih template +
+ * pemetaan variabel per posisi; penerima Meta di luar jendela 24 jam
+ * tampil sebagai `skipped` beralasan, bukan gagal. Seksi Template
+ * WhatsApp di bawah daftar mengelola cermin template per akun
+ * (sinkron/buat/hapus ke Meta). Mutasi hanya untuk owner/admin
+ * (selaras API); member biasa membaca. Konfirmasi batal/hapus memakai
+ * pola dua langkah sebaris (klik → tombol berubah menjadi konfirmasi),
+ * konsisten tanpa modal global.
  */
 export function BroadcastsPage({ t, locale }: BroadcastsPageProps) {
   const { status, active } = useWorkspace();
@@ -433,6 +479,12 @@ export function BroadcastsPage({ t, locale }: BroadcastsPageProps) {
           </button>
         </div>
       ) : null}
+
+      <WhatsAppTemplatesSection
+        t={t}
+        tenantId={tenantId}
+        canManage={canManage}
+      />
     </section>
   );
 }
@@ -455,6 +507,14 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     editing?.channelAccountId ?? "",
   );
   const [messageText, setMessageText] = useState(editing?.messageText ?? "");
+  // Fase 10A: mode WhatsApp — template terpilih + sumber variabelnya.
+  const [whatsappTemplateId, setWhatsappTemplateId] = useState(
+    editing?.whatsappTemplateId ?? "",
+  );
+  const [variableSources, setVariableSources] = useState<string[]>(
+    editing?.templateVariableSources ?? [],
+  );
+  const [waTemplates, setWaTemplates] = useState<WhatsAppTemplateResponse[]>([]);
   const [tagsText, setTagsText] = useState(
     editing?.audienceFilter.tags?.join(", ") ?? "",
   );
@@ -500,6 +560,28 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
   const isMeta =
     selectedChannel?.provider === "messenger" ||
     selectedChannel?.provider === "instagram";
+  const isWhatsApp = selectedChannel?.provider === "whatsapp";
+  const selectedTemplate = waTemplates.find((tpl) => tpl.id === whatsappTemplateId);
+
+  // Muat cermin template setiap kali channel WhatsApp terpilih berubah.
+  useEffect(() => {
+    if (!tenantId || !isWhatsApp || !channelAccountId) {
+      setWaTemplates([]);
+      return;
+    }
+    let cancelled = false;
+    api.whatsappTemplates
+      .list(tenantId, channelAccountId)
+      .then((res) => {
+        if (!cancelled) setWaTemplates(res.templates);
+      })
+      .catch(() => {
+        if (!cancelled) setWaTemplates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, isWhatsApp, channelAccountId]);
 
   // Estimasi audiens live (debounce 400ms) mengikuti channel + filter.
   useEffect(() => {
@@ -529,15 +611,37 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     return () => clearTimeout(timer);
   }, [tenantId, channelAccountId, tagsText, stagesText]);
 
-  const buildInput = () => ({
-    name: name.trim(),
-    channelAccountId,
-    messageText: messageText.trim(),
-    audienceFilter: {
+  const buildInput = () => {
+    const audienceFilter = {
       tags: splitCommaList(tagsText),
       stages: splitCommaList(stagesText),
-    },
-  });
+    };
+    if (isWhatsApp) {
+      // Sumber variabel per posisi; posisi kosong di tengah
+      // dipertahankan (makna posisional), ekor kosong dipangkas.
+      const count = selectedTemplate?.variableCount ?? 0;
+      const sources: string[] = [];
+      for (let i = 0; i < count; i++) {
+        sources.push((variableSources[i] ?? "").trim());
+      }
+      while (sources.length > 0 && sources[sources.length - 1] === "") {
+        sources.pop();
+      }
+      return {
+        name: name.trim(),
+        channelAccountId,
+        whatsappTemplateId: whatsappTemplateId || undefined,
+        templateVariableSources: sources,
+        audienceFilter,
+      };
+    }
+    return {
+      name: name.trim(),
+      channelAccountId,
+      messageText: messageText.trim(),
+      audienceFilter,
+    };
+  };
 
   const save = async (andSchedule: boolean) => {
     if (!tenantId || saving) return;
@@ -567,6 +671,10 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
   const inputClass =
     "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink";
   const labelClass = "block text-sm font-medium text-ink";
+  // Mode WhatsApp: isi broadcast adalah template (bukan teks bebas).
+  const contentReady = isWhatsApp
+    ? !!whatsappTemplateId
+    : !!messageText.trim();
 
   return (
     <section>
@@ -621,7 +729,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
                   {PROVIDER_NAMES[ch.provider]}
                   {ch.displayName ? ` · ${ch.displayName}` : ""}
                   {!supported
-                    ? ` — ${ch.provider === "whatsapp" ? t("broadcasts.channelWhatsappUnsupported") : t("broadcasts.channelWebchatUnsupported")}`
+                    ? ` — ${t("broadcasts.channelWebchatUnsupported")}`
                     : ch.status !== "connected"
                       ? ` — ${t("broadcasts.channelDisconnected")}`
                       : ""}
@@ -629,12 +737,16 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
               );
             })}
           </select>
-          <p className="mt-1 text-xs text-muted">
-            {t("broadcasts.channelWhatsappUnsupported")}
-          </p>
-          <p className="mt-1 text-xs text-muted">
-            {t("broadcasts.channelWebchatUnsupported")}
-          </p>
+          {isWhatsApp ? (
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.channelWhatsappUnsupported")}
+            </p>
+          ) : null}
+          {selectedChannel?.provider === "webchat" ? (
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.channelWebchatUnsupported")}
+            </p>
+          ) : null}
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -692,29 +804,115 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
               {isMeta ? (
                 <p>{t("broadcasts.estimateWindowNote")}</p>
               ) : null}
+              {isWhatsApp ? (
+                <p>{t("broadcasts.estimateTemplateNote")}</p>
+              ) : null}
             </div>
           ) : (
             <p className="mt-1 text-sm text-muted">—</p>
           )}
         </div>
 
-        <div>
-          <label className={labelClass} htmlFor="bc-message">
-            {t("broadcasts.messageLabel")}
-          </label>
-          <textarea
-            id="bc-message"
-            className={inputClass}
-            rows={5}
-            value={messageText}
-            onChange={(e) => setMessageText(e.target.value)}
-            placeholder={t("broadcasts.messagePlaceholder")}
-            maxLength={4096}
-          />
-          <p className="mt-1 text-xs text-muted">
-            {t("broadcasts.messageHint")}
-          </p>
-        </div>
+        {isWhatsApp ? (
+          <div>
+            <label className={labelClass} htmlFor="bc-template">
+              {t("broadcasts.templateLabel")}
+            </label>
+            <select
+              id="bc-template"
+              className={inputClass}
+              value={whatsappTemplateId}
+              onChange={(e) => setWhatsappTemplateId(e.target.value)}
+            >
+              <option value="">
+                {t("broadcasts.templateSelectPlaceholder")}
+              </option>
+              {waTemplates.map((tpl) => (
+                <option
+                  key={tpl.id}
+                  value={tpl.id}
+                  disabled={tpl.status !== "APPROVED"}
+                >
+                  {tpl.name} · {tpl.language} · {tpl.category}
+                  {tpl.status !== "APPROVED" ? ` — ${tpl.status}` : ""}
+                </option>
+              ))}
+            </select>
+            {waTemplates.filter((tpl) => tpl.status === "APPROVED").length ===
+            0 ? (
+              <p className="mt-1 text-xs text-warning">
+                {t("broadcasts.templateNoneApproved")}
+              </p>
+            ) : null}
+            {selectedTemplate ? (
+              <div className="mt-3 rounded-lg bg-surface-2 p-3">
+                <p className="text-xs font-medium text-muted">
+                  {t("broadcasts.templatePreviewLabel")}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-sm text-ink">
+                  {selectedTemplate.bodyText ??
+                    t("whatsappTemplates.noBody")}
+                </p>
+              </div>
+            ) : null}
+            {selectedTemplate && selectedTemplate.variableCount > 0 ? (
+              <div className="mt-3 space-y-2">
+                <p className="text-sm font-medium text-ink">
+                  {t("broadcasts.templateVariablesTitle")}
+                </p>
+                {Array.from(
+                  { length: selectedTemplate.variableCount },
+                  (_, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <label
+                        className="w-24 shrink-0 text-xs text-muted"
+                        htmlFor={`bc-var-${i}`}
+                      >
+                        {t("broadcasts.templateVariableSourceLabel", {
+                          n: i + 1,
+                        })}
+                      </label>
+                      <input
+                        id={`bc-var-${i}`}
+                        className={inputClass}
+                        value={variableSources[i] ?? ""}
+                        onChange={(e) => {
+                          const next = [...variableSources];
+                          next[i] = e.target.value;
+                          setVariableSources(next);
+                        }}
+                        placeholder={t(
+                          "broadcasts.templateVariableSourcePlaceholder",
+                        )}
+                      />
+                    </div>
+                  ),
+                )}
+                <p className="text-xs text-muted">
+                  {t("broadcasts.templateVariableSourceHint")}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div>
+            <label className={labelClass} htmlFor="bc-message">
+              {t("broadcasts.messageLabel")}
+            </label>
+            <textarea
+              id="bc-message"
+              className={inputClass}
+              rows={5}
+              value={messageText}
+              onChange={(e) => setMessageText(e.target.value)}
+              placeholder={t("broadcasts.messagePlaceholder")}
+              maxLength={4096}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.messageHint")}
+            </p>
+          </div>
+        )}
 
         <fieldset>
           <legend className={labelClass}>{t("broadcasts.whenLabel")}</legend>
@@ -752,7 +950,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
         <div className="flex flex-wrap gap-2 pb-8">
           <button
             type="button"
-            disabled={saving || !name.trim() || !channelAccountId || !messageText.trim()}
+            disabled={saving || !name.trim() || !channelAccountId || !contentReady}
             onClick={() => void save(true)}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
           >
@@ -760,7 +958,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
           </button>
           <button
             type="button"
-            disabled={saving || !name.trim() || !channelAccountId || !messageText.trim()}
+            disabled={saving || !name.trim() || !channelAccountId || !contentReady}
             onClick={() => void save(false)}
             className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-ink hover:bg-surface-2 disabled:opacity-50"
           >
@@ -977,5 +1175,520 @@ function BroadcastDetail({ t, locale, tenantId, broadcastId, onBack }: Broadcast
         </>
       )}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Seksi Template WhatsApp (Fase 10A) — cermin lokal template resmi Meta
+// per akun WhatsApp: sinkron dari Meta, buat baru (formulir sederhana),
+// hapus (dua langkah). Sengaja tinggal di halaman Broadcasts karena
+// konsumen utamanya adalah broadcast; Channels tetap halaman koneksi.
+// ---------------------------------------------------------------------------
+
+interface WhatsAppTemplatesSectionProps {
+  t: Translate;
+  tenantId: string | null;
+  canManage: boolean;
+}
+
+interface TemplateButtonDraft {
+  type: "URL" | "QUICK_REPLY";
+  text: string;
+  url: string;
+}
+
+function WhatsAppTemplatesSection({
+  t,
+  tenantId,
+  canManage,
+}: WhatsAppTemplatesSectionProps) {
+  const [channels, setChannels] = useState<ChannelAccountResponse[]>([]);
+  const [channelAccountId, setChannelAccountId] = useState("");
+  const [templates, setTemplates] = useState<WhatsAppTemplateResponse[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(
+    null,
+  );
+  const [showForm, setShowForm] = useState(false);
+
+  // Keadaan formulir buat template.
+  const [tplName, setTplName] = useState("");
+  const [tplLanguage, setTplLanguage] = useState("id");
+  const [tplCategory, setTplCategory] =
+    useState<CreateWhatsAppTemplateRequest["category"]>("UTILITY");
+  const [tplHeader, setTplHeader] = useState("");
+  const [tplBody, setTplBody] = useState("");
+  const [tplExamples, setTplExamples] = useState("");
+  const [tplFooter, setTplFooter] = useState("");
+  const [tplButtons, setTplButtons] = useState<TemplateButtonDraft[]>([]);
+
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    api.channels
+      .list(tenantId)
+      .then((list) => {
+        if (cancelled) return;
+        const wa = list.filter((ch) => ch.provider === "whatsapp");
+        setChannels(wa);
+        const firstConnected = wa.find((ch) => ch.status === "connected");
+        if (firstConnected) {
+          setChannelAccountId((prev) => prev || firstConnected.id);
+        } else if (wa[0]) {
+          setChannelAccountId((prev) => prev || wa[0].id);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setChannels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const loadTemplates = useCallback(
+    async (accountId: string) => {
+      if (!tenantId || !accountId) return;
+      setLoading(true);
+      try {
+        const res = await api.whatsappTemplates.list(tenantId, accountId);
+        setTemplates(res.templates);
+      } catch (err) {
+        setError(translateApiError(t, err));
+        setTemplates([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [tenantId, t],
+  );
+
+  useEffect(() => {
+    if (channelAccountId) void loadTemplates(channelAccountId);
+  }, [channelAccountId, loadTemplates]);
+
+  const selectedChannel = channels.find((ch) => ch.id === channelAccountId);
+  const channelConnected = selectedChannel?.status === "connected";
+
+  const sync = async () => {
+    if (!tenantId || !channelAccountId || syncing) return;
+    setSyncing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.whatsappTemplates.sync(tenantId, channelAccountId);
+      setTemplates(res.templates);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const create = async () => {
+    if (!tenantId || !channelAccountId || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const examples = tplExamples
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const input: CreateWhatsAppTemplateRequest = {
+        channelAccountId,
+        name: tplName.trim(),
+        language: tplLanguage.trim(),
+        category: tplCategory,
+        bodyText: tplBody.trim(),
+        ...(tplHeader.trim() ? { headerText: tplHeader.trim() } : {}),
+        ...(examples.length > 0 ? { bodyExamples: examples } : {}),
+        ...(tplFooter.trim() ? { footerText: tplFooter.trim() } : {}),
+        ...(tplButtons.length > 0
+          ? {
+              buttons: tplButtons.map((b) =>
+                b.type === "URL"
+                  ? { type: "URL" as const, text: b.text.trim(), url: b.url.trim() }
+                  : { type: "QUICK_REPLY" as const, text: b.text.trim() },
+              ),
+            }
+          : {}),
+      };
+      await api.whatsappTemplates.create(tenantId, input);
+      setNotice(t("whatsappTemplates.createdNote"));
+      setShowForm(false);
+      setTplName("");
+      setTplHeader("");
+      setTplBody("");
+      setTplExamples("");
+      setTplFooter("");
+      setTplButtons([]);
+      await loadTemplates(channelAccountId);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (tpl: WhatsAppTemplateResponse) => {
+    if (!tenantId || busy) return;
+    if (confirmingDelete !== tpl.id) {
+      setConfirmingDelete(tpl.id);
+      return;
+    }
+    setConfirmingDelete(null);
+    setBusy(true);
+    setError(null);
+    try {
+      await api.whatsappTemplates.remove(tenantId, tpl.id);
+      await loadTemplates(channelAccountId);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputClass =
+    "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink";
+  const labelClass = "block text-sm font-medium text-ink";
+  const createValid =
+    !!tplName.trim() && !!tplLanguage.trim() && !!tplBody.trim();
+
+  return (
+    <div className="mt-12 border-t border-border pt-8">
+      <h2 className="text-xl font-bold text-ink">
+        {t("whatsappTemplates.title")}
+      </h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted">
+        {t("whatsappTemplates.subtitle")}
+      </p>
+
+      {channels.length === 0 ? (
+        <p className="mt-4 rounded-lg bg-surface-2 px-3 py-2 text-sm text-muted">
+          {t("whatsappTemplates.noChannel")}
+        </p>
+      ) : (
+        <>
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <div className="min-w-56">
+              <label className={labelClass} htmlFor="wt-channel">
+                {t("whatsappTemplates.channelLabel")}
+              </label>
+              <select
+                id="wt-channel"
+                className={inputClass}
+                value={channelAccountId}
+                onChange={(e) => setChannelAccountId(e.target.value)}
+              >
+                {channels.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    {ch.displayName ?? "WhatsApp"}
+                    {ch.status !== "connected"
+                      ? ` — ${t("broadcasts.channelDisconnected")}`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {canManage && channelConnected ? (
+              <>
+                <button
+                  type="button"
+                  disabled={syncing || !channelAccountId}
+                  onClick={() => void sync()}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-ink hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {syncing
+                    ? t("whatsappTemplates.syncing")
+                    : t("whatsappTemplates.syncAction")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowForm((v) => !v)}
+                  className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+                >
+                  {t("whatsappTemplates.createAction")}
+                </button>
+              </>
+            ) : null}
+          </div>
+
+          {error ? (
+            <p className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">
+              {error}
+            </p>
+          ) : null}
+          {notice ? (
+            <p className="mt-4 rounded-lg bg-success-soft px-3 py-2 text-sm text-success">
+              {notice}
+            </p>
+          ) : null}
+
+          {showForm && canManage ? (
+            <div className="mt-5 max-w-2xl space-y-4 rounded-xl border border-border bg-surface p-4">
+              <h3 className="text-sm font-semibold text-ink">
+                {t("whatsappTemplates.formTitle")}
+              </h3>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelClass} htmlFor="wt-name">
+                    {t("whatsappTemplates.nameLabel")}
+                  </label>
+                  <input
+                    id="wt-name"
+                    className={inputClass}
+                    value={tplName}
+                    onChange={(e) => setTplName(e.target.value)}
+                    placeholder={t("whatsappTemplates.namePlaceholder")}
+                  />
+                  <p className="mt-1 text-xs text-muted">
+                    {t("whatsappTemplates.nameHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="wt-language">
+                    {t("whatsappTemplates.languageLabel")}
+                  </label>
+                  <input
+                    id="wt-language"
+                    className={inputClass}
+                    value={tplLanguage}
+                    onChange={(e) => setTplLanguage(e.target.value)}
+                    placeholder={t("whatsappTemplates.languagePlaceholder")}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wt-category">
+                  {t("whatsappTemplates.categoryLabel")}
+                </label>
+                <select
+                  id="wt-category"
+                  className={inputClass}
+                  value={tplCategory}
+                  onChange={(e) =>
+                    setTplCategory(
+                      e.target.value as CreateWhatsAppTemplateRequest["category"],
+                    )
+                  }
+                >
+                  <option value="UTILITY">
+                    {t("whatsappTemplates.categoryUtility")}
+                  </option>
+                  <option value="MARKETING">
+                    {t("whatsappTemplates.categoryMarketing")}
+                  </option>
+                  <option value="AUTHENTICATION">
+                    {t("whatsappTemplates.categoryAuthentication")}
+                  </option>
+                </select>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wt-header">
+                  {t("whatsappTemplates.headerLabel")}
+                </label>
+                <input
+                  id="wt-header"
+                  className={inputClass}
+                  value={tplHeader}
+                  onChange={(e) => setTplHeader(e.target.value)}
+                  placeholder={t("whatsappTemplates.headerPlaceholder")}
+                  maxLength={60}
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wt-body">
+                  {t("whatsappTemplates.bodyLabel")}
+                </label>
+                <textarea
+                  id="wt-body"
+                  className={inputClass}
+                  rows={4}
+                  value={tplBody}
+                  onChange={(e) => setTplBody(e.target.value)}
+                  placeholder={t("whatsappTemplates.bodyPlaceholder")}
+                  maxLength={1024}
+                />
+                <p className="mt-1 text-xs text-muted">
+                  {t("whatsappTemplates.bodyHint")}
+                </p>
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wt-examples">
+                  {t("whatsappTemplates.examplesLabel")}
+                </label>
+                <input
+                  id="wt-examples"
+                  className={inputClass}
+                  value={tplExamples}
+                  onChange={(e) => setTplExamples(e.target.value)}
+                  placeholder={t("whatsappTemplates.examplesPlaceholder")}
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="wt-footer">
+                  {t("whatsappTemplates.footerLabel")}
+                </label>
+                <input
+                  id="wt-footer"
+                  className={inputClass}
+                  value={tplFooter}
+                  onChange={(e) => setTplFooter(e.target.value)}
+                  placeholder={t("whatsappTemplates.footerPlaceholder")}
+                  maxLength={60}
+                />
+              </div>
+              <div>
+                <p className={labelClass}>{t("whatsappTemplates.buttonsLabel")}</p>
+                <div className="mt-2 space-y-2">
+                  {tplButtons.map((b, i) => (
+                    <div key={i} className="flex flex-wrap items-center gap-2">
+                      <select
+                        className="rounded-lg border border-border bg-surface px-2 py-2 text-sm text-ink"
+                        value={b.type}
+                        onChange={(e) => {
+                          const next = [...tplButtons];
+                          next[i] = {
+                            ...b,
+                            type: e.target.value as "URL" | "QUICK_REPLY",
+                          };
+                          setTplButtons(next);
+                        }}
+                      >
+                        <option value="URL">
+                          {t("whatsappTemplates.buttonTypeUrl")}
+                        </option>
+                        <option value="QUICK_REPLY">
+                          {t("whatsappTemplates.buttonTypeQuickReply")}
+                        </option>
+                      </select>
+                      <input
+                        className="min-w-32 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink"
+                        value={b.text}
+                        onChange={(e) => {
+                          const next = [...tplButtons];
+                          next[i] = { ...b, text: e.target.value };
+                          setTplButtons(next);
+                        }}
+                        placeholder={t("whatsappTemplates.buttonTextPlaceholder")}
+                        maxLength={25}
+                      />
+                      {b.type === "URL" ? (
+                        <input
+                          className="min-w-40 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink"
+                          value={b.url}
+                          onChange={(e) => {
+                            const next = [...tplButtons];
+                            next[i] = { ...b, url: e.target.value };
+                            setTplButtons(next);
+                          }}
+                          placeholder={t("whatsappTemplates.buttonUrlPlaceholder")}
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTplButtons(tplButtons.filter((_, j) => j !== i))
+                        }
+                        className="rounded-lg border border-border px-2 py-2 text-xs text-muted hover:text-ink"
+                      >
+                        {t("whatsappTemplates.removeButton")}
+                      </button>
+                    </div>
+                  ))}
+                  {tplButtons.length < 3 ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTplButtons([
+                          ...tplButtons,
+                          { type: "QUICK_REPLY", text: "", url: "" },
+                        ])
+                      }
+                      className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2"
+                    >
+                      {t("whatsappTemplates.addButton")}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy || !createValid}
+                  onClick={() => void create()}
+                  className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                >
+                  {t("whatsappTemplates.saveAction")}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setShowForm(false)}
+                  className="rounded-lg px-4 py-2 text-sm text-muted hover:text-ink disabled:opacity-50"
+                >
+                  {t("whatsappTemplates.cancelAction")}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {loading ? (
+            <p className="mt-6 text-sm text-muted">{t("workspace.loading")}</p>
+          ) : templates.length === 0 ? (
+            <p className="mt-6 rounded-xl border border-border bg-surface p-6 text-center text-sm text-muted">
+              {t("whatsappTemplates.empty")}
+            </p>
+          ) : (
+            <ul className="mt-5 space-y-3">
+              {templates.map((tpl) => (
+                <li
+                  key={tpl.id}
+                  className="rounded-xl border border-border bg-surface p-4"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-ink">
+                      {tpl.name}
+                    </span>
+                    <TemplateStatusChip t={t} status={tpl.status} />
+                    <span className="text-xs text-muted">
+                      {tpl.language} · {tpl.category}
+                      {tpl.variableCount > 0
+                        ? ` · ${t("whatsappTemplates.variableCount", {
+                            count: tpl.variableCount,
+                          })}`
+                        : ""}
+                    </span>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-muted">
+                    {tpl.bodyText ?? t("whatsappTemplates.noBody")}
+                  </p>
+                  {canManage && channelConnected ? (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void remove(tpl)}
+                        className="rounded-lg border border-danger px-3 py-1.5 text-xs font-medium text-danger hover:bg-danger-soft disabled:opacity-50"
+                      >
+                        {confirmingDelete === tpl.id
+                          ? t("whatsappTemplates.confirmDelete")
+                          : t("whatsappTemplates.deleteAction")}
+                      </button>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
   );
 }

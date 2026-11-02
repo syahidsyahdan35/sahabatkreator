@@ -104,6 +104,16 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.TEAM_OWNER_PROTECTED");
     case "TEAM_SELF_ACTION":
       return t("errors.TEAM_SELF_ACTION");
+    case "BROADCAST_CHANNEL_UNSUPPORTED":
+      return t("errors.BROADCAST_CHANNEL_UNSUPPORTED");
+    case "BROADCAST_TEMPLATE_REQUIRED":
+      return t("errors.BROADCAST_TEMPLATE_REQUIRED");
+    case "BROADCAST_TEMPLATE_NOT_APPROVED":
+      return t("errors.BROADCAST_TEMPLATE_NOT_APPROVED");
+    case "META_TEMPLATE_INVALID":
+      return t("errors.META_TEMPLATE_INVALID");
+    case "META_WABA_MISSING":
+      return t("errors.META_WABA_MISSING");
     default:
       break;
   }

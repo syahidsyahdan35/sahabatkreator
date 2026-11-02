@@ -46,6 +46,7 @@ const CATEGORY_VALUES = [
   "integration",
   "platform_settings",
   "broadcast",
+  "whatsapp_template",
   "flow",
   "saved_reply",
 ] as const;
@@ -66,6 +67,7 @@ const CATEGORY_LABEL_KEYS: Record<CategoryValue, TranslationKey> = {
   integration: "audit.categoryIntegration",
   platform_settings: "audit.categoryPlatformSettings",
   broadcast: "audit.categoryBroadcast",
+  whatsapp_template: "audit.categoryWhatsappTemplate",
   flow: "audit.categoryFlow",
   saved_reply: "audit.categorySavedReply",
 };
@@ -122,6 +124,9 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "broadcast.failed": "audit.actionBroadcastFailed",
   "broadcast.cancelled": "audit.actionBroadcastCancelled",
   "broadcast.deleted": "audit.actionBroadcastDeleted",
+  "whatsapp_template.synced": "audit.actionWhatsappTemplateSynced",
+  "whatsapp_template.created": "audit.actionWhatsappTemplateCreated",
+  "whatsapp_template.deleted": "audit.actionWhatsappTemplateDeleted",
   "flow.created": "audit.actionFlowCreated",
   "flow.updated": "audit.actionFlowUpdated",
   "flow.activated": "audit.actionFlowActivated",
@@ -160,6 +165,7 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   integration_log: "audit.targetIntegrationLog",
   platform_setting: "audit.targetPlatformSetting",
   broadcast: "audit.targetBroadcast",
+  whatsapp_template: "audit.targetWhatsappTemplate",
   flow: "audit.targetFlow",
   flow_run: "audit.targetFlowRun",
   saved_reply: "audit.targetSavedReply",
