@@ -53,6 +53,12 @@ export const ErrorCodeSchema = z.enum([
   // akun WhatsApp tanpa WABA induk tercatat → 422.
   "META_TEMPLATE_INVALID",
   "META_WABA_MISSING",
+  // Fase 10B: aturan komentar terikat ke akun selain IG/Messenger yang
+  // terhubung (atau akun tenant lain) → 422; moderasi manual komentar
+  // ditolak Meta / token akun tak tersedia → 422 (status lokal tidak
+  // berubah).
+  "COMMENT_CHANNEL_UNSUPPORTED",
+  "META_COMMENT_ACTION_FAILED",
   // Fase 8A: flow engine — graf tidak sah saat aktivasi (daftar masalah
   // terstruktur di `details.issues`) → 422; transisi status tidak sah
   // (edit flow aktif, aktifkan yang sudah aktif, dst.) → 409.
@@ -996,7 +1002,12 @@ export type WebchatRealtimeEvent = z.infer<typeof WebchatRealtimeEventSchema>;
 export const AutomationMatchSchema = z.enum(["exact", "contains"]);
 export type AutomationMatch = z.infer<typeof AutomationMatchSchema>;
 
-export const AutomationKindSchema = z.enum(["keyword", "sequence"]);
+export const AutomationKindSchema = z.enum([
+  "keyword",
+  "sequence",
+  // Fase 10B: aturan komentar (comment-to-DM + moderasi).
+  "comment",
+]);
 export type AutomationKind = z.infer<typeof AutomationKindSchema>;
 
 const AutomationKeywordsSchema = z
@@ -1046,9 +1057,47 @@ export type CreateSequenceAutomationRequest = z.infer<
   typeof CreateSequenceAutomationRequestSchema
 >;
 
+/**
+ * Aturan komentar (Fase 10B): pemicu keyword yang sama, tetapi diterapkan
+ * pada TEKS KOMENTAR publik di SATU akun Instagram/Messenger
+ * (channelAccountId). Aksi dapat dikombinasikan (minimal satu aktif):
+ * - sendDm: DM privat ke penulis komentar (private reply); teksnya
+ *   `dmText` — wajib terisi bila sendDm true.
+ * - publicReplyText: balasan publik pada komentar; null/kosong = mati.
+ * - hideComment: sembunyikan komentar (mode moderasi murni =
+ *   sendDm false + publicReplyText kosong + hideComment true).
+ */
+export const CreateCommentAutomationRequestSchema = z
+  .object({
+    kind: z.literal("comment"),
+    name: AutomationNameSchema,
+    keywords: AutomationKeywordsSchema,
+    match: AutomationMatchSchema.default("exact"),
+    channelAccountId: z.string().uuid(),
+    sendDm: z.boolean().default(false),
+    dmText: z.string().trim().max(4096).optional(),
+    publicReplyText: z.string().trim().max(4096).nullable().optional(),
+    hideComment: z.boolean().default(false),
+  })
+  .refine((v) => !v.sendDm || (v.dmText && v.dmText.length > 0), {
+    message: "dmText is required when sendDm is true",
+    path: ["dmText"],
+  })
+  .refine(
+    (v) =>
+      v.sendDm ||
+      (v.publicReplyText != null && v.publicReplyText.length > 0) ||
+      v.hideComment,
+    { message: "At least one comment action must be enabled" },
+  );
+export type CreateCommentAutomationRequest = z.infer<
+  typeof CreateCommentAutomationRequestSchema
+>;
+
 export const CreateAutomationRequestSchema = z.union([
   CreateKeywordAutomationRequestSchema,
   CreateSequenceAutomationRequestSchema,
+  CreateCommentAutomationRequestSchema,
 ]);
 export type CreateAutomationRequest = z.infer<
   typeof CreateAutomationRequestSchema
@@ -1061,6 +1110,10 @@ export const UpdateAutomationRequestSchema = z
     match: AutomationMatchSchema.optional(),
     text: z.string().trim().min(1).max(4096).optional(),
     isActive: z.boolean().optional(),
+    /** Fase 10B — hanya bermakna untuk aturan kind='comment'. */
+    sendDm: z.boolean().optional(),
+    publicReplyText: z.string().trim().max(4096).nullable().optional(),
+    hideComment: z.boolean().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
     message: "At least one field must be provided",
@@ -1072,14 +1125,26 @@ export type UpdateAutomationRequest = z.infer<
 export const AutomationResponseSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
-  triggerType: z.literal("keyword"),
-  /** Jenis automation (Fase 2C): 'keyword' (balasan langsung) | 'sequence'. */
+  triggerType: z.enum(["keyword", "comment"]),
+  /** Jenis automation (Fase 2C): 'keyword' (balasan langsung) | 'sequence' | 'comment' (Fase 10B). */
   kind: AutomationKindSchema,
   keywords: z.array(z.string()),
   match: AutomationMatchSchema,
   actionType: z.literal("send_message"),
   /** Isi balasan untuk kind='keyword'; untuk sequence selalu string kosong. */
   text: z.string(),
+  /**
+   * Fase 10B — akun terikat aturan komentar (uuid channel_accounts);
+   * null untuk aturan pesan. Field komentar lain hanya bermakna untuk
+   * kind='comment' dan selalu terisi default aman untuk aturan lama.
+   */
+  channelAccountId: z.string().uuid().nullable(),
+  /** Fase 10B: aksi DM privat aktif (teks DM-nya ada di `text`). */
+  sendDm: z.boolean(),
+  /** Fase 10B: teks balasan publik; null = aksi mati. */
+  publicReplyText: z.string().nullable(),
+  /** Fase 10B: aksi sembunyikan komentar aktif. */
+  hideComment: z.boolean(),
   /** Langkah rangkaian terurut posisi; kosong untuk kind='keyword'. */
   steps: z.array(AutomationStepResponseSchema),
   /** Jumlah langkah (Fase 2C); 0 untuk kind='keyword'. */
@@ -1164,6 +1229,74 @@ export const SequenceEnrollmentListResponseSchema = z.object({
 export type SequenceEnrollmentListResponse = z.infer<
   typeof SequenceEnrollmentListResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Comments (Fase 10B) — komentar publik Instagram/Messenger yang tercatat
+// dari webhook Meta, beserta jejak aksi aturan comment-to-DM/moderasi.
+// Daftar bersifat baca-saja dari sisi API; satu-satunya tulis adalah
+// moderasi manual sembunyikan/tampilkan (POST .../hide | .../unhide).
+// ---------------------------------------------------------------------------
+
+export const CommentModerationStatusSchema = z.enum(["visible", "hidden"]);
+export type CommentModerationStatus = z.infer<
+  typeof CommentModerationStatusSchema
+>;
+
+/** Jejak hasil satu aksi pada sebuah komentar (comments.actions di DB). */
+export const CommentActionTraceSchema = z.object({
+  dm: z
+    .object({
+      status: z.enum(["queued", "skipped", "failed"]),
+      messageId: z.string().uuid().optional(),
+      reason: z.string().optional(),
+    })
+    .optional(),
+  publicReply: z
+    .object({
+      status: z.enum(["sent", "failed"]),
+      replyId: z.string().nullable().optional(),
+      errorCode: z.string().optional(),
+    })
+    .optional(),
+  hide: z
+    .object({
+      status: z.enum(["hidden", "failed"]),
+      errorCode: z.string().optional(),
+    })
+    .optional(),
+  skipped: z.literal("own_comment").optional(),
+  evaluatedAt: z.string().optional(),
+});
+export type CommentActionTrace = z.infer<typeof CommentActionTraceSchema>;
+
+export const CommentResponseSchema = z.object({
+  id: z.string().uuid(),
+  channelAccountId: z.string().uuid(),
+  /** Nama tampilan akun pemilik komentar (untuk label daftar). */
+  channelDisplayName: z.string(),
+  provider: z.enum(["instagram", "messenger"]),
+  providerCommentId: z.string(),
+  mediaId: z.string().nullable(),
+  postId: z.string().nullable(),
+  parentId: z.string().nullable(),
+  authorExternalId: z.string(),
+  authorUsername: z.string().nullable(),
+  text: z.string(),
+  providerCreatedAt: z.string().datetime().nullable(),
+  moderationStatus: CommentModerationStatusSchema,
+  contactId: z.string().uuid().nullable(),
+  conversationId: z.string().uuid().nullable(),
+  matchedAutomationId: z.string().uuid().nullable(),
+  actions: CommentActionTraceSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type CommentResponse = z.infer<typeof CommentResponseSchema>;
+
+export const CommentListResponseSchema = z.object({
+  comments: z.array(CommentResponseSchema),
+});
+export type CommentListResponse = z.infer<typeof CommentListResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // AI Agents (Fase 3A) — konfigurasi agent per tenant. Runtime memakai agent

@@ -1,10 +1,12 @@
 import { Worker } from "bullmq";
-import { loadEnv } from "@sahabat-kreator/config";
+import { loadEnv, META_GRAPH_API_VERSION } from "@sahabat-kreator/config";
 import { createDb } from "@sahabat-kreator/db";
 import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
+import { MetaGraphClient } from "@sahabat-kreator/channel-messenger";
 import {
   INTEGRATION_LOG_RETENTION_DAYS,
   dispatchBroadcast,
+  evaluateCommentForAutomations,
   evaluateInboundMessageForAutomations,
   executeFlowStep,
   executeSequenceStep,
@@ -14,12 +16,14 @@ import {
   relayUnpublishedOutboxEvents,
   resolveOpenRouterConfig,
   respondToInboundMessage,
+  type CommentGraphActions,
   type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import {
   AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
   BROADCAST_DISPATCH_JOB,
+  COMMENT_EVALUATE_JOB,
   FLOW_STEP_JOB,
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
@@ -29,11 +33,13 @@ import {
   enqueueAgentRespond,
   enqueueAutomationEvaluate,
   enqueueBroadcastDispatch,
+  enqueueCommentEvaluate,
   enqueueFlowStep,
   enqueueSequenceStep,
   type AgentRespondJobData,
   type AutomationEvaluateJobData,
   type BroadcastDispatchJobData,
+  type CommentEvaluateJobData,
   type FlowStepJobData,
   type MainJobData,
   type SequenceStepJobData,
@@ -161,6 +167,38 @@ void resolveAgentLlmProvider()
     console.error("[worker] resolusi provider LLM gagal saat start:", err);
     process.exit(1);
   });
+
+// Aksi Graph langsung untuk evaluasi komentar (Fase 10B): balasan
+// publik + sembunyikan komentar dijalankan worker (bukan pesan
+// percakapan, jadi tidak lewat antrean/poller). Klien dibangun per
+// panggilan dengan token akun pemilik komentar yang diserahkan core;
+// base URL mengikuti env META_API_BASE (mock pada rantai uji).
+const commentGraphActions: CommentGraphActions = {
+  async replyToComment(input) {
+    const client = new MetaGraphClient({
+      baseUrl: env.META_API_BASE,
+      apiVersion: META_GRAPH_API_VERSION,
+      accessToken: input.accessToken,
+    });
+    return client.replyToComment({
+      provider: input.provider,
+      commentId: input.commentId,
+      text: input.text,
+    });
+  },
+  async setCommentHidden(input) {
+    const client = new MetaGraphClient({
+      baseUrl: env.META_API_BASE,
+      apiVersion: META_GRAPH_API_VERSION,
+      accessToken: input.accessToken,
+    });
+    await client.setCommentHidden({
+      provider: input.provider,
+      commentId: input.commentId,
+      hidden: input.hidden,
+    });
+  },
+};
 
 const bullWorker = new Worker<MainJobData>(
   MAIN_QUEUE_NAME,
@@ -307,6 +345,46 @@ const bullWorker = new Worker<MainJobData>(
               ? ` steps=${result.stepsExecuted}`
               : ""),
         );
+      }
+      return result;
+    }
+    if (job.name === COMMENT_EVALUATE_JOB) {
+      // Fase 10B: evaluasi satu komentar terhadap aturan komentar
+      // akunnya. DM menjadi pesan `queued` di core (poller API yang
+      // mengirim private reply-nya); balasan publik + sembunyikan
+      // adalah panggilan Graph langsung lewat commentGraphActions.
+      const data = job.data as CommentEvaluateJobData;
+      const result = await evaluateCommentForAutomations(
+        db,
+        { tenantId: data.tenantId, commentId: data.commentId },
+        {
+          channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+          graph: commentGraphActions,
+        },
+      );
+      if (result.evaluated) {
+        console.log(
+          `[worker] comment.evaluate comment=${data.commentId} matched=${result.matchedAutomationId ?? "none"}` +
+            (result.skippedOwnComment ? " skipped=own_comment" : "") +
+            (result.actions?.dm
+              ? ` dm=${result.actions.dm.status}`
+              : "") +
+            (result.actions?.publicReply
+              ? ` publicReply=${result.actions.publicReply.status}`
+              : "") +
+            (result.actions?.hide
+              ? ` hide=${result.actions.hide.status}`
+              : ""),
+        );
+        // DM yang terantre = pesan `queued` baru → nudge agar
+        // dashboard menyegar (pengiriman sesungguhnya oleh poller API).
+        if (result.actions?.dm?.status === "queued" && result.conversationId) {
+          await realtimePublisher.publishNudge({
+            kind: "message.queued",
+            tenantId: data.tenantId,
+            conversationId: result.conversationId,
+          });
+        }
       }
       return result;
     }
@@ -463,6 +541,25 @@ async function relayTick(): Promise<void> {
           },
           Number.isNaN(delayMs) ? 0 : delayMs,
         );
+        return;
+      }
+      // Fase 10B: komentar baru tercatat → job `comment.evaluate`.
+      // Event hanya ditulis core untuk komentar yang benar-benar baru
+      // (dedup index unik), jadi jobId deterministik dari id event
+      // cukup; core pun idempoten untuk eksekusi ulang.
+      if (event.type === "comment.received") {
+        const payload = event.payload as { commentId?: unknown };
+        if (typeof payload.commentId !== "string") {
+          console.warn(
+            `[worker] event comment.received ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        await enqueueCommentEvaluate(queue, {
+          tenantId: event.tenantId,
+          commentId: payload.commentId,
+          outboxEventId: event.id,
+        });
         return;
       }
       if (event.type !== "message.received") return;

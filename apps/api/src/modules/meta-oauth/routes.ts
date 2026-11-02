@@ -1115,9 +1115,11 @@ export function createMetaOAuthRoutes(
     try {
       const client = graphClient(accessToken);
       if (provider === "messenger") {
-        await client.subscribeAppToObject(asset.assetId, ["messages"]);
+        // Fase 10B: sertakan field komentar (feed) — helper mundur ke
+        // messages saja bila Graph menolak field lebar.
+        await client.subscribeAppToObjectWithComments(asset.assetId, "messenger");
       } else if (provider === "instagram") {
-        await client.subscribeAppToObject(asset.assetId, ["messages"]);
+        await client.subscribeAppToObjectWithComments(asset.assetId, "instagram");
       } else {
         if (!asset.parentId) throw new MetaGraphError(0, null, "missing_waba");
         await client.subscribeAppToObject(asset.parentId);

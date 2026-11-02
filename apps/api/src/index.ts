@@ -38,6 +38,7 @@ import { createLogsRoutes } from "./modules/logs/routes";
 import { createAuditRoutes } from "./modules/audit/routes";
 import { createBroadcastsRoutes } from "./modules/broadcasts/routes";
 import { createWhatsAppTemplatesRoutes } from "./modules/whatsapp-templates/routes";
+import { createCommentsRoutes } from "./modules/comments/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
 import { createNotesRoutes } from "./modules/notes/routes";
@@ -157,6 +158,15 @@ routes.route("/", createBroadcastsRoutes(authBundle));
 routes.route(
   "/",
   createWhatsAppTemplatesRoutes(authBundle, {
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    metaApiBase: env.META_API_BASE,
+  }),
+);
+// Modul comments (Fase 10B) — komentar IG/Messenger tercatat
+// /tenants/:tenantId/comments + moderasi manual (Graph Meta).
+routes.route(
+  "/",
+  createCommentsRoutes(authBundle, {
     channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
     metaApiBase: env.META_API_BASE,
   }),

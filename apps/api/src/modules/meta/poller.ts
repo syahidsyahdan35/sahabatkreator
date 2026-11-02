@@ -237,6 +237,10 @@ export function startMetaDeliveryPoller(
                 accountExternalId: delivery.accountExternalId,
                 recipientExternalId: delivery.recipientExternalId,
                 text: delivery.contentText,
+                // Fase 10B: pesan DM comment-to-DM dikirim sebagai
+                // private reply (recipient comment_id), bukan ke id
+                // pengguna — kolom null untuk pesan biasa.
+                recipientCommentId: delivery.providerCommentId,
               })
             ).providerMessageId;
           }

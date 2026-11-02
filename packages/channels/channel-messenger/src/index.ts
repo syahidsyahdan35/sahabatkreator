@@ -969,6 +969,32 @@ export class MetaGraphClient {
   }
 
   /**
+   * Langganan webhook untuk akun Messenger/Instagram termasuk field
+   * KOMENTAR (Fase 10B): messenger meminta `messages,feed` (komentar
+   * Page tiba sebagai perubahan feed item comment), instagram meminta
+   * `messages,comments`. BEST-EFFORT BERLAPIS: bila permintaan lebar
+   * ditolak Graph (mis. izin/langganan field belum tersedia), mundur
+   * ke `messages` saja agar koneksi tidak pernah gagal hanya karena
+   * field komentar — akun lama yang sudah terhubung mendapat field
+   * komentar saat RECONNECT (langganan ulang), bukan otomatis.
+   * Melempar hanya bila langganan dasar `messages` pun gagal.
+   */
+  async subscribeAppToObjectWithComments(
+    objectId: string,
+    provider: "messenger" | "instagram",
+  ): Promise<void> {
+    const wide =
+      provider === "messenger"
+        ? ["messages", "feed"]
+        : ["messages", "comments"];
+    try {
+      await this.subscribeAppToObject(objectId, wide);
+    } catch {
+      await this.subscribeAppToObject(objectId, ["messages"]);
+    }
+  }
+
+  /**
    * Kirim pesan teks (Send API): `POST /{accountId}/messages` dengan
    * messaging_type RESPONSE — balasan di dalam jendela 24 jam sejak
    * pesan terakhir pengguna (kebijakan Meta; di luar jendela Graph
@@ -992,19 +1018,76 @@ export class MetaGraphClient {
     accountExternalId: string;
     recipientExternalId: string;
     text: string;
+    /**
+     * Fase 10B — private reply: bila terisi, pesan dikirim ke PENULIS
+     * komentar ini lewat `recipient: { comment_id }` (satu-satunya cara
+     * Send API membuka DM ke orang yang belum pernah mengirim pesan;
+     * sesudah ia membalas, percakapan berlanjut sebagai DM biasa).
+     * `recipientExternalId` diabaikan dalam mode ini. Private reply
+     * TIDAK memakai messaging_type (bentuk terdokumentasi Meta untuk
+     * balasan privat atas komentar).
+     */
+    recipientCommentId?: string | null;
   }): Promise<{ providerMessageId: string }> {
     const body = await this.postJson<{ message_id?: string }>(
       `${encodeURIComponent(input.accountExternalId)}/messages`,
-      {
-        recipient: { id: input.recipientExternalId },
-        messaging_type: "RESPONSE",
-        message: { text: input.text },
-      },
+      input.recipientCommentId
+        ? {
+            recipient: { comment_id: input.recipientCommentId },
+            message: { text: input.text },
+          }
+        : {
+            recipient: { id: input.recipientExternalId },
+            messaging_type: "RESPONSE",
+            message: { text: input.text },
+          },
     );
     if (typeof body.message_id !== "string" || !body.message_id) {
       throw new MetaGraphError(200, null, "missing_message_id");
     }
     return { providerMessageId: body.message_id };
+  }
+
+  /**
+   * Balasan PUBLIK pada sebuah komentar (Fase 10B):
+   * - Instagram: `POST /{comment-id}/replies` body { message }.
+   * - Messenger/Page: `POST /{comment-id}/comments` body { message }.
+   * Mengembalikan id balasan bila Meta menyertakannya.
+   */
+  async replyToComment(input: {
+    provider: "instagram" | "messenger";
+    commentId: string;
+    text: string;
+  }): Promise<{ replyId: string | null }> {
+    const edge = input.provider === "instagram" ? "replies" : "comments";
+    const body = await this.postJson<{ id?: string }>(
+      `${encodeURIComponent(input.commentId)}/${edge}`,
+      { message: input.text },
+    );
+    return { replyId: typeof body.id === "string" && body.id ? body.id : null };
+  }
+
+  /**
+   * Sembunyikan / tampilkan komentar (moderasi, Fase 10B):
+   * - Instagram: `POST /{comment-id}?hidden=true|false`.
+   * - Messenger/Page: `POST /{comment-id}?is_hidden=true|false`.
+   * Parameter lewat query string (preseden subscribed_apps di kelas
+   * ini); body kosong. Kegagalan Graph melempar MetaGraphError seperti
+   * metode lain — pemanggil yang mencatat status lokal.
+   */
+  async setCommentHidden(input: {
+    provider: "instagram" | "messenger";
+    commentId: string;
+    hidden: boolean;
+  }): Promise<void> {
+    const param =
+      input.provider === "instagram"
+        ? `hidden=${input.hidden ? "true" : "false"}`
+        : `is_hidden=${input.hidden ? "true" : "false"}`;
+    await this.postJson(
+      `${encodeURIComponent(input.commentId)}?${param}`,
+      {},
+    );
   }
 }
 
@@ -1109,6 +1192,153 @@ export function parseMetaWebhookEvents(payload: unknown): MetaMessagingEvent[] {
         isEcho: message.is_echo === true,
         timestamp:
           typeof item.timestamp === "number" ? item.timestamp : null,
+      });
+    }
+  }
+  return events;
+}
+
+/** Satu event komentar yang dinormalisasi dari payload webhook Meta (Fase 10B). */
+export interface MetaCommentEvent {
+  /** Objek webhook: 'page' → messenger, 'instagram' → instagram. */
+  objectKind: "page" | "instagram";
+  /** entry.id: ID akun IG / Page ID pemilik komentar. */
+  entryExternalId: string;
+  /** Id komentar di Meta — kunci dedup bersama akun. */
+  providerCommentId: string;
+  /** Id media IG (instagram saja); null selain itu. */
+  mediaId: string | null;
+  /** Id postingan Page (messenger saja); null selain itu. */
+  postId: string | null;
+  /** Id komentar induk bila komentar ini balasan atas komentar lain. */
+  parentId: string | null;
+  /** IGSID / PSID penulis komentar. */
+  authorExternalId: string;
+  /** Username IG / nama penulis Page, bila payload membawanya. */
+  authorUsername: string | null;
+  /** Isi komentar. */
+  text: string;
+  /** Waktu komentar menurut provider (created_time, detik epoch); null bila absen. */
+  providerCreatedAt: Date | null;
+}
+
+interface MetaCommentChangesPayload {
+  object?: string;
+  entry?: Array<{
+    id?: string;
+    changes?: Array<{
+      field?: string;
+      value?: {
+        // Instagram (field 'comments')
+        id?: string;
+        text?: string;
+        from?: { id?: string; username?: string; name?: string };
+        media?: { id?: string };
+        parent_id?: string;
+        // Page feed (field 'feed', item 'comment')
+        item?: string;
+        verb?: string;
+        comment_id?: string;
+        post_id?: string;
+        message?: string;
+        created_time?: number;
+      };
+    }>;
+  }>;
+}
+
+/**
+ * Menormalkan event KOMENTAR dari payload webhook Meta (Fase 10B).
+ * Parser messaging (`parseMetaWebhookEvents`) sengaja TIDAK diubah —
+ * komentar hidup di `entry.changes`, bukan `entry.messaging`:
+ * - Instagram: objek 'instagram', changes field 'comments',
+ *   value { id, text, from { id, username }, media { id }, parent_id? }.
+ * - Messenger/Page: objek 'page', changes field 'feed' dengan
+ *   value.item='comment' & verb='add', value { comment_id, post_id,
+ *   message, from { id, name }, created_time, parent_id? }.
+ * Bentuk field 'comments' ala IG pada objek page juga ditoleransi
+ * (beberapa konfigurasi langganan mengirimkannya). Perubahan feed
+ * selain penambahan komentar (post, like, verb edit/remove) dilewati:
+ * v1 hanya mencatat komentar baru; penghapusan komentar di sisi Meta
+ * tidak diselaraskan (status lokal tetap yang terakhir diketahui).
+ */
+export function parseMetaCommentEvents(
+  payload: unknown,
+): MetaCommentEvent[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const body = payload as MetaCommentChangesPayload;
+  if (body.object !== "page" && body.object !== "instagram") return [];
+  const objectKind = body.object;
+  const events: MetaCommentEvent[] = [];
+  for (const entry of body.entry ?? []) {
+    if (typeof entry?.id !== "string" || !entry.id) continue;
+    for (const change of entry.changes ?? []) {
+      const value = change?.value;
+      if (!value) continue;
+      if (objectKind === "instagram" || change.field === "comments") {
+        // Bentuk IG: field 'comments'.
+        if (change.field !== "comments") continue;
+        const commentId = value.id;
+        const authorId = value.from?.id;
+        if (typeof commentId !== "string" || !commentId) continue;
+        if (typeof authorId !== "string" || !authorId) continue;
+        events.push({
+          objectKind,
+          entryExternalId: entry.id,
+          providerCommentId: commentId,
+          mediaId:
+            typeof value.media?.id === "string" && value.media.id
+              ? value.media.id
+              : null,
+          postId: null,
+          parentId:
+            typeof value.parent_id === "string" && value.parent_id
+              ? value.parent_id
+              : null,
+          authorExternalId: authorId,
+          authorUsername:
+            (typeof value.from?.username === "string" &&
+            value.from.username
+              ? value.from.username
+              : null) ??
+            (typeof value.from?.name === "string" && value.from.name
+              ? value.from.name
+              : null),
+          text: typeof value.text === "string" ? value.text : "",
+          providerCreatedAt: null,
+        });
+        continue;
+      }
+      // Bentuk Page feed: hanya komentar baru.
+      if (change.field !== "feed") continue;
+      if (value.item !== "comment" || value.verb !== "add") continue;
+      const commentId = value.comment_id;
+      const authorId = value.from?.id;
+      if (typeof commentId !== "string" || !commentId) continue;
+      if (typeof authorId !== "string" || !authorId) continue;
+      events.push({
+        objectKind,
+        entryExternalId: entry.id,
+        providerCommentId: commentId,
+        mediaId: null,
+        postId:
+          typeof value.post_id === "string" && value.post_id
+            ? value.post_id
+            : null,
+        parentId:
+          typeof value.parent_id === "string" && value.parent_id
+            ? value.parent_id
+            : null,
+        authorExternalId: authorId,
+        authorUsername:
+          typeof value.from?.name === "string" && value.from.name
+            ? value.from.name
+            : null,
+        text: typeof value.message === "string" ? value.message : "",
+        providerCreatedAt:
+          typeof value.created_time === "number" && value.created_time > 0
+            ? new Date(value.created_time * 1000)
+            : null,
       });
     }
   }

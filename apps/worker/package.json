@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "@sahabat-kreator/ai": "workspace:*",
+    "@sahabat-kreator/channel-messenger": "workspace:*",
     "@sahabat-kreator/config": "workspace:*",
     "@sahabat-kreator/core": "workspace:*",
     "@sahabat-kreator/db": "workspace:*",

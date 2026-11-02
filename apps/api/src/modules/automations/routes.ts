@@ -15,6 +15,7 @@ import {
 } from "@sahabat-kreator/contracts";
 import {
   createAutomation,
+  getChannelAccount,
   listAutomationRuns,
   listAutomations,
   listSequenceEnrollments,
@@ -38,6 +39,12 @@ function serializeAutomation(row: AutomationWithRunCount): AutomationResponse {
     match: row.triggerConfig.match,
     actionType: row.actionType,
     text: row.actionConfig.text,
+    // Fase 10B: field aturan komentar; aturan pesan mendapat default
+    // aman (akun null, semua aksi mati).
+    channelAccountId: row.triggerConfig.channelAccountId ?? null,
+    sendDm: row.actionConfig.sendDm ?? false,
+    publicReplyText: row.actionConfig.publicReplyText ?? null,
+    hideComment: row.actionConfig.hideComment ?? false,
     steps: row.steps.map((s) => ({
       position: s.position,
       delayMinutes: s.delayMinutes,
@@ -138,6 +145,30 @@ export function createAutomationsRoutes(bundle: AuthBundle | null) {
     if (!parsed.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid automation payload");
     }
+    // Fase 10B: aturan komentar terikat ke satu akun IG/Messenger milik
+    // tenant ini. Akun tak ditemukan di tenant, provider di luar
+    // instagram/messenger, atau akun sedang terputus → 422
+    // COMMENT_CHANNEL_UNSUPPORTED (aturan tak pernah lahir mengambang).
+    if ("channelAccountId" in parsed.data) {
+      const account = await getChannelAccount(
+        bundle.db,
+        { tenantId: tenant.id },
+        parsed.data.channelAccountId,
+      );
+      if (
+        !account ||
+        (account.provider !== "instagram" &&
+          account.provider !== "messenger") ||
+        account.status !== "connected"
+      ) {
+        return apiError(
+          c,
+          422,
+          "COMMENT_CHANNEL_UNSUPPORTED",
+          "Comment rules require a connected Instagram or Messenger account",
+        );
+      }
+    }
     const created = await createAutomation(
       bundle.db,
       { tenantId: tenant.id },
@@ -149,13 +180,25 @@ export function createAutomationsRoutes(bundle: AuthBundle | null) {
             kind: "sequence",
             steps: parsed.data.steps,
           }
-        : {
-            name: parsed.data.name,
-            keywords: parsed.data.keywords,
-            match: parsed.data.match,
-            kind: "keyword",
-            text: parsed.data.text,
-          },
+        : "channelAccountId" in parsed.data
+          ? {
+              name: parsed.data.name,
+              keywords: parsed.data.keywords,
+              match: parsed.data.match,
+              kind: "comment",
+              channelAccountId: parsed.data.channelAccountId,
+              sendDm: parsed.data.sendDm,
+              text: parsed.data.dmText,
+              publicReplyText: parsed.data.publicReplyText ?? null,
+              hideComment: parsed.data.hideComment,
+            }
+          : {
+              name: parsed.data.name,
+              keywords: parsed.data.keywords,
+              match: parsed.data.match,
+              kind: "keyword",
+              text: parsed.data.text,
+            },
     );
     return c.json(
       serializeAutomation({

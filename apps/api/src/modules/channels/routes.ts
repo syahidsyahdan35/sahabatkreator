@@ -1090,7 +1090,12 @@ async function connectMeta(
     if (!isSuat) return c.json(serialized, status);
     const warnings: Array<"META_SUBSCRIBE_FAILED"> = [];
     try {
-      await client.subscribeAppToObject(accountExternalId, ["messages"]);
+      // Fase 10B: sertakan field comments — helper mundur ke messages
+      // saja bila Graph menolak field lebar.
+      await client.subscribeAppToObjectWithComments(
+        accountExternalId,
+        "instagram",
+      );
     } catch {
       warnings.push("META_SUBSCRIBE_FAILED");
       console.error(

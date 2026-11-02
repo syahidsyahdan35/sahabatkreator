@@ -2,6 +2,7 @@ import {
   applyWhatsAppMessageStatus,
   decryptChannelSecret,
   fetchAndStoreMetaContactProfile,
+  recordMetaComment,
   recordMetaInboundMessage,
   recordWhatsAppInboundMessage,
   resolveMetaAccountByExternalId,
@@ -12,7 +13,10 @@ import {
   type RecordIntegrationLogInput,
   type WhatsAppAccountRef,
 } from "@sahabat-kreator/core";
-import { parseMetaWebhookEvents } from "@sahabat-kreator/channel-messenger";
+import {
+  parseMetaCommentEvents,
+  parseMetaWebhookEvents,
+} from "@sahabat-kreator/channel-messenger";
 import {
   isWhatsAppWebhookPayload,
   parseWhatsAppWebhookEvents,
@@ -204,7 +208,81 @@ export async function processMetaWebhookPayload(
       });
     }
   }
-  if (events.length === 0 && !scoped) {
+  // Fase 10B: event KOMENTAR (entry.changes) diproses sesudah loop
+  // messaging, dengan cache resolusi akun yang sama. Komentar disimpan
+  // ke tabel `comments` (dedup core); evaluasi aturan comment-to-DM
+  // berjalan asinkron lewat outbox `comment.received` → job worker —
+  // webhook tetap menjawab seketika. Event non-komentar tidak tersentuh
+  // jalur ini sama sekali.
+  const commentEvents = parseMetaCommentEvents(payload);
+  for (const event of commentEvents) {
+    const provider: MetaProvider =
+      event.objectKind === "page" ? "messenger" : "instagram";
+    const account = await resolveAccount(provider, event.entryExternalId);
+    if (!account) {
+      if (scoped) continue;
+      await log({
+        direction: "in",
+        provider,
+        signatureValid: true,
+        outcome: "unresolved_account",
+        summary: `comment for unknown ${provider} account ${event.entryExternalId}`,
+        payload,
+      });
+      continue;
+    }
+    if (scoped && account.tenantId !== deps.tenantScopeId) continue;
+    if (account.status !== "connected") {
+      await log({
+        direction: "in",
+        provider,
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome: "ignored_disconnected",
+        summary: `comment for ${account.status} account`,
+        payload,
+      });
+      continue;
+    }
+    let recorded: Awaited<ReturnType<typeof recordMetaComment>>;
+    try {
+      recorded = await recordMetaComment(deps.db, account, {
+        providerCommentId: event.providerCommentId,
+        mediaId: event.mediaId,
+        postId: event.postId,
+        parentId: event.parentId,
+        authorExternalId: event.authorExternalId,
+        authorUsername: event.authorUsername,
+        text: event.text,
+        providerCreatedAt: event.providerCreatedAt,
+      });
+    } catch (err) {
+      await log({
+        direction: "in",
+        provider,
+        tenantId: account.tenantId,
+        channelAccountId: account.id,
+        signatureValid: true,
+        outcome: "error",
+        errorCode: "processing_error",
+        summary: `failed to record comment ${event.providerCommentId}`,
+        payload,
+      });
+      throw err;
+    }
+    await log({
+      direction: "in",
+      provider,
+      tenantId: account.tenantId,
+      channelAccountId: account.id,
+      signatureValid: true,
+      outcome: recorded.status === "recorded" ? "recorded" : "duplicate",
+      summary: `comment ${event.providerCommentId} from ${event.authorExternalId}`,
+      payload,
+    });
+  }
+  if (events.length === 0 && commentEvents.length === 0 && !scoped) {
     // Payload sah tanpa event messaging yang dikenal parser (receipt
     // delivery/read murni, postback, objek selain page/instagram):
     // tetap satu baris agregat agar tidak ada hit yang senyap.

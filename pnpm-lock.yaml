@@ -198,6 +198,9 @@ importers:
       '@sahabat-kreator/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@sahabat-kreator/channel-messenger':
+        specifier: workspace:*
+        version: link:../../packages/channels/channel-messenger
       '@sahabat-kreator/config':
         specifier: workspace:*
         version: link:../../packages/config
