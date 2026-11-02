@@ -4259,3 +4259,108 @@ en+id penuh.
   dikarang); (3) satu pesan in-flight saat cancel dapat tetap
   terkirim (lihat perbaikan 1); (4) bukti visual UI menunggu uji
   user sesuai pembagian kerja.
+
+## Fase 8A — Flow Engine (backend) (2026-11-02)
+
+- Commit fitur `ad80b57` (migrasi 0031 + kontrak graf + core flows +
+  API + worker/queue + audit/i18n). Deploy: build lokal → rsync →
+  migrasi 0031 bersih via drizzle-kit migrate (jurnal 32 baris;
+  staging kini **39 tabel / 51 policy RLS**) → restart
+  api+worker+web. Publik: health ok, bundle `index-DIc_B-Pi.js`.
+- **Format graf = kontrak sumber kebenaran untuk builder 8B**
+  (`packages/contracts`): `FlowGraph { nodes: [{id, type, config}],
+  edges: [{from, to, branch?}] }`, tepat SATU node `trigger`.
+  Tipe node v1: `trigger` {kind `keyword` {keywords, match
+  exact|contains} | `any_message`}, `send_message` {text, variabel
+  {name}}, `condition` {predicate `has_tag`|`stage_equals`|
+  `field_equals` (name|phone|email)|`message_contains`} → edges
+  branch `yes`/`no`, `delay` {amount, unit seconds|minutes|hours},
+  `add_tag`/`remove_tag` {tag}, `set_stage` {stage},
+  `enroll_sequence` {automationId}, `ai_response` {}, `handoff` {},
+  `end` {}. Mencapai tepi tanpa node berikutnya juga menyelesaikan
+  run.
+- Skema: `flows` (graph jsonb), `flow_runs` (status
+  running|waiting|completed|failed|cancelled, current_node_id,
+  next_step_seq, konteks jsonb berisi teks pemicu), `flow_run_steps`
+  (satu baris per node dieksekusi: node_id, tipe, detail hasil,
+  error) — log per langkah untuk debugging/8B. RLS: ketiga tabel
+  `tenant_isolation` saja; eksekutor worker selalu berjalan dalam
+  konteks tenant pemilik run (tanpa lengan sistem baru). Indeks unik
+  parsial `(flow_id, trigger_message_id)` = idempotensi satu run
+  per (flow, pesan pemicu).
+- Semantik eksekusi: evaluasi pesan masuk diperluas — automation
+  keyword → **flow aktif bertrigger cocok** → agent.respond hanya
+  bila keduanya diam (replay/duplikat dihitung "sudah ditangani"
+  agar tidak bocor ke agent). Job BullMQ `flow.step`, jobId
+  deterministik `flow-<runId>-<stepSeq>`; event outbox
+  `flow.step_due` (delay = resumeAt). Satu transaksi tenant per
+  node. **Cap 100 langkah/run** (`FLOW_MAX_STEPS`) → run `failed`
+  `step_cap_exceeded`. Node `send_message` = pesan queued
+  sender_type system lewat poller/realtime yang ada;
+  `enroll_sequence` meniru jalur sequence yang ada (langkah
+  `skipped` beralasan bila sequence hilang/nonaktif/sudah terdaftar,
+  run lanjut); `ai_response` memanggil `respondToInboundMessage`
+  untuk pesan pemicu DI LUAR transaksi (mode auto terkirim, suggest
+  tercatat, nonaktif/cap/error tercatat sebagai langkah — run tidak
+  crash); `handoff` mematikan `conversations.agent_enabled` + audit
+  `agent.handoff`. Opt-out kontak: tidak ada run baru + run
+  `waiting` di percakapan itu dibatalkan (`contact_opted_out`,
+  konsisten sequence). **Balasan kontak biasa TIDAK membatalkan run
+  flow** (keputusan desain v1; beda dengan sequence yang berhenti
+  saat kontak membalas).
+- API: CRUD `/tenants/:tenantId/flows` (mutasi owner/admin; edit &
+  hapus hanya status draft — selain itu 409 `FLOW_INVALID_STATE`),
+  `POST /flows/:id/validate` (validasi kering, body graf opsional),
+  `activate` (422 `FLOW_GRAPH_INVALID` + `details.issues`
+  terstruktur; sukses mengembalikan `warnings`), deactivate /
+  archive / unarchive, `GET /flows/:id/runs`,
+  `GET /flows/runs/:runId/steps` (paginasi kursor). Validasi:
+  error = graf kosong, id node ganda, trigger hilang/ganda, edge ke
+  node tak dikenal / dari node tak dikenal, branch condition
+  hilang, branch di edge non-condition, config per tipe tidak sah,
+  sequence tidak ditemukan / bukan sequence / nonaktif; warning
+  (tidak memblokir) = trigger tanpa node lanjutan, node tak
+  terjangkau. Audit `flow.created/updated/activated/deactivated/
+  run_started/run_completed/run_failed/run_cancelled` + kategori
+  `flow` berlabel dwibahasa di viewer /audit.
+- Verifikasi: typecheck semua paket hijau; build api/worker/web
+  hijau; PGlite verify lulus 24 seksi (seksi [24] baru: isolasi
+  ketiga tabel + unik (flow, pesan) + cascade hapus); **rantai
+  mock Telegram dari server 75/75 PASS dalam satu run bersih**:
+  (S1) flow keyword lengkap — kontak bertag menempuh branch yes
+  (add_tag + pesan VIP), tanpa tag menempuh no (set_stage), urutan
+  & isi flow_run_steps terverifikasi, replay webhook yang sama
+  tidak membuat run kedua; (S2) delay 6 dtk — run `waiting`, pesan
+  belum terkirim, lalu completed + terkirim; (S3) enroll_sequence
+  benar-benar mendaftarkan + langkah sequence terkirim + handoff
+  mematikan agent_enabled; (S4) ai_response tercatat
+  `responded`; (S5) loop melingkar berhenti di cap — run failed
+  `step_cap_exceeded`, 101 baris langkah (100 + baris cap), worker
+  & API tetap sehat; (S6) opt-out membatalkan run waiting
+  (`contact_opted_out`, pesan sesudah delay tidak pernah terkirim);
+  (S7) validasi — edge menggantung `EDGE_TO_UNKNOWN`, condition
+  satu branch `CONDITION_BRANCH_NO_MISSING`, dua trigger
+  `TRIGGER_MULTIPLE`, sequence tenant lain `SEQUENCE_NOT_FOUND`,
+  node yatim hanya warning `NODE_UNREACHABLE`, member agent baca
+  200/mutasi 403, isolasi lintas tenant 404, edit/hapus flow aktif
+  409; (S8) regresi gabungan — keyword automation lama, sequence
+  lama, gating flow any_message menahan agent, dan fallback agent
+  sesudah flow nonaktif semuanya utuh; channel asli user
+  (@botaramyid_bot) tetap connected; `.env.staging` pulih
+  byte-identik (sha256 `9c1ded2a…`), port mock tertutup.
+- Catatan rantai (bukan bug produk): worker staging kini memakai
+  **LLM asli OpenRouter** (kunci panel sudah terisi), jadi balasan
+  agent tidak lagi teks kalengan MockProvider — asersi rantai
+  dibuat agnostik isi. LLM asli juga sah membalas tool-call saja
+  tanpa teks (semantik Fase 3A: `responded` tanpa pesan keluar).
+  Skenario timing (delay/opt-out) sensitif terhadap banjir pesan
+  uji loop pada proses API tunggal; rantai menunggu antrean poller
+  terkuras sebelum skenario timing.
+- Batas jujur: (1) belum ada UI builder (itu Fase 8B) — flow saat
+  ini dibuat via API; (2) satu pesan masuk dapat memulai banyak
+  flow berbeda sekaligus (satu run per flow) — belum ada prioritas
+  antar-flow; (3) balasan kontak tidak membatalkan run (keputusan
+  v1 di atas); (4) `ai_response` selalu memakai pesan PEMICU run
+  sebagai konteks, bukan pesan terbaru percakapan; (5) cap langkah
+  menghitung node yang dieksekusi, bukan waktu — flow delay-panjang
+  yang sah tidak terpotong cap.
