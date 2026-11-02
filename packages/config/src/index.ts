@@ -82,6 +82,16 @@ const EnvSchema = z.object({
    * tanpa biaya) atau 'openrouter' (model sungguhan via OpenRouter).
    */
   LLM_PROVIDER: z.enum(["mock", "openrouter"]).default("mock"),
+  /**
+   * Jendela batching balasan AI (Fase 9A): job `agent.respond` untuk
+   * pesan pemicu dijadwalkan worker dengan delay sebesar ini; job yang
+   * pesannya sudah disusul pesan masuk yang lebih baru MENYERAH
+   * (audit agent.batched) sehingga satu rentetan pesan beruntun hanya
+   * dijawab sekali. Trade-off yang disengaja: balasan agent tiba
+   * ±satu jendela lebih lambat. 0 = tanpa penundaan (penyerahan tetap
+   * mungkin bila pesan berikutnya tiba sebelum job berjalan).
+   */
+  AGENT_BATCH_WINDOW_MS: z.coerce.number().int().min(0).max(120_000).default(5_000),
   /** Provider AI untuk pengembangan (OpenRouter free tier). Mock LLM adalah default di test. */
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   OPENROUTER_MODEL: z.string().min(1).optional(),

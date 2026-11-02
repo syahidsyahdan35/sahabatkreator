@@ -1,4 +1,4 @@
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, sql } from "drizzle-orm";
 import {
   auditLogs,
   agentSuggestions,
@@ -38,17 +38,21 @@ import {
  *    hanya bila percakapan masih mengizinkan AI
  *    (`conversations.agent_enabled` — kolom Fase 1D; tool handoff
  *    mematikannya, sesuai catatan di schema/agents.ts).
- * 2. Cek caps harian tenant (AGENT_DAILY_RESPONSE_CAP respons/hari dari
+ * 2. Batching (Fase 9A, hanya bila `yieldToNewerMessage`): ada pesan
+ *    masuk kontak yang lebih baru di percakapan yang sama → menyerah
+ *    (audit `agent.batched`) agar satu rentetan pesan hanya dijawab
+ *    sekali oleh job pesan terbarunya.
+ * 3. Cek caps harian tenant (AGENT_DAILY_RESPONSE_CAP respons/hari dari
  *    usage_ledger; lewat → audit `agent.capped`, tidak menjawab).
- * 3. Rakit konteks: prompt sistem agent + riwayat 20 pesan terakhir +
+ * 4. Rakit konteks: prompt sistem agent + riwayat 20 pesan terakhir +
  *    retrieval KB (full-text, top 5) untuk teks pesan pemicu.
- * 4. Panggil provider LLM (@sahabat-kreator/ai). Error/timeout provider →
+ * 5. Panggil provider LLM (@sahabat-kreator/ai). Error/timeout provider →
  *    audit `agent.failed`, TIDAK ada pesan keluar, job tidak crash.
- * 5. Catat metering: usage_ledger type='ai_token' (qty = total token,
+ * 6. Catat metering: usage_ledger type='ai_token' (qty = total token,
  *    biaya model dicatat dari provider — mock selalu 0; rincian
  *    provider/model/token ada di audit `agent.responded` karena
  *    usage_ledger memang tidak punya kolom metadata) + audit.
- * 6. Mode 'auto': tool dieksekusi, lalu teks balasan menjadi pesan
+ * 7. Mode 'auto': tool dieksekusi, lalu teks balasan menjadi pesan
  *    outbound sender_type='agent' berstatus 'queued' + event outbox
  *    `message.queued` (pengiriman sungguhan oleh poller API seperti
  *    automation — worker tidak menyentuh transport).
@@ -354,6 +358,7 @@ export type AgentSkipReason =
   | "channel_conversation"
   | "ai_disabled"
   | "no_active_agent"
+  | "batched"
   | "capped"
   | "provider_error"
   | "empty_response";
@@ -409,6 +414,18 @@ export async function respondToInboundMessage(
     messageId: string;
     /** Base URL publik untuk tool send_payment_link (dari env worker). */
     publicBaseUrl?: string;
+    /**
+     * Batching balasan AI (Fase 9A): bila true, job ini MENYERAH
+     * (audit `agent.batched`, reason 'batched', TANPA memanggil LLM
+     * dan TANPA mengonsumsi cap) bila ada pesan masuk kontak yang
+     * LEBIH BARU di percakapan yang sama — job milik pesan terbaru
+     * yang akan menjawab, dan riwayat dibaca saat eksekusi sehingga
+     * jawabannya mencakup seluruh rentetan. Hanya dinyalakan jalur
+     * job `agent.respond` (yang memang dijadwalkan worker dengan
+     * delay jendela batch); node flow `ai_response` TIDAK menyalakan
+     * ini — jalur flow tidak berubah.
+     */
+    yieldToNewerMessage?: boolean;
   },
 ): Promise<AgentRespondResult> {
   const { tenantId, conversationId, messageId } = input;
@@ -453,6 +470,42 @@ export async function respondToInboundMessage(
   // 2. Agent aktif tenant (tertua).
   const agent = await getActiveAgent(db, ctx);
   if (!agent) return { responded: false, reason: "no_active_agent" };
+
+  // 2b. Batching (Fase 9A): kontak yang mengirim beberapa pesan
+  // beruntun hanya dijawab SEKALI — oleh job pesan terbarunya. Job
+  // yang pesannya sudah disusul pesan masuk yang lebih baru di
+  // percakapan yang sama menyerah di sini: sebelum cek cap dan
+  // sebelum panggilan LLM, jadi cap tidak terhitung ganda dan tidak
+  // ada biaya model yang terbuang.
+  if (input.yieldToNewerMessage) {
+    const supersededBy = await withTenantDb(db, tenantId, async (tx) => {
+      const [newer] = await tx
+        .select({ id: messages.id })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.tenantId, tenantId),
+            eq(messages.conversationId, conversationId),
+            eq(messages.direction, "inbound"),
+            eq(messages.senderType, "contact"),
+            gt(messages.createdAt, message.createdAt),
+          ),
+        )
+        .orderBy(asc(messages.createdAt))
+        .limit(1);
+      return newer?.id ?? null;
+    });
+    if (supersededBy) {
+      await withTenantDb(db, tenantId, async (tx) => {
+        await insertAgentAudit(tx, tenantId, agent.id, "agent.batched", {
+          conversationId,
+          triggerMessageId: messageId,
+          supersededByMessageId: supersededBy,
+        });
+      });
+      return { responded: false, reason: "batched" };
+    }
+  }
 
   // 3. Caps harian (hari berjalan UTC, dari usage_ledger).
   const usedToday = await withTenantDb(db, tenantId, async (tx) => {

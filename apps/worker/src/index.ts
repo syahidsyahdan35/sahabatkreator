@@ -65,6 +65,11 @@ import {
  *    LLM (mock default / OpenRouter via env) → eksekusi tool / draf
  *    saran → metering usage_ledger + audit. Balasan agent juga berhenti
  *    sebagai pesan `queued`; poller API yang mengirimnya lewat hub WS.
+ *    Fase 9A: job di-enqueue dengan delay jendela batch
+ *    (AGENT_BATCH_WINDOW_MS, default 5000) dan core menyerah
+ *    (agent.batched) bila ada pesan masuk yang lebih baru — satu
+ *    rentetan pesan hanya dijawab sekali; automation/flow tidak ikut
+ *    tertunda.
  * 4. LANGKAH SEQUENCE (Fase 2C): relay juga menerjemahkan event outbox
  *    `sequence.step_due` menjadi job tertunda `sequence.step`
  *    (delay = delay_minutes langkah, jobId `seq-<enrollmentId>-<posisi>`).
@@ -201,11 +206,21 @@ const bullWorker = new Worker<MainJobData>(
         result.flowRunsStarted === 0 &&
         result.flowDuplicateStarts === 0
       ) {
-        await enqueueAgentRespond(queue, {
-          tenantId: data.tenantId,
-          conversationId: data.conversationId,
-          messageId: data.messageId,
-        });
+        // Fase 9A — batching: job respond ditunda sebesar jendela
+        // batch (env AGENT_BATCH_WINDOW_MS, default 5000). Job yang
+        // pesannya sudah disusul pesan yang lebih baru akan menyerah
+        // di core (agent.batched); hanya job pesan terbaru yang
+        // benar-benar memanggil LLM. Automation/flow di atas TIDAK
+        // ikut tertunda — penundaan hanya milik jalur agent.
+        await enqueueAgentRespond(
+          queue,
+          {
+            tenantId: data.tenantId,
+            conversationId: data.conversationId,
+            messageId: data.messageId,
+          },
+          { delay: env.AGENT_BATCH_WINDOW_MS },
+        );
       }
       return result;
     }
@@ -306,6 +321,10 @@ const bullWorker = new Worker<MainJobData>(
         // Untuk tool send_payment_link (Fase 4A): URL /pay/:code yang
         // dikirim agent harus absolut, berbasis URL publik aplikasi.
         publicBaseUrl: env.BETTER_AUTH_URL,
+        // Fase 9A: jalur job inilah yang dibatch (lihat enqueue di
+        // processor automation.evaluate) — menyerah bila ada pesan
+        // masuk yang lebih baru di percakapan yang sama.
+        yieldToNewerMessage: true,
       });
       if (result.responded || result.reason) {
         console.log(
