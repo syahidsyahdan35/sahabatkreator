@@ -2,6 +2,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import {
   kbChunks,
   kbDocuments,
+  kbSourceDocuments,
   type Database,
   type KbDocument,
 } from "@sahabat-kreator/db";
@@ -148,16 +149,42 @@ export async function deleteKbDocument(
   documentId: string,
 ): Promise<boolean> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
-    const deleted = await tx
-      .delete(kbDocuments)
+    const [doc] = await tx
+      .select({
+        id: kbDocuments.id,
+        sourceDocumentId: kbDocuments.sourceDocumentId,
+      })
+      .from(kbDocuments)
       .where(
         and(
           eq(kbDocuments.tenantId, ctx.tenantId),
           eq(kbDocuments.id, documentId),
         ),
       )
-      .returning({ id: kbDocuments.id });
-    return deleted.length > 0;
+      .limit(1);
+    if (!doc) return false;
+    await tx
+      .delete(kbDocuments)
+      .where(
+        and(
+          eq(kbDocuments.tenantId, ctx.tenantId),
+          eq(kbDocuments.id, documentId),
+        ),
+      );
+    // Fase 12C: entri hasil impor berkas — berkas asal ikut dibersihkan
+    // agar daftar dokumen tidak menyisakan baris yatim. (Arah sebaliknya
+    // — hapus berkas menghapus entri — ditangani cascade FK.)
+    if (doc.sourceDocumentId) {
+      await tx
+        .delete(kbSourceDocuments)
+        .where(
+          and(
+            eq(kbSourceDocuments.tenantId, ctx.tenantId),
+            eq(kbSourceDocuments.id, doc.sourceDocumentId),
+          ),
+        );
+    }
+    return true;
   });
 }
 

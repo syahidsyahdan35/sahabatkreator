@@ -62,7 +62,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 9C (conversation_notes)
 // + 1 tabel Fase 10A (whatsapp_templates)
 // + 1 tabel Fase 10B (comments)
-assert.equal(Number(tablesRes.rows[0].count), 43);
+// + 1 tabel Fase 12C (kb_source_documents)
+assert.equal(Number(tablesRes.rows[0].count), 44);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -152,7 +153,9 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada whatsapp_templates (Fase 10A, migrasi
 //   0036) = 55.
 // + tenant_isolation pada comments (Fase 10B, migrasi 0037) = 56.
-assert.equal(Number(policies.rows[0].count), 56);
+// + tenant_isolation pada kb_source_documents (Fase 12C, migrasi
+//   0039) = 57.
+assert.equal(Number(policies.rows[0].count), 57);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -172,7 +175,8 @@ await db.exec(`
     saved_replies,
     conversation_notes,
     whatsapp_templates,
-    comments
+    comments,
+    kb_source_documents
   TO app_user;
 `);
 
@@ -2059,6 +2063,94 @@ const GOTO_RUN_2 = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2";
   assert.equal(views.other.rows[0].n, "0");
   console.log(
     "[31] Fase 12A: flow_runs.trigger_message_id nullable (migrasi 0038) — run goto tanpa pesan pemicu tersimpan; dua run NULL pada flow sama diterima (unik parsial abaikan NULL); tenant lain 0 baris: OK",
+  );
+}
+
+// ---------- 32. Fase 12C: lampiran berkas KB (kb_source_documents) ----------
+// Migrasi 0039: (a) kolom kb_documents.source_document_id nullable ada;
+// (b) baris berkas + entri turunan + chunk bisa ditulis dalam konteks
+// tenant pemilik, byte bytea terbaca kembali utuh; (c) tenant lain 0
+// baris dan insert lintas tenant ditolak RLS; (d) menghapus baris
+// berkas men-cascade ke entri turunan + chunk-nya, sementara entri
+// tulis tangan (source NULL) di tenant yang sama TIDAK terpengaruh.
+const KB_SRC_12C = "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1";
+const KB_ENTRY_12C = "d2d2d2d2-d2d2-42d2-82d2-d2d2d2d2d2d2";
+const KB_MANUAL_12C = "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3";
+{
+  const col = await db.query<{ is_nullable: string }>(
+    `SELECT is_nullable FROM information_schema.columns
+      WHERE table_name = 'kb_documents' AND column_name = 'source_document_id'`,
+  );
+  assert.equal(col.rows[0].is_nullable, "YES");
+
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    await tx.query(
+      `INSERT INTO kb_source_documents (id, tenant_id, file_name, mime_type, byte_size, data, chunk_count, created_by)
+       VALUES ($1, $2, 'panduan.txt', 'text/plain', 4, '\\x01020304', 2, $3)`,
+      [KB_SRC_12C, TENANT_A, USER_A],
+    );
+    await tx.query(
+      `INSERT INTO kb_documents (id, tenant_id, title, content, source_document_id)
+       VALUES ($1, $2, 'panduan.txt', 'isi panduan', $3),
+              ($4, $2, 'Entri Manual', 'tulis tangan', NULL)`,
+      [KB_ENTRY_12C, TENANT_A, KB_SRC_12C, KB_MANUAL_12C],
+    );
+    await tx.query(
+      `INSERT INTO kb_chunks (tenant_id, document_id, chunk_index, content)
+       VALUES ($1, $2, 0, 'potongan satu'), ($1, $2, 1, 'potongan dua')`,
+      [TENANT_A, KB_ENTRY_12C],
+    );
+    const back = await tx.query<{ data: Uint8Array; chunk_count: number }>(
+      `SELECT data, chunk_count FROM kb_source_documents WHERE id = $1`,
+      [KB_SRC_12C],
+    );
+
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const otherFiles = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM kb_source_documents`,
+    );
+    const otherDocs = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM kb_documents`,
+    );
+    let crossBlocked = false;
+    await tx.query(`SAVEPOINT sp32`);
+    try {
+      await tx.query(
+        `INSERT INTO kb_source_documents (tenant_id, file_name, mime_type, byte_size, data)
+         VALUES ($1, 'lintas.txt', 'text/plain', 1, '\\x00')`,
+        [TENANT_A],
+      );
+    } catch (err) {
+      crossBlocked = /row-level security/i.test(String(err));
+      await tx.query(`ROLLBACK TO SAVEPOINT sp32`);
+    }
+    return { back, otherFiles, otherDocs, crossBlocked };
+  });
+  assert.equal(Buffer.from(views.back.rows[0].data).toString("hex"), "01020304");
+  assert.equal(views.back.rows[0].chunk_count, 2);
+  assert.equal(views.otherFiles.rows[0].n, "0");
+  assert.equal(views.otherDocs.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+
+  // Hapus berkas (superuser — cascade murni FK, tanpa konteks RLS):
+  // entri turunan + chunk hilang, entri manual tetap.
+  await db.query(`DELETE FROM kb_source_documents WHERE id = $1`, [KB_SRC_12C]);
+  const after = await db.query<{ files: string; derived: string; chunks: string; manual: string }>(
+    `SELECT
+       (SELECT count(*)::text FROM kb_source_documents WHERE id = $1) AS files,
+       (SELECT count(*)::text FROM kb_documents WHERE id = $2) AS derived,
+       (SELECT count(*)::text FROM kb_chunks WHERE document_id = $2) AS chunks,
+       (SELECT count(*)::text FROM kb_documents WHERE id = $3) AS manual`,
+    [KB_SRC_12C, KB_ENTRY_12C, KB_MANUAL_12C],
+  );
+  assert.equal(after.rows[0].files, "0");
+  assert.equal(after.rows[0].derived, "0");
+  assert.equal(after.rows[0].chunks, "0");
+  assert.equal(after.rows[0].manual, "1");
+  console.log(
+    "[32] Fase 12C: kb_source_documents (migrasi 0039) — berkas+entri+chunk tertulis dalam konteks pemilik, bytea utuh, tenant lain 0 baris & insert lintas ditolak RLS; hapus berkas men-cascade entri+chunk, entri manual tetap: OK",
   );
 }
 

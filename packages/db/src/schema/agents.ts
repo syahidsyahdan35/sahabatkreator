@@ -13,6 +13,7 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
+import { users } from "./identity";
 import { contacts, conversations, messages } from "./inbox";
 
 /**
@@ -24,6 +25,15 @@ import { contacts, conversations, messages } from "./inbox";
  *                       agent penanggung jawab per tenant di fase ini.
  * - kb_documents      : dokumen basis pengetahuan milik tenant (teks bebas
  *                       di fase ini; PDF/link menyusul sebagai source type).
+ *                       Fase 12C menambah `source_document_id`: entri yang
+ *                       lahir dari unggahan berkas menunjuk baris
+ *                       `kb_source_documents` asalnya (NULL = tulis tangan).
+ * - kb_source_documents: berkas asli unggahan KB (Fase 12C) — byte mentah
+ *                       (bytea, pola profile_photos 6D), nama/mime/ukuran,
+ *                       jumlah chunk hasil impor, dan pengunggah. Menghapus
+ *                       baris ini men-cascade ke entri `kb_documents`
+ *                       turunannya (dan chunk-nya); entri tulis tangan
+ *                       tidak terpengaruh.
  * - kb_chunks         : potongan ±800 karakter dari dokumen untuk retrieval.
  *                       `search_vector` adalah kolom tsvector TER-GENERATE
  *                       dari `content` dengan konfigurasi 'simple' —
@@ -86,6 +96,17 @@ const vector1536 = customType<{ data: number[]; driverData: string }>({
   },
 });
 
+/**
+ * Byte mentah berkas (Fase 12C) — drizzle-orm 0.44 belum mengekspor kolom
+ * `bytea` bawaan untuk pg; pola yang sama dengan profile_photos (6D):
+ * driver pg & PGlite mengembalikan Buffer/Uint8Array.
+ */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
 export const agents = pgTable(
   "agents",
   {
@@ -127,6 +148,15 @@ export const kbDocuments = pgTable(
       .references(() => tenants.id, { onDelete: "cascade" }),
     title: varchar("title", { length: 255 }).notNull(),
     content: text("content").notNull(),
+    /**
+     * Berkas asal entri ini (Fase 12C): terisi untuk entri hasil impor
+     * unggahan, NULL untuk entri tulis tangan. ON DELETE CASCADE dari
+     * sisi berkas: menghapus berkas menghapus entri ini (dan chunk-nya).
+     */
+    sourceDocumentId: uuid("source_document_id").references(
+      () => kbSourceDocuments.id,
+      { onDelete: "cascade" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -134,7 +164,46 @@ export const kbDocuments = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("kb_documents_tenant_id_idx").on(t.tenantId)],
+  (t) => [
+    index("kb_documents_tenant_id_idx").on(t.tenantId),
+    index("kb_documents_source_document_idx").on(t.sourceDocumentId),
+  ],
+);
+
+/**
+ * Berkas asli unggahan Knowledge Base (Fase 12C): satu baris per berkas
+ * yang diunggah user (PDF/TXT/MD ≤5MB). Byte disimpan di DB (bytea) —
+ * belum ada konsumen R2 dan ukuran dibatasi kecil; teks hasil ekstraksi
+ * hidup sebagai entri `kb_documents` biasa (source_document_id ke sini)
+ * yang di-chunk ke `kb_chunks`, jadi retrieval agent tidak berubah.
+ * `chunk_count` dicatat saat impor (jumlah chunk entri turunannya).
+ */
+export const kbSourceDocuments = pgTable(
+  "kb_source_documents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    mimeType: varchar("mime_type", { length: 128 }).notNull(),
+    byteSize: integer("byte_size").notNull(),
+    /** Byte mentah berkas sebagaimana diunggah. */
+    data: bytea("data").notNull(),
+    /** Jumlah chunk KB hasil impor berkas ini (0 sampai impor selesai). */
+    chunkCount: integer("chunk_count").notNull().default(0),
+    /** User pengunggah; SET NULL bila user hilang (pola saved_replies). */
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("kb_source_documents_tenant_id_idx").on(t.tenantId)],
 );
 
 export const kbChunks = pgTable(
@@ -213,6 +282,8 @@ export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
 export type KbDocument = typeof kbDocuments.$inferSelect;
 export type NewKbDocument = typeof kbDocuments.$inferInsert;
+export type KbSourceDocument = typeof kbSourceDocuments.$inferSelect;
+export type NewKbSourceDocument = typeof kbSourceDocuments.$inferInsert;
 export type KbChunk = typeof kbChunks.$inferSelect;
 export type NewKbChunk = typeof kbChunks.$inferInsert;
 export type AgentSuggestion = typeof agentSuggestions.$inferSelect;

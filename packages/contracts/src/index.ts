@@ -66,6 +66,13 @@ export const ErrorCodeSchema = z.enum([
   "FLOW_INVALID_STATE",
   // Fase 12B: instantiate galeri template dengan slug tak dikenal → 404.
   "FLOW_TEMPLATE_NOT_FOUND",
+  // Fase 12C: lampiran berkas KB — berkas tanpa teks yang bisa
+  // diekstrak (PDF hasil pindaian / berkas rusak) → 422 dan dokumen
+  // TIDAK disimpan; tipe di luar PDF/TXT/MD → 422; ukuran di atas
+  // batas 5MB → 422 (konvensi apiError codebase tidak memakai 413).
+  "KB_DOCUMENT_NO_TEXT",
+  "KB_DOCUMENT_TYPE_UNSUPPORTED",
+  "KB_DOCUMENT_TOO_LARGE",
   // Fase 9B: merge kontak ke dirinya sendiri → 422.
   "CONTACT_MERGE_SAME",
   // Fase 9C: kedalaman inbox tim — penerima tugas bukan member workspace
@@ -1388,6 +1395,35 @@ export type KbDocumentListResponse = z.infer<
   typeof KbDocumentListResponseSchema
 >;
 
+/**
+ * Berkas lampiran KB (Fase 12C): byte asli tersimpan di
+ * `kb_source_documents`; teks hasil ekstraksinya menjadi satu entri
+ * `KbDocumentResponse` biasa (`documentId` di sini) yang ter-chunk
+ * untuk retrieval. Respons ini TIDAK pernah membawa byte berkas —
+ * unduh berkas asli tidak dibuat di v1.
+ */
+export const KbFileDocumentResponseSchema = z.object({
+  id: z.string().uuid(),
+  fileName: z.string(),
+  mimeType: z.string(),
+  byteSize: z.number().int().nonnegative(),
+  /** Jumlah chunk entri KB turunan berkas ini. */
+  chunkCount: z.number().int().nonnegative(),
+  /** Id entri KB (kb_documents) yang lahir dari berkas ini. */
+  documentId: z.string().uuid(),
+  createdAt: z.string().datetime(),
+});
+export type KbFileDocumentResponse = z.infer<
+  typeof KbFileDocumentResponseSchema
+>;
+
+export const KbFileDocumentListResponseSchema = z.object({
+  files: z.array(KbFileDocumentResponseSchema),
+});
+export type KbFileDocumentListResponse = z.infer<
+  typeof KbFileDocumentListResponseSchema
+>;
+
 // ---------------------------------------------------------------------------
 // Agent suggestions (Fase 3A) — draf balasan dari agent mode 'suggest'.
 // Approve = kirim teks saran sebagai pesan outbound agent (status saran
@@ -2006,6 +2042,7 @@ export const AuditCategorySchema = z.enum([
   "broadcast",
   "whatsapp_template",
   "flow",
+  "kb_document",
 ]);
 export type AuditCategory = z.infer<typeof AuditCategorySchema>;
 

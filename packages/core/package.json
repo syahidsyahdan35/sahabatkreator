@@ -3,6 +3,7 @@
     "@sahabat-kreator/ai": "workspace:*",
     "@sahabat-kreator/db": "workspace:*",
     "drizzle-orm": "^0.44.6",
+    "unpdf": "^2.1.0",
     "@sahabat-kreator/contracts": "workspace:*"
   },
   "devDependencies": {

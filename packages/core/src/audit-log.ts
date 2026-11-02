@@ -38,8 +38,10 @@ import { withTenantDb, type DbTx } from "./tx";
  *   actor-nya tetap `agent`), payment_link, payment, api_key,
  *   telegram, integration, platform_settings (tenant NULL),
  *   conversation (Fase 9C: assigned/unassigned/note_created/
- *   note_deleted) dan team (Fase 9C: invited/invitation_revoked/
- *   member_joined/role_changed/member_removed).
+ *   note_deleted), team (Fase 9C: invited/invitation_revoked/
+ *   member_joined/role_changed/member_removed) dan kb_document
+ *   (Fase 12C: uploaded/deleted — meta sourceDocumentId menunjuk
+ *   berkas lampiran KB di kb_source_documents).
  * - meta: id referensi + fakta berkode per action. Penulis audit secara
  *   eksplisit TIDAK menulis rahasia (token/secret tidak pernah masuk
  *   meta; platform_settings hanya menulis nama kunci). Satu-satunya
@@ -127,6 +129,8 @@ export function auditActionCategory(action: string): string {
  * sequence.*). Hanya nilai string non-kosong yang dipakai.
  */
 const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
+  // Fase 12C: kb_document.* menargetkan berkas sumbernya.
+  ["sourceDocumentId", "kb_document"],
   // whatsappTemplateId didahulukan: meta whatsapp_template.* membawa
   // juga channelAccountId, dan target utamanya adalah templatenya.
   ["whatsappTemplateId", "whatsapp_template"],

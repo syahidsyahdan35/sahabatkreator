@@ -118,6 +118,20 @@ export {
   type KbSearchHit,
 } from "./kb";
 export {
+  KB_FILE_CHUNK_MAX,
+  KB_FILE_CHUNK_OVERLAP,
+  KB_FILE_MAX_BYTES,
+  chunkKbDocumentText,
+  deleteKbFile,
+  extractKbFileText,
+  importKbFile,
+  listKbFiles,
+  resolveKbFileKind,
+  type KbFileKind,
+  type KbFileWithEntry,
+  type ResolvedKbFileKind,
+} from "./kb-files";
+export {
   respondToInboundMessage,
   executeAgentToolCall,
   AGENT_DAILY_RESPONSE_CAP,
