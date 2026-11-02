@@ -146,12 +146,18 @@ server.registerTool(
       name: z.string().min(1).max(255).describe("Nama kontak"),
       phone: z.string().min(1).max(32).optional().describe("Nomor telepon (opsional)"),
       email: z.string().email().max(320).optional().describe("Email (opsional)"),
+      customFields: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          "Field kustom kontak sebagai peta string→string (opsional; kunci 1–64 karakter, nilai maks 1000 karakter, maks 50 entri)",
+        ),
     },
     annotations: { readOnlyHint: false },
   },
-  async ({ name, phone, email }) =>
+  async ({ name, phone, email, customFields }) =>
     writesEnabled
-      ? run(() => client.createContact({ name, phone, email }))
+      ? run(() => client.createContact({ name, phone, email, customFields }))
       : writeDisabledResult("create_contact"),
 );
 

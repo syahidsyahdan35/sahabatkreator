@@ -411,10 +411,16 @@ export async function updateMemberRole(
       )
       .limit(1);
     if (!target) return { kind: "not_found" } as const;
-    if (target.role === "owner") return { kind: "owner_protected" } as const;
+    // Fase 13A: cek DIRI didahulukan dari cek owner — pemilik yang
+    // menargetkan dirinya sendiri menerima TEAM_SELF_ACTION (diagnosis
+    // yang benar: aksinya ditolak karena self-action), bukan
+    // TEAM_OWNER_PROTECTED. Perlindungan owner TIDAK berubah untuk
+    // aktor lain: owner yang ditarget member/admin lain tetap
+    // owner_protected karena cek diri hanya cocok bila aktor = target.
     if (input.targetUserId === input.actorUserId) {
       return { kind: "self_action" } as const;
     }
+    if (target.role === "owner") return { kind: "owner_protected" } as const;
     if (target.role === input.role) {
       return { kind: "updated", member: target } as const;
     }
@@ -460,10 +466,12 @@ export async function removeMember(
       )
       .limit(1);
     if (!target) return { kind: "not_found" } as const;
-    if (target.role === "owner") return { kind: "owner_protected" } as const;
+    // Fase 13A: cek diri sebelum cek owner — alasan sama seperti
+    // updateMemberRole di atas.
     if (input.targetUserId === input.actorUserId) {
       return { kind: "self_action" } as const;
     }
+    if (target.role === "owner") return { kind: "owner_protected" } as const;
     await tx.delete(tenantMembers).where(eq(tenantMembers.id, target.id));
     // Penugasan percakapan milik member yang keluar kembali ke kolam
     // "belum ditugaskan" — bukan menggantung ke non-member.

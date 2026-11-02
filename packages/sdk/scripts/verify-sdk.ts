@@ -53,6 +53,40 @@ try {
   );
 }
 
+// Fase 13A: customFields tertulis lewat SDK — buat membawa field, PATCH
+// menimpa per kunci dan mempertahankan kunci lain (semantik gabung
+// server). Kunci tanpa contacts:write menerima API_KEY_SCOPE_DENIED
+// bertipe — itu pun membuktikan metode terhubung (pola listComments).
+try {
+  const stamp = Date.now();
+  const createdContact = await client.createContact({
+    name: `SDK Uji 13A ${stamp}`,
+    customFields: { kota: "Bandung", sumber: "verify-sdk" },
+  });
+  check(
+    "createContact(customFields) tersimpan",
+    createdContact.customFields?.kota === "Bandung" &&
+      createdContact.customFields?.sumber === "verify-sdk",
+    `id=${createdContact.id}`,
+  );
+  const updatedContact = await client.updateContact(createdContact.id, {
+    customFields: { kota: "Jakarta" },
+  });
+  check(
+    "updateContact(customFields) gabung per kunci",
+    updatedContact.customFields?.kota === "Jakarta" &&
+      updatedContact.customFields?.sumber === "verify-sdk",
+    `id=${updatedContact.id}`,
+  );
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "createContact/updateContact terhubung (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

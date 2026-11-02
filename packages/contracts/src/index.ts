@@ -166,11 +166,29 @@ export type TenantListResponse = z.infer<typeof TenantListResponseSchema>;
 export const OptInStatusSchema = z.enum(["unknown", "opted_in", "opted_out"]);
 export type OptInStatus = z.infer<typeof OptInStatusSchema>;
 
+/**
+ * Peta field kustom kontak: string → string (Fase 13A — sebelumnya hanya
+ * bisa ditulis jalur internal: node flow `set_field`, merge kontak, dst.;
+ * kini juga permukaan publik). Aturan bentuk: kunci 1–64 karakter
+ * (sesudah trim), nilai string maks 1000 karakter, maks 50 entri. Nilai
+ * non-string DITOLAK — pemanggil mengonversi angka/boolean sendiri agar
+ * tidak ada koersi senyap. Semantik tulis: buat = apa adanya; ubah =
+ * GABUNG per kunci (kunci yang dikirim menimpa, yang tidak disebut
+ * dipertahankan — sama seperti set_field menulis satu kunci).
+ */
+export const ContactCustomFieldsSchema = z
+  .record(z.string().trim().min(1).max(64), z.string().max(1000))
+  .refine((fields) => Object.keys(fields).length <= 50, {
+    message: "At most 50 custom fields",
+  });
+export type ContactCustomFields = z.infer<typeof ContactCustomFieldsSchema>;
+
 export const CreateContactRequestSchema = z.object({
   name: z.string().trim().min(1).max(255),
   phone: z.string().trim().min(1).max(32).optional(),
   email: z.string().trim().email().max(320).optional(),
   tags: z.array(z.string().trim().min(1).max(64)).max(50).optional(),
+  customFields: ContactCustomFieldsSchema.optional(),
 });
 export type CreateContactRequest = z.infer<typeof CreateContactRequestSchema>;
 
@@ -179,6 +197,7 @@ export const UpdateContactRequestSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(64)).max(50).optional(),
   pipelineStage: z.string().trim().min(1).max(64).optional(),
   optInStatus: OptInStatusSchema.optional(),
+  customFields: ContactCustomFieldsSchema.optional(),
 });
 export type UpdateContactRequest = z.infer<typeof UpdateContactRequestSchema>;
 

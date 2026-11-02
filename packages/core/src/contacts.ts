@@ -29,6 +29,8 @@ export interface CreateContactInput {
   phone?: string;
   email?: string;
   tags?: string[];
+  /** Field kustom awal (Fase 13A) — disimpan apa adanya. */
+  customFields?: Record<string, string>;
 }
 
 export interface UpdateContactInput {
@@ -36,6 +38,12 @@ export interface UpdateContactInput {
   tags?: string[];
   pipelineStage?: string;
   optInStatus?: "unknown" | "opted_in" | "opted_out";
+  /**
+   * Field kustom (Fase 13A) — semantik GABUNG per kunci: kunci yang
+   * dikirim menimpa nilai lama, kunci lain dipertahankan (konsisten
+   * dengan node flow `set_field` yang menulis satu kunci).
+   */
+  customFields?: Record<string, string>;
 }
 
 export interface ListContactsInput {
@@ -58,6 +66,7 @@ export async function createContact(
         phone: input.phone ?? null,
         email: input.email ?? null,
         tags: input.tags ?? [],
+        customFields: input.customFields ?? {},
       })
       .returning();
     return row;
@@ -127,6 +136,23 @@ export async function updateContact(
     if (input.name !== undefined) patch.name = input.name;
     if (input.tags !== undefined) patch.tags = input.tags;
     if (input.pipelineStage !== undefined) patch.pipelineStage = input.pipelineStage;
+    if (input.customFields !== undefined) {
+      // Gabung per kunci di atas nilai tersimpan — baca dulu dalam
+      // transaksi yang sama; kontak tak ada → null (API menjawab 404),
+      // sama seperti hasil update kosong di bawah.
+      const [existing] = await tx
+        .select({ customFields: contacts.customFields })
+        .from(contacts)
+        .where(
+          and(eq(contacts.tenantId, ctx.tenantId), eq(contacts.id, contactId)),
+        )
+        .limit(1);
+      if (!existing) return null;
+      patch.customFields = {
+        ...(existing.customFields as Record<string, unknown>),
+        ...input.customFields,
+      };
+    }
     if (input.optInStatus !== undefined) {
       patch.optInStatus = input.optInStatus;
       // opted_in dicatat sebagai consent; opted_out mencabutnya.

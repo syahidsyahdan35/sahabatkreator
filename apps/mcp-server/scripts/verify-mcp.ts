@@ -266,12 +266,26 @@ try {
 // --- Tier BACA+TULIS: sesi kedua dengan MCP_ALLOW_WRITES=1 ---------------
 const writer = await connect(fullKey, true);
 try {
-  const createdResult = await call(writer, "create_contact", { name: uniqueNameRef.name });
-  const created = resultJson<{ id: string; name: string }>(createdResult);
+  const createdResult = await call(writer, "create_contact", {
+    name: uniqueNameRef.name,
+    customFields: { sumber: "verify-mcp", kota: "Bandung" },
+  });
+  const created = resultJson<{
+    id: string;
+    name: string;
+    customFields?: Record<string, unknown>;
+  }>(createdResult);
   check(
     "MCP_ALLOW_WRITES=1: create_contact berhasil",
     !createdResult.isError && !!created && created.name === uniqueNameRef.name,
     created ? `id=${created.id}` : resultText(createdResult),
+  );
+  check(
+    "MCP_ALLOW_WRITES=1: create_contact customFields tersimpan (Fase 13A)",
+    !!created &&
+      created.customFields?.sumber === "verify-mcp" &&
+      created.customFields?.kota === "Bandung",
+    created ? `customFields=${JSON.stringify(created.customFields)}` : "",
   );
 
   const searchResult = await call(writer, "list_contacts", { search: uniqueNameRef.name });

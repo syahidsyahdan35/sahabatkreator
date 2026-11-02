@@ -16,6 +16,7 @@ import type {
   ProductListResponse,
   PublicMeResponse,
   SendMessageRequest,
+  UpdateContactRequest,
 } from "@sahabat-kreator/contracts";
 
 /**
@@ -54,6 +55,7 @@ export type {
   ProductListResponse,
   PublicMeResponse,
   SendMessageRequest,
+  UpdateContactRequest,
 };
 
 /**
@@ -111,7 +113,7 @@ export class SahabatKreatorClient {
   }
 
   private async request<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH",
     path: string,
     init?: { query?: Record<string, string | number | undefined>; body?: unknown },
   ): Promise<T> {
@@ -182,6 +184,22 @@ export class SahabatKreatorClient {
   /** POST /v1/contacts (scope `contacts:write`) — buat kontak baru. */
   async createContact(input: CreateContactRequest): Promise<ContactResponse> {
     return this.request<ContactResponse>("POST", "/contacts", { body: input });
+  }
+
+  /**
+   * PATCH /v1/contacts/:id (scope `contacts:write`) — ubah kontak
+   * (Fase 13A). `customFields` digabung per kunci di server: kunci yang
+   * dikirim menimpa, yang tidak disebut dipertahankan.
+   */
+  async updateContact(
+    contactId: string,
+    input: UpdateContactRequest,
+  ): Promise<ContactResponse> {
+    return this.request<ContactResponse>(
+      "PATCH",
+      `/contacts/${encodeURIComponent(contactId)}`,
+      { body: input },
+    );
   }
 
   /** GET /v1/conversations (scope `conversations:read`). */

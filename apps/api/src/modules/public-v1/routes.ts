@@ -10,6 +10,7 @@ import {
   ProductListResponseSchema,
   PublicMeResponseSchema,
   SendMessageRequestSchema,
+  UpdateContactRequestSchema,
   V1ListCommentsQuerySchema,
   type ApiKeyScope,
 } from "@sahabat-kreator/contracts";
@@ -25,6 +26,7 @@ import {
   queueOutboundMessageForApiKey,
   resolveApiKeyByHash,
   touchApiKeyLastUsed,
+  updateContact,
   API_KEY_DISPLAY_PREFIX,
 } from "@sahabat-kreator/core";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
@@ -75,6 +77,9 @@ function extractPresentedKey(headers: Headers): string | null {
  *   GET  /v1/me                                  identitas tenant + scopes kunci
  *   GET  /v1/contacts          (contacts:read)   daftar + ?search=&limit=&offset=
  *   POST /v1/contacts          (contacts:write)  buat kontak → 201
+ *   PATCH /v1/contacts/:id     (contacts:write)  ubah kontak (Fase 13A —
+ *                                                termasuk customFields,
+ *                                                digabung per kunci)
  *   GET  /v1/conversations     (conversations:read)
  *   GET  /v1/conversations/:id/messages          (conversations:read)
  *   POST /v1/conversations/:id/messages          (messages:write) → pesan queued
@@ -177,6 +182,34 @@ export function createPublicV1Routes(
     const auth = c.get("apiKeyAuth");
     const contact = await createContact(bundle.db, { tenantId: auth.tenantId }, parsed.data);
     return c.json(serializeContact(contact), 201);
+  });
+
+  app.patch("/v1/contacts/:id", async (c) => {
+    const denied = requireScope(c, "contacts:write");
+    if (denied) return denied;
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = UpdateContactRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid contact payload");
+    }
+    const auth = c.get("apiKeyAuth");
+    const contact = await updateContact(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      id,
+      parsed.data,
+    );
+    if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    return c.json(serializeContact(contact));
   });
 
   app.get("/v1/conversations", async (c) => {
