@@ -300,6 +300,17 @@ export {
   type IntegrationLogReplayEligibility,
 } from "./integration-log";
 export {
+  listTenantAuditLogs,
+  listPlatformAuditLogs,
+  auditActionCategory,
+  deriveAuditTarget,
+  type AuditActorType,
+  type AuditLogTarget,
+  type AuditLogEntry,
+  type ListAuditLogsInput,
+  type AuditLogPage,
+} from "./audit-log";
+export {
   PLATFORM_SETTING_KEYS,
   PLATFORM_PUBLIC_CONFIG_KEYS,
   PLATFORM_SETTINGS_CACHE_TTL_MS,

@@ -1,6 +1,7 @@
 import type {
   AgentListResponse,
   ApiKeyListResponse,
+  AuditLogListResponse,
   ApiKeyResponse,
   CreatedApiKeyResponse,
   CreateApiKeyRequest,
@@ -798,6 +799,69 @@ export const api = {
       return request<IntegrationLogReplayResponse>(
         `/api/tenants/${tenantId}/logs/${logId}/replay`,
         { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  audit: {
+    /**
+     * GET /api/tenants/:tenantId/audit — penelusur log audit workspace
+     * (Fase 7B.4; owner/admin saja, anggota biasa 403). Query dibangun
+     * dari filter yang terisi saja. `meta` ikut di respons daftar
+     * (kecil — id referensi), jadi tidak ada endpoint detail terpisah.
+     */
+    list(
+      tenantId: string,
+      query: {
+        actorType?: string;
+        category?: string;
+        q?: string;
+        from?: string;
+        to?: string;
+        cursor?: string;
+        limit?: number;
+      } = {},
+    ): Promise<AuditLogListResponse> {
+      const params = new URLSearchParams();
+      if (query.actorType) params.set("actorType", query.actorType);
+      if (query.category) params.set("category", query.category);
+      if (query.q) params.set("q", query.q);
+      if (query.from) params.set("from", query.from);
+      if (query.to) params.set("to", query.to);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<AuditLogListResponse>(
+        `/api/tenants/${tenantId}/audit${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * GET /api/audit/platform — baris audit tingkat platform (tenant
+     * NULL) untuk sesi platform admin; sesi biasa menerima 404.
+     */
+    listPlatform(
+      query: {
+        actorType?: string;
+        category?: string;
+        q?: string;
+        from?: string;
+        to?: string;
+        cursor?: string;
+        limit?: number;
+      } = {},
+    ): Promise<AuditLogListResponse> {
+      const params = new URLSearchParams();
+      if (query.actorType) params.set("actorType", query.actorType);
+      if (query.category) params.set("category", query.category);
+      if (query.q) params.set("q", query.q);
+      if (query.from) params.set("from", query.from);
+      if (query.to) params.set("to", query.to);
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.limit) params.set("limit", String(query.limit));
+      const qs = params.toString();
+      return request<AuditLogListResponse>(
+        `/api/audit/platform${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
       );
     },
   },

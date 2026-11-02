@@ -40,6 +40,7 @@ import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AdminPage } from "./pages/AdminPage";
 import { LogsPage } from "./pages/LogsPage";
+import { AuditPage } from "./pages/AuditPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -235,6 +236,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <SettingsPage t={t} locale={locale} />
         ) : activeId === "logs" ? (
           <LogsPage t={t} locale={locale} isPlatformAdmin={isPlatformAdmin} />
+        ) : activeId === "audit" ? (
+          <AuditPage t={t} locale={locale} isPlatformAdmin={isPlatformAdmin} />
         ) : activeId === "admin" && isPlatformAdmin ? (
           <AdminPage t={t} locale={locale} />
         ) : (

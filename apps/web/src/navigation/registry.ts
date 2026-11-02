@@ -12,7 +12,7 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
   | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more"
-  | "list";
+  | "list" | "audit";
 
 export interface NavItem {
   id: string;
@@ -43,10 +43,13 @@ export const NAV_REGISTRY: NavItem[] = [
   // grup utilitas bersama Settings/Admin di "More" (tab utama mobile
   // tetap 4 sesuai keputusan desain).
   { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
+  // Penelusur Audit (Fase 7B.4): jejak aksi user/agent/sistem/API key
+  // per workspace dari audit_logs — bersebelahan dengan Logs.
+  { id: "audit",       labelKey: "nav.audit",       icon: "audit",     route: "/audit",       mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
   // Panel Admin Platform (Fase 6C): `permission: "platformAdmin"` — item
   // hanya dirender untuk user ber-flag isPlatformAdmin (lihat
   // filterNavItems); gerbang sesungguhnya ada di API (non-admin → 404).
-  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
+  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 15, more: 11 } },
 ];
 
 /**

@@ -35,6 +35,7 @@ import { startMetaDeliveryPoller } from "./modules/meta/poller";
 import { createAvatarsRoutes } from "./modules/avatars/routes";
 import { createAdminRoutes } from "./modules/admin/routes";
 import { createLogsRoutes } from "./modules/logs/routes";
+import { createAuditRoutes } from "./modules/audit/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -131,6 +132,14 @@ routes.route(
       metaApiBase: env.META_API_BASE,
       graphApiVersion: META_GRAPH_API_VERSION,
     },
+  }),
+);
+// Modul penelusur audit (Fase 7B.4) — pembacaan audit_logs:
+// /tenants/:tenantId/audit (owner/admin) + /audit/platform (admin platform).
+routes.route(
+  "/",
+  createAuditRoutes(authBundle, {
+    platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
   }),
 );
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
