@@ -79,7 +79,11 @@ async function createKeywordAutomation(
     .fill(input.reply);
   await dialog.getByRole("button", { name: "Create automation" }).click();
   await expect(dialog).toHaveCount(0, { timeout: 30_000 });
-  await expect(page.getByText(input.name)).toBeVisible({ timeout: 30_000 });
+  // Dibatasi ke kartu <li>: teks nama juga muncul di pratinjau balasan
+  // automation, jadi getByText global ambigu (strict mode violation).
+  await expect(
+    page.locator("li", { hasText: input.name }).first(),
+  ).toBeVisible({ timeout: 30_000 });
 }
 
 test.describe("webchat embed (origin asing)", () => {
