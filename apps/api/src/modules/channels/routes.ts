@@ -22,6 +22,8 @@ import {
   fetchAndStoreTelegramProfilePhoto,
   generateChannelWebhookSecret,
   getChannelAccount,
+  getChannelHealthMap,
+  IDLE_CHANNEL_HEALTH,
   hashChannelWebhookSecret,
   listChannelAccounts,
   listProfilePhotoOwnerIds,
@@ -34,6 +36,7 @@ import {
   updateMetaChannelAccountCredentials,
   updateTelegramChannelAccountCredentials,
   updateWhatsAppChannelAccountCredentials,
+  type ChannelHealthInfo,
   type MetaProvider,
 } from "@sahabat-kreator/core";
 import {
@@ -56,9 +59,23 @@ import { requireAuth } from "../auth/session";
 import { channelAvatarUrl } from "../avatars/routes";
 import { resolveTenantForUser } from "../tenants/guard";
 
+/** Kesehatan core → bentuk kontrak (waktu ISO; outcome apa adanya). */
+function serializeChannelHealth(health: ChannelHealthInfo) {
+  return {
+    status: health.status,
+    lastInboundAt: health.lastInboundAt?.toISOString() ?? null,
+    lastInboundOutcome: health.lastInboundOutcome,
+    lastDeliveredAt: health.lastDeliveredAt?.toISOString() ?? null,
+    lastFailureAt: health.lastFailureAt?.toISOString() ?? null,
+    lastFailureOutcome: health.lastFailureOutcome,
+    lastFailureErrorCode: health.lastFailureErrorCode,
+  };
+}
+
 function serializeChannel(
   row: ChannelAccount,
   avatarUrl: string | null = null,
+  health: ChannelHealthInfo = IDLE_CHANNEL_HEALTH,
 ): ChannelAccountResponse {
   const purgeAt = channelPurgeAt(row);
   return ChannelAccountResponseSchema.parse({
@@ -70,12 +87,34 @@ function serializeChannel(
     publicHandle: row.publicHandle,
     avatarUrl,
     status: row.status,
+    health: serializeChannelHealth(health),
     confirmationName: channelConfirmationName(row),
     trashedAt: row.trashedAt?.toISOString() ?? null,
     purgeAt: purgeAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   });
+}
+
+/**
+ * Serialisasi satu akun lengkap dengan kesehatan operasionalnya
+ * (Fase 7B.3 — satu kueri agregat core untuk akun ini saja).
+ */
+async function serializeChannelWithHealth(
+  bundle: AuthBundle,
+  row: ChannelAccount,
+  avatarUrl: string | null = null,
+): Promise<ChannelAccountResponse> {
+  const healthMap = await getChannelHealthMap(
+    bundle.db,
+    { tenantId: row.tenantId },
+    [row],
+  );
+  return serializeChannel(
+    row,
+    avatarUrl,
+    healthMap.get(row.id) ?? IDLE_CHANNEL_HEALTH,
+  );
 }
 
 /** Serialisasi satu akun lengkap dengan avatarUrl hasil cek foto tersimpan. */
@@ -89,7 +128,8 @@ async function serializeChannelWithAvatar(
     "channel_account",
     [row.id],
   );
-  return serializeChannel(
+  return serializeChannelWithHealth(
+    bundle,
     row,
     withPhoto.has(row.id) ? channelAvatarUrl(row.tenantId, row.id) : null,
   );
@@ -295,11 +335,19 @@ export function createChannelsRoutes(
     for (const row of rows) {
       if (!withPhoto.has(row.id)) scheduleBotPhotoBackfill(bundle, opts, row);
     }
+    // Fase 7B.3: kesehatan operasional per akun — SATU peta agregat
+    // untuk seluruh daftar (bukan kueri per kartu).
+    const healthMap = await getChannelHealthMap(
+      bundle.db,
+      { tenantId: tenant.id },
+      rows,
+    );
     const body = ChannelAccountListResponseSchema.parse({
       channels: rows.map((row) =>
         serializeChannel(
           row,
           withPhoto.has(row.id) ? channelAvatarUrl(tenant.id, row.id) : null,
+          healthMap.get(row.id) ?? IDLE_CHANNEL_HEALTH,
         ),
       ),
     });
@@ -365,7 +413,7 @@ export function createChannelsRoutes(
       { tenantId: tenant.id, userId: appUser.id },
       { displayName: parsed.data.displayName },
     );
-    return c.json(serializeChannel(row), 201);
+    return c.json(await serializeChannelWithHealth(bundle, row), 201);
   });
 
   /**
@@ -425,8 +473,21 @@ export function createChannelsRoutes(
     const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
     if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
     const rows = await listTrashedChannelAccounts(bundle.db, { tenantId: tenant.id });
+    // Kesehatan tetap dihitung dari log yang masih tertaut (riwayat
+    // akun Sampah memang dipertahankan sampai purge — Fase 6I/7B.1).
+    const healthMap = await getChannelHealthMap(
+      bundle.db,
+      { tenantId: tenant.id },
+      rows,
+    );
     const body = ChannelAccountListResponseSchema.parse({
-      channels: rows.map((row) => serializeChannel(row)),
+      channels: rows.map((row) =>
+        serializeChannel(
+          row,
+          null,
+          healthMap.get(row.id) ?? IDLE_CHANNEL_HEALTH,
+        ),
+      ),
     });
     return c.json(body);
   });
@@ -796,7 +857,7 @@ async function connectTelegram(
     ownerId: row.id,
   });
 
-  return c.json(serializeChannel(row), 201);
+  return c.json(await serializeChannelWithHealth(bundle, row), 201);
 }
 
 /**
@@ -872,7 +933,7 @@ async function reviveTelegramAccount(
     ownerId: updated.id,
   });
 
-  return c.json(serializeChannel(updated), 200);
+  return c.json(await serializeChannelWithHealth(bundle, updated), 200);
 }
 
 /**
@@ -1013,7 +1074,7 @@ async function connectMeta(
       return apiError(c, 404, "NOT_FOUND", "Channel not found");
     }
     scheduleMetaAccountPhoto(bundle, client, input.tenantId, updated.id, accountExternalId);
-    return c.json(serializeChannel(updated), 200);
+    return c.json(await serializeChannelWithHealth(bundle, updated), 200);
   }
 
   let row: ChannelAccount;
@@ -1071,7 +1132,7 @@ async function connectMeta(
   }
 
   scheduleMetaAccountPhoto(bundle, client, input.tenantId, row.id, accountExternalId);
-  return c.json(serializeChannel(row), 201);
+  return c.json(await serializeChannelWithHealth(bundle, row), 201);
 }
 
 /**
@@ -1226,7 +1287,7 @@ async function connectWhatsApp(
       return apiError(c, 404, "NOT_FOUND", "Channel not found");
     }
     scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, updated.id, input.phoneNumberId);
-    return c.json(serializeChannel(updated), 200);
+    return c.json(await serializeChannelWithHealth(bundle, updated), 200);
   }
 
   let row: ChannelAccount;
@@ -1284,7 +1345,7 @@ async function connectWhatsApp(
   }
 
   scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, row.id, input.phoneNumberId);
-  return c.json(serializeChannel(row), 201);
+  return c.json(await serializeChannelWithHealth(bundle, row), 201);
 }
 
 /**

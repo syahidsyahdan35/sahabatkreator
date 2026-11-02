@@ -283,6 +283,69 @@ export const ChannelAccountStatusSchema = z.enum([
 ]);
 export type ChannelAccountStatus = z.infer<typeof ChannelAccountStatusSchema>;
 
+/** Outcome terkendali log integrasi — union arah masuk & keluar (kolom `outcome`). */
+export const IntegrationLogOutcomeSchema = z.enum([
+  // arah masuk
+  "recorded",
+  "duplicate",
+  "ignored_disconnected",
+  "ignored_echo",
+  "ignored_status_only",
+  "rejected_signature",
+  "rejected_unconfigured",
+  "unresolved_account",
+  "error",
+  // arah keluar
+  "sent",
+  "failed",
+]);
+export type IntegrationLogOutcome = z.infer<typeof IntegrationLogOutcomeSchema>;
+
+/**
+ * Status kesehatan operasional channel (Fase 7B.3), dihitung server dari
+ * log integrasi (telegram/messenger/instagram/whatsapp) atau aktivitas
+ * pesan (webchat — flush-nya tidak dicatat log integrasi by design):
+ * - `idle`: belum ada aktivitas apa pun yang tercatat untuk akun ini;
+ * - `attention`: sinyal kegagalan terakhir LEBIH BARU daripada aktivitas
+ *   sehat terakhir (webhook tercatat / pengiriman sukses);
+ * - `ok`: ada aktivitas dan tidak ada kegagalan yang lebih baru dari
+ *   aktivitas sehat terakhir.
+ */
+export const ChannelHealthStatusSchema = z.enum(["ok", "attention", "idle"]);
+export type ChannelHealthStatus = z.infer<typeof ChannelHealthStatusSchema>;
+
+/**
+ * Kesehatan operasional satu akun channel (Fase 7B.3) — fakta mentahnya
+ * dari `integration_log` per akun (satu kueri agregat untuk seluruh
+ * daftar, bukan N+1):
+ * - `lastInboundAt`/`lastInboundOutcome`: hit webhook arah masuk
+ *   terakhir (outcome apa pun). Untuk webchat: waktu pesan pengunjung
+ *   terakhir dari tabel messages, dan outcome selalu null (webchat
+ *   tidak punya konsep outcome webhook).
+ * - `lastDeliveredAt`: pengiriman keluar sukses terakhir (log 'out'
+ *   outcome `sent`). Untuk webchat: waktu flush gateway terakhir dari
+ *   audit `message.sent` (satu-satunya jalur penanda `sent` webchat =
+ *   waktu antar yang sesungguhnya, bukan waktu tulis balasan).
+ * - `lastFailureAt`/`lastFailureOutcome`/`lastFailureErrorCode`: sinyal
+ *   kegagalan terakhir — arah masuk: rejected_*, unresolved_account,
+ *   error, ignored_disconnected; arah keluar: failed. Untuk webchat
+ *   selalu null (pesan webchat tidak pernah berstatus failed).
+ * Hit Meta yang gagal di gerbang bersama (tanda tangan buruk dsb.)
+ * ber-channel_account_id NULL sehingga tidak menempel ke kartu mana
+ * pun — kesehatan per kartu hanya mencerminkan event yang memang
+ * teratribusi ke akun itu.
+ */
+export const ChannelHealthSchema = z.object({
+  status: ChannelHealthStatusSchema,
+  lastInboundAt: z.string().datetime().nullable(),
+  lastInboundOutcome: IntegrationLogOutcomeSchema.nullable(),
+  lastDeliveredAt: z.string().datetime().nullable(),
+  lastFailureAt: z.string().datetime().nullable(),
+  lastFailureOutcome: IntegrationLogOutcomeSchema.nullable(),
+  lastFailureErrorCode: z.string().nullable(),
+});
+export type ChannelHealth = z.infer<typeof ChannelHealthSchema>;
+
 export const CreateChannelRequestSchema = z.object({
   provider: ChannelProviderSchema,
   displayName: z.string().trim().min(1).max(255).optional(),
@@ -359,6 +422,11 @@ export const ChannelAccountResponseSchema = z.object({
    */
   avatarUrl: z.string().nullable(),
   status: ChannelAccountStatusSchema,
+  /**
+   * Kesehatan operasional akun (Fase 7B.3) — selalu hadir; akun tanpa
+   * aktivitas tercatat menjawab status `idle` dengan semua waktu null.
+   */
+  health: ChannelHealthSchema,
   /**
    * Nama yang harus diketik PERSIS untuk mengonfirmasi pembuangan ke
    * Sampah (Fase 6I): displayName bila ada, else botUsername (telegram),
@@ -1122,23 +1190,11 @@ export type IntegrationLogProvider = z.infer<
   typeof IntegrationLogProviderSchema
 >;
 
-/** Outcome terkendali — union arah masuk & keluar (kolom `outcome`). */
-export const IntegrationLogOutcomeSchema = z.enum([
-  // arah masuk
-  "recorded",
-  "duplicate",
-  "ignored_disconnected",
-  "ignored_echo",
-  "ignored_status_only",
-  "rejected_signature",
-  "rejected_unconfigured",
-  "unresolved_account",
-  "error",
-  // arah keluar
-  "sent",
-  "failed",
-]);
-export type IntegrationLogOutcome = z.infer<typeof IntegrationLogOutcomeSchema>;
+/**
+ * Outcome terkendali — union arah masuk & keluar (kolom `outcome`).
+ * Skemanya sendiri didefinisikan di seksi channel di atas (dipakai juga
+ * oleh `ChannelHealthSchema`, Fase 7B.3).
+ */
 
 /**
  * Satu baris log integrasi sebagaimana tampil di daftar (TANPA payload —

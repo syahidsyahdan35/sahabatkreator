@@ -18,7 +18,11 @@ import {
   providerMeta,
 } from "../components/ChannelAvatar";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
-import { formatDate } from "../utils/format";
+import {
+  formatDate,
+  formatDateTime,
+  formatRelativeTime,
+} from "../utils/format";
 
 type Translate = (
   key: TranslationKey,
@@ -287,6 +291,103 @@ function StatusPill({
       <span className="h-1.5 w-1.5 rounded-full bg-muted" />
       {t("channels.statusDisconnected")}
     </span>
+  );
+}
+
+/** Label outcome log integrasi — kunci yang sama seperti halaman Logs. */
+const HEALTH_OUTCOME_LABEL_KEYS: Record<string, TranslationKey> = {
+  recorded: "logs.outcomeRecorded",
+  duplicate: "logs.outcomeDuplicate",
+  ignored_disconnected: "logs.outcomeIgnoredDisconnected",
+  ignored_echo: "logs.outcomeIgnoredEcho",
+  ignored_status_only: "logs.outcomeIgnoredStatusOnly",
+  rejected_signature: "logs.outcomeRejectedSignature",
+  rejected_unconfigured: "logs.outcomeRejectedUnconfigured",
+  unresolved_account: "logs.outcomeUnresolvedAccount",
+  error: "logs.outcomeError",
+  sent: "logs.outcomeSent",
+  failed: "logs.outcomeFailed",
+};
+
+/**
+ * Blok kesehatan operasional kartu (Fase 7B.3): titik status + fakta
+ * terakhir dari server (health di respons channel). `idle` tampil
+ * sebagai satu baris redup "belum ada aktivitas" — BUKAN alarm. Untuk
+ * webchat label masuknya "Pesan terakhir" (webchat tidak punya webhook;
+ * server mengambilnya dari aktivitas pesan, lihat core channel-health).
+ */
+function ChannelHealthBlock({
+  t,
+  locale,
+  channel,
+}: {
+  t: Translate;
+  locale: Locale;
+  channel: ChannelAccountResponse;
+}) {
+  const health = channel.health;
+  if (health.status === "idle") {
+    return (
+      <div className="mt-3 flex items-center gap-1.5 text-xs text-muted">
+        <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+        {t("channels.healthNoActivity")}
+      </div>
+    );
+  }
+  const isOk = health.status === "ok";
+  const inboundLabel =
+    channel.provider === "webchat"
+      ? t("channels.healthLastMessage")
+      : t("channels.healthLastWebhook");
+  return (
+    <div className="mt-3 border-t border-line pt-3 text-xs">
+      <div className="flex items-center gap-1.5">
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${isOk ? "bg-success" : "bg-warning"}`}
+        />
+        <span className={`font-medium ${isOk ? "text-success" : "text-warning"}`}>
+          {isOk ? t("channels.healthOk") : t("channels.healthAttention")}
+        </span>
+      </div>
+      <dl className="mt-1.5 space-y-0.5 text-muted">
+        {health.lastInboundAt ? (
+          <div className="flex items-baseline justify-between gap-2">
+            <dt>{inboundLabel}</dt>
+            <dd title={formatDateTime(health.lastInboundAt, locale)}>
+              {formatRelativeTime(health.lastInboundAt, locale)}
+            </dd>
+          </div>
+        ) : null}
+        {health.lastDeliveredAt ? (
+          <div className="flex items-baseline justify-between gap-2">
+            <dt>{t("channels.healthLastDelivered")}</dt>
+            <dd title={formatDateTime(health.lastDeliveredAt, locale)}>
+              {formatRelativeTime(health.lastDeliveredAt, locale)}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      {health.lastFailureAt && health.lastFailureOutcome ? (
+        <div className="mt-2">
+          <span
+            className="inline-flex max-w-full flex-wrap items-center gap-x-1 rounded-full bg-warning/10 px-2 py-0.5 font-medium text-warning"
+            title={formatDateTime(health.lastFailureAt, locale)}
+          >
+            <span>
+              {t("channels.healthLastFailure")}:{" "}
+              {t(
+                HEALTH_OUTCOME_LABEL_KEYS[health.lastFailureOutcome] ??
+                  "logs.outcomeError",
+              )}
+            </span>
+            {health.lastFailureErrorCode ? (
+              <code className="font-mono">{health.lastFailureErrorCode}</code>
+            ) : null}
+            <span>· {formatRelativeTime(health.lastFailureAt, locale)}</span>
+          </span>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -961,6 +1062,8 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     })}
                   </span>
                 </div>
+
+                <ChannelHealthBlock t={t} locale={locale} channel={channel} />
 
                 {link ? (
                   <div className="mt-3 flex items-center gap-2">

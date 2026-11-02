@@ -139,6 +139,13 @@ export {
   type UpdateTelegramCredentialsInput,
 } from "./channels";
 export {
+  IDLE_CHANNEL_HEALTH,
+  computeChannelHealthStatus,
+  getChannelHealthMap,
+  type ChannelHealthInfo,
+  type ChannelHealthStatus,
+} from "./channel-health";
+export {
   findExpiredTrashedChannelAccounts,
   purgeExpiredTrashedChannels,
   purgeTrashedChannelAccount,

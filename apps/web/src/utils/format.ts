@@ -41,6 +41,31 @@ export function formatListTime(iso: string, locale: Locale): string {
   }).format(d);
 }
 
+/**
+ * Waktu relatif dwibahasa lewat Intl.RelativeTimeFormat (Fase 7B.3) —
+ * "5 menit yang lalu" / "5 minutes ago", "kemarin" / "yesterday".
+ * Dipakai baris kesehatan kartu channel; timestamp penuhnya tetap
+ * tersedia lewat formatDateTime di atribut title.
+ */
+export function formatRelativeTime(iso: string, locale: Locale): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const rtf = new Intl.RelativeTimeFormat(intlLocale(locale), {
+    numeric: "auto",
+  });
+  const diffSeconds = Math.round((d.getTime() - Date.now()) / 1000);
+  if (Math.abs(diffSeconds) < 60) return rtf.format(diffSeconds, "second");
+  const minutes = Math.round(diffSeconds / 60);
+  if (Math.abs(minutes) < 60) return rtf.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
+  const days = Math.round(hours / 24);
+  if (Math.abs(days) < 30) return rtf.format(days, "day");
+  const months = Math.round(days / 30);
+  if (Math.abs(months) < 12) return rtf.format(months, "month");
+  return rtf.format(Math.round(months / 12), "year");
+}
+
 /** Format harga Rupiah lewat Intl sesuai locale UI aktif (Fase 4A). */
 export function formatIdr(amount: number, locale: Locale): string {
   return new Intl.NumberFormat(intlLocale(locale), {
