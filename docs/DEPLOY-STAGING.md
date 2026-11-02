@@ -5744,3 +5744,50 @@ dashboard.
   `mas@romo.com` (allowlist admin platform berbasis env, jadi hak admin
   kembali otomatis), isi ulang kunci Panel Admin (OpenRouter, Meta,
   R2), hubungkan ulang channel.
+
+---
+
+## Fase 11A.1 — Perbaiki perkakas migrasi: squash ke baseline bersih
+
+Dokumen lengkap: `docs/DB-MIGRATION-BASELINE-11A1.md`. Ringkasan:
+
+- **Akar masalah**: snapshot drizzle-kit berhenti di 0026; migrasi
+  0027–0040 tulis tangan tanpa snapshot → `drizzle-kit generate`
+  mengusulkan pembuatan ulang 0027+. Jalur `migrate` (jurnal) selalu sehat.
+- **Baseline**: satu `0000_baseline.sql` hasil `drizzle-kit generate`
+  dari definisi skema saat ini + SQL kustom yang dipanen dari rantai
+  lama sebagai bagian berkomentar [K1] ekstensi `vector`, [K2] ENABLE
+  RLS 37 tabel, [K3] 57 policy final (tiga policy pengganti — 0003,
+  0006, 0027 — masuk bentuk finalnya). Tidak ada perubahan definisi
+  skema yang diperlukan; dua UPDATE data historis (0019/0021) sengaja
+  tidak ikut (baseline = skema kosong).
+- **Bukti kesetaraan objektif**: DB buangan rantai lama vs DB buangan
+  baseline, `pg_dump --schema-only` ternormalisasi → 427 statement di
+  kedua sisi; di luar CREATE TABLE semua identik; 10 CREATE TABLE
+  berbeda HANYA urutan ordinal kolom (himpunan kolom + constraint
+  identik 44/44 — semantik nol). Hitungan identik: 44 tabel / 57
+  policy / 162 index / 437 kolom / 92 FK. DB buangan di-drop.
+- **Uji perkakas dua arah**: generate tanpa perubahan →
+  "No schema changes" + folder byte-identik; kolom dummy di salinan
+  scratch → migrasi inkremental tunggal `ALTER TABLE ... ADD COLUMN`.
+  **`generate` resmi berfungsi lagi** — prosedur migrasi berikutnya:
+  ubah `packages/db/src/schema` → `pnpm db:generate` → periksa →
+  commit → `drizzle-kit migrate` di server (`DATABASE_URL=
+  $MIGRATION_DATABASE_URL`). Jangan lagi menulis migrasi tangan tanpa
+  snapshot pendamping.
+- **Lineage baru**: `packages/db/migrations/` hanya berisi baseline
+  (jurnal **1 entri**); rantai lama utuh diarsipkan di
+  `packages/db/migrations-legacy-0000-0040/` (tidak dibaca perkakas).
+- **Penukaran staging (penjaga perawan lolos)**: staging diperiksa
+  read-only masih 0 user/tenant/settings → folder migrasi server
+  diselaraskan, DB di-drop + dibuat ulang (default privileges `sk_app`
+  dipasang ulang), migrasi dari baseline. Pasca-tukar: jurnal 1 entri,
+  44/57/162, ekstensi `vector` aktif, **total 0 baris semua tabel**;
+  4 service di-restart (kill MainPID); health ok; `/register` 200;
+  `.env.staging` byte-identik (`9c1ded2a…`).
+- **Verifikasi**: PGlite verify SEMUA LULUS (34 seksi, rujukan migrasi
+  lama di [31]/[32]/[34] diselaraskan jadi asersi baseline) +
+  verify:agent-tools lulus; typecheck hijau; check:drift lulus;
+  smoke ringkas di DB buangan baseline (API+worker rantai, LLM mock):
+  **13 PASS / 0 FAIL** (register → workspace → KB → agen membalas
+  mengutip fakta KB → webchat → v1 scope 200/403).
