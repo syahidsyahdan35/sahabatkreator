@@ -1183,3 +1183,89 @@ pengiriman di API.
 - Poller pengiriman masih pola jembatan in-process seperti webchat
   (satu proses API); Redis pub/sub tetap pekerjaan sebelum skala
   horizontal (konsisten catatan 1F/2A).
+
+---
+
+## Hotfix Webchat — CORS lintas-origin, retry sesi + status error, layout tombol (2026-11-02)
+
+Tiga cacat yang dilaporkan & dikonfirmasi langsung oleh user:
+(1) widget dipasang di situs sendiri (dan dari file://) gagal total;
+(2) widget macet di "Connecting…" selamanya dan hanya pulih lewat
+reload manual; (3) UI widget bergeser saat diklik.
+
+### Akar masalah (sebagaimana ditemukan di kode/lapisan)
+
+1. **CORS putus di DUA lapisan.** API memang tidak pernah mengirim
+   `Access-Control-Allow-Origin`. Lebih halus lagi: preflight OPTIONS
+   yang terlihat "membawa allow-methods/headers" ternyata dijawab oleh
+   **middleware CORS bawaan Vite preview** (proxy staging), bukan API —
+   dan jawaban itu TANPA ACAO, jadi browser tetap menolak. Perbaikan:
+   (a) middleware CORS permisif di API khusus route `/webchat/*`
+   (ACAO `*` pada SEMUA respons termasuk error; preflight 204 dengan
+   allow-methods GET/POST/OPTIONS + allow-headers Content-Type/
+   Authorization) — aman karena endpoint ini publik by design dan
+   diautentikasi siteKey + token pengunjung HMAC (Bearer), bukan
+   cookie; (b) `preview.cors: false` di `apps/web/vite.config.ts` agar
+   preflight diteruskan proxy ke API. Endpoint tenant/dashboard TIDAK
+   berubah (terverifikasi tanpa ACAO).
+2. **Kegagalan sesi diam-diam.** `ensureSession` yang gagal di
+   `openPanel` hanya menyalakan polling, dan `syncMessages` kembali
+   diam-diam bila token belum ada — tidak ada status error, tidak ada
+   retry, selamanya. Perbaikan di widget: mesin status koneksi
+   (connecting/connected/error) dengan bar status di panel, teks error
+   dwibahasa + tombol "Coba lagi / Retry", retry otomatis backoff
+   1s→2s→5s→10s→15s, polling ikut memicu pembuatan sesi, pemulihan
+   segera saat tab aktif lagi (`visibilitychange`) / browser online
+   lagi (`online`), dan bahasa widget kini dideteksi dari
+   `<html lang>`/bahasa browser bila `data-lang` tidak diisi. Kegagalan
+   KIRIM pesan juga tidak diam lagi: gelembung lokal menjadi redup
+   berlabel "Gagal terkirim — ketuk untuk coba lagi" (tap-to-retry).
+3. **Layout bergeser.** Root widget bukan flex column rata-kanan —
+   saat panel membuka, root melebar dan tombol melompat ke kiri bawah
+   panel; plus input 14px memicu auto-zoom iOS Safari saat fokus.
+   Perbaikan: root `display:flex;flex-direction:column;
+   align-items:flex-end;gap:12px`, input font-size 16px.
+
+### Perubahan & deploy
+
+- Commit `cf7a162` (routes webchat API + widget + spec baru),
+  `bcc8f5a` (vite.config cors:false), `0ca766d` (perbaikan assertion
+  tes). Build embed → widget.js baru **9.184 byte** (sebelumnya 6.889),
+  build api+web → rsync → restart web & api (proses pemilik port
+  dihentikan, systemd mengangkat ulang). Typecheck semua proyek hijau.
+
+### Verifikasi (publik, dari server terhadap https://botara.my.id)
+
+- **Skrip CORS (tenant uji sendiri): 14/14 PASS** — POST session
+  Origin `https://example.com` & Origin `null` → 200 + ACAO `*`; key
+  bogus → 404 TETAP + ACAO; preflight OPTIONS → 204 + ACAO `*` +
+  methods/headers benar (jawaban kini dari API, bukan Vite); GET
+  /api/tenants tanpa ACAO; /widget.js publik = 9.184 byte memuat
+  string error dwibahasa baru.
+- **Spec Playwright baru `tests/e2e/webchat-embed.spec.ts`: 3/3 PASS**
+  — halaman polos di origin asing `http://situs-tenant.test` berisi
+  snippet persis seperti file user: chat dua arah + balasan automation
+  tiba; **asersi posisi: tepi kanan & bawah tombol berubah ≤2px** saat
+  panel dibuka maupun ditutup; siteKey bogus dari origin asing +
+  halaman `lang="id"` → status error "Tidak dapat terhubung…" +
+  tombol "Coba lagi" tampil (bukan Connecting abadi); request sesi
+  pertama di-abort lewat route → widget pulih sendiri (≥2 upaya sesi),
+  pesan terbukti sampai Inbox pemilik, tanpa reload.
+- Regresi `channels-webchat.spec.ts` (jalur demo satu origin): PASS.
+  Run pertama gabungan sempat 3/4 — satu-satunya kegagalan adalah
+  assertion tes yang ambigu (nama automation muncul juga di pratinjau
+  balasan), diperbaiki di `0ca766d` dan run ulang hijau; bukan bug
+  aplikasi.
+
+### Batas jujur
+
+- Retry sesi berjalan selama panel pernah dibuka / selama upaya kirim
+  dilakukan; widget yang belum pernah dibuka tidak membuat sesi di
+  latar (by design — tidak ada perubahan perilaku itu).
+- Gelembung lokal tampil optimistis sebelum konfirmasi server;
+  kegagalan ditandai tap-to-retry, dan duplikasi sesaat dengan hasil
+  sinkronisasi dimungkinkan dalam jendela <1 detik (di-dedup per ID
+  pesan server begitu konfirmasi tiba).
+- CORS `*` hanya untuk endpoint publik webchat; WS tidak memakai CORS
+  (browser tidak menerapkannya pada WebSocket) dan tetap diautentikasi
+  token di query.
