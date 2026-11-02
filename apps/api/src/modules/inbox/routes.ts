@@ -24,7 +24,7 @@ import { serializeMessage } from "../messages-serialize";
 import type { WebchatHub } from "../webchat/hub";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeConversation(row: ConversationWithSummary): ConversationResponse {
+export function serializeConversation(row: ConversationWithSummary): ConversationResponse {
   return ConversationResponseSchema.parse({
     id: row.id,
     channelAccountId: row.channelAccountId,

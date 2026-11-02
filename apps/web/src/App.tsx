@@ -30,6 +30,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { ProductsPage } from "./pages/ProductsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { useTheme, type ThemeMode } from "./theme";
@@ -169,6 +170,8 @@ function ShellMain({ t, locale, controls, onNavigateTo }: ShellProps) {
           <AutomationsPage t={t} locale={locale} />
         ) : activeId === "products" ? (
           <ProductsPage t={t} locale={locale} />
+        ) : activeId === "settings" ? (
+          <SettingsPage t={t} locale={locale} />
         ) : (
           <PlaceholderPage t={t} titleKey={activeItem.labelKey} />
         )}

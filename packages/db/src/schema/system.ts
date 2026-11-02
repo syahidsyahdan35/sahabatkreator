@@ -26,6 +26,8 @@ export const auditActorTypeEnum = pgEnum("audit_actor_type", [
   "user",
   "agent",
   "system",
+  /** Pelaku = API key tenant lewat API publik /v1 (Fase 5A); actor_id = id baris api_keys. */
+  "api_key",
 ]);
 
 export const usageTypeEnum = pgEnum("usage_type", [

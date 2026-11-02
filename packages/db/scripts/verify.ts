@@ -115,8 +115,9 @@ const policies = await db.query<{ count: string }>(
 // + agents, kb_documents, kb_chunks, agent_suggestions (Fase 3A)
 // + products & payment_links tenant_isolation + lengan publik
 // `public_code_lookup` pada payment_links (Fase 4A)
-// + automation_steps & sequence_enrollments tenant_isolation (Fase 2C) = 26.
-assert.equal(Number(policies.rows[0].count), 26);
+// + automation_steps & sequence_enrollments tenant_isolation (Fase 2C)
+// + lengan publik `public_key_lookup` pada api_keys (Fase 5A) = 27.
+assert.equal(Number(policies.rows[0].count), 27);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -476,6 +477,57 @@ assert.equal(seqSeen.stepsA.rows[0].n, "2");
 assert.equal(seqSeen.enrollmentsA.rows[0].n, "2");
 console.log(
   "[10] Fase 2C: kind default 'keyword' + steps (check delay >= 0) + index unik enrollment aktif per (automation, kontak) + RLS steps/enrollments per tenant: OK",
+);
+
+// ---------- 10. Fase 5A: lengan publik api_keys (lookup by hash) ----------
+// API key tenant A & B (hash uji tetap). Uji sebagai app_user: tanpa konteks
+// apa pun api_keys tak terlihat; dengan app.api_key_hash = hash A, HANYA
+// baris A yang terlihat; konteks tenant B tetap hanya melihat kunci B
+// (lengan hash tidak membocorkan lintas tenant); nilai enum audit baru
+// 'api_key' (migrasi 0015) bisa dipakai pada transaksi berikutnya.
+const KEY_HASH_A = "hash-uji-5a-tenant-a";
+const KEY_HASH_B = "hash-uji-5a-tenant-b";
+await db.query(
+  `INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix, scopes)
+   VALUES ($1, 'Kunci A', $3, 'sk_live_aaa1', '{contacts:read}'),
+          ($2, 'Kunci B', $4, 'sk_live_bbb2', '{contacts:read}')`,
+  [TENANT_A, TENANT_B, KEY_HASH_A, KEY_HASH_B],
+);
+const keySeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noCtx = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM api_keys`,
+  );
+  await tx.query(`SELECT set_config('app.api_key_hash', $1, true)`, [KEY_HASH_A]);
+  const byHash = await tx.query<{ tenant_id: string; key_hash: string }>(
+    `SELECT tenant_id, key_hash FROM api_keys`,
+  );
+  // Konteks tenant B + setting hash A yang masih terpasang: policy OR —
+  // baris A terlihat KARENA hash-nya disajikan (itu memang buktinya), tetapi
+  // baris B juga hanya terlihat lewat konteks tenantnya; uji kuncinya:
+  // dengan hash tenant B yang SALAH (tidak dikenal), tidak ada baris ekstra.
+  await tx.query(`SELECT set_config('app.api_key_hash', 'hash-tidak-dikenal', true)`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+  const tenantB = await tx.query<{ key_hash: string }>(
+    `SELECT key_hash FROM api_keys`,
+  );
+  // Enum audit 'api_key' harus bisa dipakai sekarang (transaksi terpisah
+  // dari migrasi yang menambahkannya).
+  await tx.query(
+    `INSERT INTO audit_logs (tenant_id, actor_type, actor_id, action)
+     VALUES ($1, 'api_key', 'key-uji', 'message.queued')`,
+    [TENANT_B],
+  );
+  return { noCtx, byHash, tenantB };
+});
+assert.equal(keySeen.noCtx.rows[0].n, "0");
+assert.deepEqual(
+  keySeen.byHash.rows.map((r) => `${r.key_hash}:${r.tenant_id}`),
+  [`${KEY_HASH_A}:${TENANT_A}`],
+);
+assert.deepEqual(keySeen.tenantB.rows.map((r) => r.key_hash), [KEY_HASH_B]);
+console.log(
+  "[11] Fase 5A: lengan publik app.api_key_hash hanya membuka baris ber-hash yang disajikan; tanpa konteks api_keys tertutup; konteks tenant tetap terisolasi; enum audit 'api_key' terpakai: OK",
 );
 
 await db.close();

@@ -22,6 +22,8 @@ import { createAgentsRoutes } from "./modules/agents/routes";
 import { createKnowledgeRoutes } from "./modules/knowledge/routes";
 import { createProductsRoutes } from "./modules/products/routes";
 import { createPayRoutes } from "./modules/pay/routes";
+import { createApiKeysRoutes } from "./modules/api-keys/routes";
+import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { WebchatHub } from "./modules/webchat/hub";
 import { startWebchatDeliveryPoller } from "./modules/webchat/poller";
 import {
@@ -91,6 +93,10 @@ routes.route(
 );
 // Modul pay publik (Fase 4A) — halaman bayar /pay/:code (simulasi, tanpa sesi).
 routes.route("/", createPayRoutes(authBundle));
+// Modul api-keys (Fase 5A) — manajemen kunci workspace /tenants/:tenantId/api-keys (sesi + owner/admin).
+routes.route("/", createApiKeysRoutes(authBundle));
+// Modul API publik /v1 (Fase 5A) — auth API key per tenant, tenant dari kunci (bukan URL).
+routes.route("/", createPublicV1Routes(authBundle, webchatHub));
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));
 

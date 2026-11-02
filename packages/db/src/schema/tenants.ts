@@ -90,6 +90,12 @@ export const apiKeys = pgTable(
     name: varchar("name", { length: 128 }).notNull(),
     /** Hash (mis. SHA-256) dari API key lengkap; key mentah hanya ditampilkan sekali saat dibuat. */
     keyHash: varchar("key_hash", { length: 255 }).notNull().unique(),
+    /**
+     * Awalan tampil kunci (Fase 5A), mis. `sk_live_ab12` — cukup untuk
+     * mengenali kunci di daftar dashboard TANPA menyimpan kunci mentah.
+     * Kunci lama (pra-5A) bernilai '' dan ditampilkan sebagai awalan kosong.
+     */
+    keyPrefix: varchar("key_prefix", { length: 16 }).notNull().default(""),
     /** Scope terbatas, mis. ['contacts:read', 'messages:write'] (RANCANGAN §5.4). */
     scopes: text("scopes").array().notNull().default([]),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),

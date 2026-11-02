@@ -30,6 +30,8 @@ export function translateApiError(t: Translate, err: unknown): string {
     // Kode kontrak yang punya terjemahan langsung di resource `errors.*`
     case "UNAUTHORIZED":
       return t("errors.UNAUTHORIZED");
+    case "FORBIDDEN":
+      return t("errors.FORBIDDEN");
     case "VALIDATION_ERROR":
       return t("errors.VALIDATION_ERROR");
     case "INTERNAL_ERROR":

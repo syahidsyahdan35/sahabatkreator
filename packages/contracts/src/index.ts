@@ -15,6 +15,9 @@ export const ErrorCodeSchema = z.enum([
   "CHANNEL_NOT_CONNECTED",
   "CHANNEL_NOT_AVAILABLE_YET",
   "PRODUCT_HAS_LINKS",
+  "API_KEY_INVALID",
+  "API_KEY_REVOKED",
+  "API_KEY_SCOPE_DENIED",
   "MESSAGING_WINDOW_CLOSED",
   "RATE_LIMITED",
   "ENTITLEMENT_EXCEEDED",
@@ -728,3 +731,74 @@ export const PublicPaymentResponseSchema = z.object({
 export type PublicPaymentResponse = z.infer<
   typeof PublicPaymentResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// API keys & API publik /v1 (Fase 5A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scope API key v1 (RANCANGAN §5.4). Read tersedia untuk kontak, percakapan,
+ * dan produk; write harus dipilih EKSPLISIT saat kunci dibuat — default
+ * pembuatan hanya berisi scope read (lihat API_KEYS_DEFAULT_SCOPES).
+ */
+export const ApiKeyScopeSchema = z.enum([
+  "contacts:read",
+  "contacts:write",
+  "conversations:read",
+  "messages:write",
+  "products:read",
+]);
+export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
+
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
+  "contacts:read",
+  "contacts:write",
+  "conversations:read",
+  "messages:write",
+  "products:read",
+] as const;
+
+/** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
+export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
+  "contacts:read",
+  "conversations:read",
+  "products:read",
+] as const;
+
+export const CreateApiKeyRequestSchema = z.object({
+  name: z.string().trim().min(1).max(128),
+  scopes: z.array(ApiKeyScopeSchema).max(5).optional(),
+});
+export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
+
+export const ApiKeyResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  /** Awalan tampil, mis. `sk_live_ab12` — BUKAN kunci utuh. */
+  keyPrefix: z.string(),
+  scopes: z.array(ApiKeyScopeSchema),
+  lastUsedAt: z.string().datetime().nullable(),
+  /** Terisi = kunci sudah dicabut (soft revoke) dan tidak berlaku lagi. */
+  revokedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+});
+export type ApiKeyResponse = z.infer<typeof ApiKeyResponseSchema>;
+
+/** Respons pembuatan: memuat kunci UTUH — ditampilkan SATU KALI, tak pernah lagi. */
+export const CreatedApiKeyResponseSchema = ApiKeyResponseSchema.extend({
+  key: z.string(),
+});
+export type CreatedApiKeyResponse = z.infer<typeof CreatedApiKeyResponseSchema>;
+
+export const ApiKeyListResponseSchema = z.object({
+  apiKeys: z.array(ApiKeyResponseSchema),
+});
+export type ApiKeyListResponse = z.infer<typeof ApiKeyListResponseSchema>;
+
+/** GET /api/v1/me — identitas tenant pemilik kunci yang dipakai. */
+export const PublicMeResponseSchema = z.object({
+  tenantId: z.string().uuid(),
+  tenantName: z.string(),
+  scopes: z.array(ApiKeyScopeSchema),
+});
+export type PublicMeResponse = z.infer<typeof PublicMeResponseSchema>;

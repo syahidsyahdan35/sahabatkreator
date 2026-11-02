@@ -1,6 +1,17 @@
 import type { Context } from "hono";
-import { ApiErrorSchema, type ErrorCode } from "@sahabat-kreator/contracts";
-import type { User } from "@sahabat-kreator/db";
+import {
+  ApiErrorSchema,
+  type ApiKeyScope,
+  type ErrorCode,
+} from "@sahabat-kreator/contracts";
+import type { ApiKey, User } from "@sahabat-kreator/db";
+
+/** Konteks autentikasi API publik /v1 (Fase 5A): tenant diturunkan dari API key. */
+export interface ApiKeyAuthContext {
+  apiKey: ApiKey;
+  tenantId: string;
+  scopes: ApiKeyScope[];
+}
 
 /** Variabel konteks Hono untuk request terautentikasi. */
 export interface AppVariables {
@@ -8,6 +19,8 @@ export interface AppVariables {
   appUser: User;
   /** Id Better Auth (auth_user.id) dari sesi aktif. */
   authUserId: string;
+  /** Terisi hanya pada route API publik /v1 sesudah middleware API key lolos. */
+  apiKeyAuth: ApiKeyAuthContext;
 }
 
 export type AppContext = Context<{ Variables: AppVariables }>;

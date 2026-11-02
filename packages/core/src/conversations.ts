@@ -164,6 +164,74 @@ export async function markConversationRead(
   });
 }
 
+/** Pelaku pembuatan pesan outbound — menentukan jejak audit & kolom pengirim. */
+interface OutboundMessageActor {
+  /** actor_type audit: 'user' (dashboard) atau 'api_key' (API publik /v1, Fase 5A). */
+  auditActorType: "user" | "api_key";
+  /** actor_id audit: id user dashboard, atau id baris api_keys. */
+  auditActorId: string;
+  /** Terisi hanya untuk pesan dari dashboard; pesan API key tidak punya user. */
+  sentByUserId: string | null;
+  auditMetaExtra?: Record<string, unknown>;
+}
+
+async function queueOutboundMessageWithActor(
+  db: Database,
+  tenantId: string,
+  conversationId: string,
+  input: { contentText: string },
+  actor: OutboundMessageActor,
+): Promise<Message | null> {
+  return withTenantDb(db, tenantId, async (tx) => {
+    const [conv] = await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.tenantId, tenantId),
+          eq(conversations.id, conversationId),
+        ),
+      )
+      .limit(1);
+    if (!conv) return null;
+
+    const [message] = await tx
+      .insert(messages)
+      .values({
+        tenantId,
+        conversationId,
+        direction: "outbound",
+        senderType: "user",
+        type: "text",
+        contentText: input.contentText,
+        status: "queued",
+        sentByUserId: actor.sentByUserId,
+      })
+      .returning();
+
+    const now = new Date();
+    await tx
+      .update(conversations)
+      .set({ lastMessageAt: now, updatedAt: now })
+      .where(eq(conversations.id, conversationId));
+
+    await tx.insert(auditLogs).values({
+      tenantId,
+      actorType: actor.auditActorType,
+      actorId: actor.auditActorId,
+      action: "message.queued",
+      meta: {
+        conversationId,
+        messageId: message.id,
+        stub: true,
+        ...actor.auditMetaExtra,
+      },
+    });
+
+    return message;
+  });
+}
+
 /**
  * Membuat pesan outbound manual dari inbox (fondasi balasan manusia):
  * baris `messages` (direction=outbound, sender_type=user, status=queued),
@@ -177,48 +245,32 @@ export async function queueOutboundMessage(
   conversationId: string,
   input: { contentText: string },
 ): Promise<Message | null> {
-  return withTenantDb(db, ctx.tenantId, async (tx) => {
-    const [conv] = await tx
-      .select({ id: conversations.id })
-      .from(conversations)
-      .where(
-        and(
-          eq(conversations.tenantId, ctx.tenantId),
-          eq(conversations.id, conversationId),
-        ),
-      )
-      .limit(1);
-    if (!conv) return null;
+  return queueOutboundMessageWithActor(db, ctx.tenantId, conversationId, input, {
+    auditActorType: "user",
+    auditActorId: ctx.userId,
+    sentByUserId: ctx.userId,
+  });
+}
 
-    const [message] = await tx
-      .insert(messages)
-      .values({
-        tenantId: ctx.tenantId,
-        conversationId,
-        direction: "outbound",
-        senderType: "user",
-        type: "text",
-        contentText: input.contentText,
-        status: "queued",
-        sentByUserId: ctx.userId,
-      })
-      .returning();
-
-    const now = new Date();
-    await tx
-      .update(conversations)
-      .set({ lastMessageAt: now, updatedAt: now })
-      .where(eq(conversations.id, conversationId));
-
-    await tx.insert(auditLogs).values({
-      tenantId: ctx.tenantId,
-      actorType: "user",
-      actorId: ctx.userId,
-      action: "message.queued",
-      meta: { conversationId, messageId: message.id, stub: true },
-    });
-
-    return message;
+/**
+ * Varian API publik /v1 (Fase 5A): pesan outbound dibuat oleh API KEY tenant
+ * (bukan user dashboard) — `sent_by_user_id` kosong, audit tercatat dengan
+ * actor_type 'api_key' dan actor_id = id baris api_keys, meta menandai
+ * sumber 'public_api'. Alur antrean & pengirimannya identik dengan jalur
+ * dashboard (poller API / hub webchat yang sama).
+ */
+export async function queueOutboundMessageForApiKey(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  conversationId: string,
+  input: { contentText: string },
+  apiKeyId: string,
+): Promise<Message | null> {
+  return queueOutboundMessageWithActor(db, ctx.tenantId, conversationId, input, {
+    auditActorType: "api_key",
+    auditActorId: apiKeyId,
+    sentByUserId: null,
+    auditMetaExtra: { source: "public_api", apiKeyId },
   });
 }
 

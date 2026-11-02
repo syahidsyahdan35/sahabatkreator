@@ -34,7 +34,7 @@ export interface ProductsModuleOptions {
   publicBaseUrl?: string;
 }
 
-function serializeProduct(row: Product): ProductResponse {
+export function serializeProduct(row: Product): ProductResponse {
   return ProductResponseSchema.parse({
     id: row.id,
     name: row.name,

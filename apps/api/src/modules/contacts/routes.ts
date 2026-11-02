@@ -19,7 +19,7 @@ import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeContact(row: Contact): ContactResponse {
+export function serializeContact(row: Contact): ContactResponse {
   return ContactResponseSchema.parse({
     id: row.id,
     name: row.name,

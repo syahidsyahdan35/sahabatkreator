@@ -1,5 +1,9 @@
 import type {
   AgentListResponse,
+  ApiKeyListResponse,
+  ApiKeyResponse,
+  CreatedApiKeyResponse,
+  CreateApiKeyRequest,
   AgentResponse,
   AgentSuggestionListResponse,
   AgentSuggestionResponse,
@@ -478,6 +482,32 @@ export const api = {
         `/api/tenants/${tenantId}/payment-links`,
         { method: "POST", body: JSON.stringify(input) },
       );
+    },
+  },
+  apiKeys: {
+    /** GET /api/tenants/:tenantId/api-keys → daftar kunci (tanpa nilai utuh). */
+    async list(tenantId: string): Promise<ApiKeyResponse[]> {
+      const body = await request<ApiKeyListResponse>(
+        `/api/tenants/${tenantId}/api-keys`,
+        { method: "GET" },
+      );
+      return body.apiKeys;
+    },
+    /** POST /api/tenants/:tenantId/api-keys → 201; `key` utuh hanya di respons ini. */
+    create(
+      tenantId: string,
+      input: CreateApiKeyRequest,
+    ): Promise<CreatedApiKeyResponse> {
+      return request<CreatedApiKeyResponse>(`/api/tenants/${tenantId}/api-keys`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    /** DELETE /api/tenants/:tenantId/api-keys/:id → cabut kunci (204). */
+    async revoke(tenantId: string, apiKeyId: string): Promise<void> {
+      await request<unknown>(`/api/tenants/${tenantId}/api-keys/${apiKeyId}`, {
+        method: "DELETE",
+      });
     },
   },
   pay: {

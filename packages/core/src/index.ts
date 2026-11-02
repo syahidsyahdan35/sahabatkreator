@@ -34,6 +34,7 @@ export {
   getConversation,
   listMessages,
   queueOutboundMessage,
+  queueOutboundMessageForApiKey,
   listQueuedOutboundMessages,
   getConversationDeliveryTarget,
   markConversationRead,
@@ -145,3 +146,18 @@ export {
   type SimulatePayResult,
   type ProductMatch,
 } from "./products";
+export {
+  createApiKey,
+  listApiKeys,
+  revokeApiKey,
+  resolveApiKeyByHash,
+  touchApiKeyLastUsed,
+  getTenantNameById,
+  hashApiKey,
+  generateApiKey,
+  API_KEY_DISPLAY_PREFIX,
+  type ApiKeyScope,
+  type CreateApiKeyInput,
+  type CreatedApiKey,
+  type GeneratedApiKey,
+} from "./api-keys";
