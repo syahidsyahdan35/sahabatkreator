@@ -86,6 +86,15 @@ export const contacts = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** Tahap pipeline penjualan, mis. 'new' | 'engaged' | 'qualified' | 'customer'. */
     pipelineStage: varchar("pipeline_stage", { length: 64 }).notNull().default("new"),
+    /**
+     * Sumber perolehan kontak (Fase 13B): diisi jalur atribusi growth
+     * link sebagai `growth:<slug>` saat kontak pertama kali teratribusi
+     * ke sebuah tautan. NULL = tidak teratribusi (keadaan normal
+     * mayoritas kontak) — memang kondisional, bukan field wajib.
+     * Atribusi pertama menang: nilai yang sudah terisi tidak ditimpa
+     * tautan berikutnya (lihat attributeContactToGrowthLink di core).
+     */
+    source: varchar("source", { length: 128 }),
     optInStatus: optInStatusEnum("opt_in_status").notNull().default("unknown"),
     consentAt: timestamp("consent_at", { withTimezone: true }),
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),

@@ -63,7 +63,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 10A (whatsapp_templates)
 // + 1 tabel Fase 10B (comments)
 // + 1 tabel Fase 12C (kb_source_documents)
-assert.equal(Number(tablesRes.rows[0].count), 44);
+// + 2 tabel Fase 13B (growth_links, growth_link_events)
+assert.equal(Number(tablesRes.rows[0].count), 46);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -155,9 +156,10 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada comments (Fase 10B, migrasi 0037) = 56.
 // + tenant_isolation pada kb_source_documents (Fase 12C, migrasi
 //   0039) = 57.
-// Sejak Fase 11A.1 seluruh provenance di atas tiba lewat SATU file
-// baseline (squash 0000-0040); hitungan akhirnya tetap 57.
-assert.equal(Number(policies.rows[0].count), 57);
+// + tenant_isolation pada growth_links & growth_link_events dan
+//   lengan publik `growth_link_public_lookup` pada growth_links
+//   (Fase 13B, migrasi 0002 lineage baseline) = 60.
+assert.equal(Number(policies.rows[0].count), 60);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -178,7 +180,8 @@ await db.exec(`
     conversation_notes,
     whatsapp_templates,
     comments,
-    kb_source_documents
+    kb_source_documents,
+    growth_links, growth_link_events
   TO app_user;
 `);
 
@@ -2254,7 +2257,9 @@ function oneHotVector(index: number): string {
   );
   assert.equal(idx.rows.length, 12);
 
-  // Jumlah tabel & policy tidak berubah oleh normalisasi (44 / 57).
+  // Jumlah tabel & policy: normalisasi sendiri tidak mengubahnya
+  // (44 / 57 pada titik 11A.1); Fase 13B menambah 2 tabel growth +
+  // 3 policy (2 tenant_isolation + 1 lengan lookup publik) → 46 / 60.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2262,10 +2267,10 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "44");
-  assert.equal(counts.rows[0].policies, "57");
+  assert.equal(counts.rows[0].tables, "46");
+  assert.equal(counts.rows[0].policies, "60");
   console.log(
-    "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel tetap 44 & policy tetap 57: OK",
+    "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel 46 & policy 60 sesudah Fase 13B: OK",
   );
 }
 
@@ -2321,6 +2326,157 @@ function oneHotVector(index: number): string {
   assert.equal(views.other.rows[0].n, "0");
   console.log(
     "[35] Fase 11B: invitations.email_sent_at/email_error ada (migrasi hasil generate); status kirim tertulis & terbaca dalam konteks pemilik, tenant lain 0 baris: OK",
+  );
+}
+
+// ---------- 36. Fase 13B: growth links + events + contacts.source ----------
+{
+  // Kolom atribusi kontak ada.
+  const srcCol = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'contacts'
+        AND column_name = 'source'`,
+  );
+  assert.equal(srcCol.rows[0].count, "1");
+
+  // Seed: satu akun channel tenant A + link single + link picker.
+  const CHAN_A = "13b00000-0000-4000-8000-0000000000a1";
+  await db.query(
+    `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, display_name, status, bot_username)
+     VALUES ($1, $2, 'telegram', '8800000013', 'Bot Uji 13B', 'connected', 'bot13b_bot')`,
+    [CHAN_A, TENANT_A],
+  );
+  const LINK_SINGLE = "13b00000-0000-4000-8000-0000000000b1";
+  const LINK_PICKER = "13b00000-0000-4000-8000-0000000000b2";
+  await db.query(
+    `INSERT INTO growth_links (id, tenant_id, kind, label, slug, channel_account_id, auto_tag)
+     VALUES ($1, $2, 'single', 'Promo', 'promo-13b', $3, 'lead-promo')`,
+    [LINK_SINGLE, TENANT_A, CHAN_A],
+  );
+  await db.query(
+    `INSERT INTO growth_links (id, tenant_id, kind, label, slug, picker_channel_ids)
+     VALUES ($1, $2, 'picker', 'Semua Channel', 'semua-13b', $3::jsonb)`,
+    [LINK_PICKER, TENANT_A, JSON.stringify([CHAN_A, CHAN_A.replace("a1", "a2")])],
+  );
+
+  // Slug unik GLOBAL: tenant lain tidak bisa memakai slug yang sama.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO growth_links (tenant_id, kind, label, slug, channel_account_id)
+       VALUES ($1, 'single', 'Tiru', 'promo-13b', $2)`,
+      [TENANT_B, CHAN_A],
+    ),
+    /duplicate key|unique/i,
+  );
+  // CHECK kind/channel: single tanpa channel_account_id ditolak;
+  // picker dengan <2 channel ditolak.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO growth_links (tenant_id, kind, label, slug)
+       VALUES ($1, 'single', 'Yatim', 'yatim-13b')`,
+      [TENANT_A],
+    ),
+    /check|violates/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO growth_links (tenant_id, kind, label, slug, picker_channel_ids)
+       VALUES ($1, 'picker', 'Kurang', 'kurang-13b', '[]'::jsonb)`,
+      [TENANT_A],
+    ),
+    /check|violates/i,
+  );
+  // picker_channel_ids & is_active NOT NULL ber-default (aturan NOT
+  // NULL user 2026-11-03): baris single di atas menyimpan [] & true.
+  const defaults = await db.query<{ picker_channel_ids: unknown; is_active: boolean }>(
+    `SELECT picker_channel_ids, is_active FROM growth_links WHERE id = $1`,
+    [LINK_SINGLE],
+  );
+  assert.deepEqual(defaults.rows[0].picker_channel_ids, []);
+  assert.equal(defaults.rows[0].is_active, true);
+
+  // Event: klik anonim (contact NULL) sah; konversi sekali per kontak
+  // per link — sisipan kedua ditolak index unik parsial.
+  const CONTACT_A = "13b00000-0000-4000-8000-0000000000c1";
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kontak 13B')`,
+    [CONTACT_A, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO growth_link_events (tenant_id, growth_link_id, kind)
+     VALUES ($1, $2, 'click')`,
+    [TENANT_A, LINK_SINGLE],
+  );
+  await db.query(
+    `INSERT INTO growth_link_events (tenant_id, growth_link_id, kind, contact_id)
+     VALUES ($1, $2, 'conversion', $3)`,
+    [TENANT_A, LINK_SINGLE, CONTACT_A],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO growth_link_events (tenant_id, growth_link_id, kind, contact_id)
+       VALUES ($1, $2, 'conversion', $3)`,
+      [TENANT_A, LINK_SINGLE, CONTACT_A],
+    ),
+    /duplicate key|unique/i,
+  );
+
+  // RLS: konteks tenant A melihat link+event-nya; tenant B nol baris;
+  // insert lintas tenant ditolak WITH CHECK.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const ownLinks = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM growth_links`,
+    );
+    const ownEvents = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM growth_link_events`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const otherLinks = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM growth_links`,
+    );
+    const otherEvents = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM growth_link_events`,
+    );
+    let crossBlocked = false;
+    await tx.query(`SAVEPOINT sp36`);
+    try {
+      await tx.query(
+        `INSERT INTO growth_links (tenant_id, kind, label, slug, channel_account_id)
+         VALUES ($1, 'single', 'Lintas', 'lintas-13b', $2)`,
+        [TENANT_A, CHAN_A],
+      );
+    } catch (err) {
+      crossBlocked = /row-level security/i.test(String(err));
+      await tx.query(`ROLLBACK TO SAVEPOINT sp36`);
+    }
+    return { ownLinks, ownEvents, otherLinks, otherEvents, crossBlocked };
+  });
+  assert.equal(views.ownLinks.rows[0].n, "2");
+  assert.equal(views.ownEvents.rows[0].n, "2");
+  assert.equal(views.otherLinks.rows[0].n, "0");
+  assert.equal(views.otherEvents.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+
+  // Lengan publik: TANPA konteks tenant, app.growth_slug membuka tepat
+  // baris slug itu (dan bukan slug lain / bukan events).
+  const pub = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.growth_slug', 'promo-13b', true)`);
+    const hit = await tx.query<{ slug: string }>(
+      `SELECT slug FROM growth_links`,
+    );
+    await tx.query(`SELECT set_config('app.growth_slug', 'tidak-ada', true)`);
+    const miss = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM growth_links`,
+    );
+    return { hit, miss };
+  });
+  assert.deepEqual(pub.hit.rows.map((r) => r.slug), ["promo-13b"]);
+  assert.equal(pub.miss.rows[0].n, "0");
+  console.log(
+    "[36] Fase 13B: growth_links/growth_link_events — slug unik global, CHECK kind/channel, konversi unik per kontak, isolasi tenant, lengan lookup publik per slug, contacts.source ada: OK",
   );
 }
 

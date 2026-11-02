@@ -19,3 +19,4 @@ export * from "./whatsapp-templates";
 export * from "./comments";
 export * from "./flows";
 export * from "./saved-replies";
+export * from "./growth";

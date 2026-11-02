@@ -1198,6 +1198,80 @@ export function parseMetaWebhookEvents(payload: unknown): MetaMessagingEvent[] {
   return events;
 }
 
+/**
+ * Satu event REFERRAL yang dinormalisasi dari payload webhook Meta
+ * (Fase 13B): kedatangan pengguna lewat tautan m.me / ig.me yang
+ * membawa parameter ref — di sini ref = slug growth link.
+ *
+ * Bentuk terdokumentasi Meta (objek 'page' & 'instagram' simetris):
+ * - entry.messaging[].referral = { ref, source, type } — referral
+ *   berdiri sendiri saat percakapan DIBUKA dari tautan ref;
+ * - entry.messaging[].postback.referral = { ref, source, type } —
+ *   referral yang menempel pada ketukan tombol Get Started.
+ * Keduanya dinormalkan ke bentuk yang sama; ref kosong dilewati.
+ */
+export interface MetaReferralEvent {
+  /** Objek webhook: 'page' → messenger, 'instagram' → instagram. */
+  objectKind: "page" | "instagram";
+  /** entry.id: Page ID (page) / ID akun IG (instagram) — penerima. */
+  entryExternalId: string;
+  /** PSID/IGSID pengguna yang datang lewat tautan ref. */
+  senderExternalId: string;
+  /** Parameter ref pada tautan (di sini: slug growth link). */
+  ref: string;
+  /** Sumber Meta: 'SHORTLINK' | 'ADS' | 'CUSTOMER_CHAT_PLUGIN' | ... */
+  source: string | null;
+  timestamp: number | null;
+}
+
+interface MetaReferralPayload {
+  object?: string;
+  entry?: Array<{
+    id?: string;
+    messaging?: Array<{
+      sender?: { id?: string };
+      referral?: { ref?: string; source?: string };
+      postback?: { referral?: { ref?: string; source?: string } };
+      timestamp?: number;
+    }>;
+  }>;
+}
+
+/**
+ * Menormalkan event referral (`messaging_referrals`) dari payload
+ * webhook Meta. Parser messaging utama sengaja tidak diubah —
+ * referral tidak membawa `message`, jadi tidak pernah lolos parser
+ * pesan; jalur ini terpisah agar pemanggil bisa mengatribusikan
+ * kontak tanpa membuat pesan masuk.
+ */
+export function parseMetaReferralEvents(payload: unknown): MetaReferralEvent[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const body = payload as MetaReferralPayload;
+  if (body.object !== "page" && body.object !== "instagram") return [];
+  const objectKind = body.object;
+  const events: MetaReferralEvent[] = [];
+  for (const entry of body.entry ?? []) {
+    if (typeof entry?.id !== "string" || !entry.id) continue;
+    for (const item of entry.messaging ?? []) {
+      const senderId = item?.sender?.id;
+      if (typeof senderId !== "string" || !senderId) continue;
+      const referral = item?.referral ?? item?.postback?.referral;
+      if (!referral || typeof referral.ref !== "string" || !referral.ref) {
+        continue;
+      }
+      events.push({
+        objectKind,
+        entryExternalId: entry.id,
+        senderExternalId: senderId,
+        ref: referral.ref,
+        source: typeof referral.source === "string" ? referral.source : null,
+        timestamp: typeof item.timestamp === "number" ? item.timestamp : null,
+      });
+    }
+  }
+  return events;
+}
+
 /** Satu event komentar yang dinormalisasi dari payload webhook Meta (Fase 10B). */
 export interface MetaCommentEvent {
   /** Objek webhook: 'page' → messenger, 'instagram' → instagram. */

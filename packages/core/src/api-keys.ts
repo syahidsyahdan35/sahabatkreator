@@ -53,7 +53,9 @@ export type ApiKeyScope =
   | "agents:read"
   | "channels:read"
   | "whatsapp_templates:read"
-  | "knowledge:read";
+  | "knowledge:read"
+  // Fase 13B: scope baca growth links.
+  | "growth_links:read";
 
 /** Hash SHA-256 (hex) dari kunci utuh — satu-satunya bentuk yang disimpan/dicari. */
 export function hashApiKey(fullKey: string): string {

@@ -440,6 +440,108 @@ export async function recordMetaInboundMessage(
   });
 }
 
+export interface RecordMetaReferralResult {
+  contactId: string;
+  conversationId: string;
+  /** True bila identitas channel kontak ini baru dibuat oleh referral ini. */
+  identityCreated: boolean;
+}
+
+/**
+ * Mencatat kedatangan REFERRAL Meta (Fase 13B): pengguna membuka
+ * percakapan lewat tautan m.me/ig.me berparameter ref. Tidak ada
+ * pesan — jadi fungsi ini hanya find-or-create identitas + kontak +
+ * percakapan privat terbuka MENGIKUTI POLA PERSIS recordMetaInboundMessage,
+ * TANPA baris pesan, TANPA unread, TANPA outbox `message.received`
+ * (tidak ada yang perlu dijawab/di-otomatisasi). Atribusi growth link
+ * dilakukan pemanggil lewat `attributeContactToGrowthLink` dengan ref
+ * sebagai slug — referral yang ref-nya bukan slug dikenal adalah
+ * no-op di lapis itu. Idempoten: referral berulang menemukan
+ * identitas/percakapan yang sama.
+ */
+export async function recordMetaReferralContact(
+  db: Database,
+  account: Pick<MetaAccountRef, "id" | "tenantId" | "provider" | "externalId">,
+  input: { senderExternalId: string },
+): Promise<RecordMetaReferralResult> {
+  const provider = account.provider as MetaProvider;
+  return withTenantDb(db, account.tenantId, async (tx) => {
+    const [identity] = await tx
+      .select()
+      .from(channelIdentities)
+      .where(
+        and(
+          eq(channelIdentities.channelAccountId, account.id),
+          eq(channelIdentities.externalUserId, input.senderExternalId),
+        ),
+      )
+      .limit(1);
+
+    let contactId: string;
+    let identityCreated = false;
+    if (identity) {
+      contactId = identity.contactId;
+    } else {
+      const [contact] = await tx
+        .insert(contacts)
+        .values({
+          tenantId: account.tenantId,
+          name: metaContactFallbackName(provider),
+        })
+        .returning();
+      contactId = contact.id;
+      identityCreated = true;
+      await tx.insert(channelIdentities).values({
+        tenantId: account.tenantId,
+        contactId,
+        channelAccountId: account.id,
+        provider,
+        externalUserId: input.senderExternalId,
+      });
+    }
+
+    const [existingConv] = await tx
+      .select()
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.tenantId, account.tenantId),
+          eq(conversations.channelAccountId, account.id),
+          eq(conversations.contactId, contactId),
+        ),
+      )
+      .orderBy(desc(conversations.createdAt))
+      .limit(1);
+
+    let conversationId: string;
+    if (existingConv && existingConv.status !== "closed") {
+      conversationId = existingConv.id;
+      if (existingConv.providerChatId !== input.senderExternalId) {
+        await tx
+          .update(conversations)
+          .set({ providerChatId: input.senderExternalId })
+          .where(eq(conversations.id, existingConv.id));
+      }
+    } else {
+      const [conv] = await tx
+        .insert(conversations)
+        .values({
+          tenantId: account.tenantId,
+          channelAccountId: account.id,
+          contactId,
+          provider,
+          providerChatId: input.senderExternalId,
+          kind: "private",
+          status: "open",
+        })
+        .returning();
+      conversationId = conv.id;
+    }
+
+    return { contactId, conversationId, identityCreated };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Profil kontak dari Graph (nama + foto) — best-effort, pola Fase 6D
 // ---------------------------------------------------------------------------

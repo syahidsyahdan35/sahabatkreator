@@ -76,6 +76,14 @@ export const ErrorCodeSchema = z.enum([
   // Fase 12E: playground agent — provider LLM gagal menjawab atau
   // salah konfigurasi (mis. LLM_PROVIDER=openrouter tanpa kunci) → 502.
   "AGENT_PROVIDER_ERROR",
+  // Fase 13B: growth links — slug publik sudah dipakai workspace lain
+  // (slug unik GLOBAL) → 409; konfigurasi channel tidak sah (akun
+  // bukan milik tenant / tidak connected / himpunan picker < 2) → 422;
+  // URL tujuan platform tidak bisa disusun dari data akun (WhatsApp /
+  // Instagram tanpa handle publik) → 422.
+  "GROWTH_LINK_SLUG_TAKEN",
+  "GROWTH_LINK_CHANNEL_INVALID",
+  "GROWTH_LINK_TARGET_UNAVAILABLE",
   // Fase 9B: merge kontak ke dirinya sendiri → 422.
   "CONTACT_MERGE_SAME",
   // Fase 9C: kedalaman inbox tim — penerima tugas bukan member workspace
@@ -1006,6 +1014,14 @@ export const WebchatSessionRequestSchema = z.object({
    * kunjungan berikutnya.
    */
   visitorId: z.string().trim().min(8).max(255).optional(),
+  /**
+   * Slug growth link (Fase 13B): sesi yang dibuka dari tautan
+   * /go/<slug> untuk channel webchat membawa slug ini agar kontak
+   * teratribusi ke tautan itu (sumber + auto-tag + event konversi).
+   * Diabaikan diam-diam bila slug tidak dikenal/tidak aktif/bukan
+   * milik channel ini — sesi tidak pernah gagal karena atribusi.
+   */
+  src: z.string().trim().min(3).max(64).optional(),
 });
 export type WebchatSessionRequest = z.infer<typeof WebchatSessionRequestSchema>;
 
@@ -1752,6 +1768,10 @@ export const ApiKeyScopeSchema = z.enum([
   // Fase 10B: permukaan publik komentar (aturan sinkronisasi kontrak).
   "comments:read",
   "comments:write",
+  // Fase 13B: permukaan BACA publik growth links (tulis tetap
+  // dashboard-only — slug publik + branding adalah artefak kurasi UI;
+  // lihat docs/COVERAGE-MATRIX.md).
+  "growth_links:read",
   // Fase 15A: permukaan BACA publik untuk sumber daya yang sebelumnya
   // hanya dashboard (aturan sinkronisasi kontrak dijalankan retrospektif).
   // Tulis untuk sumber daya ini tetap dashboard-only — lihat
@@ -1781,6 +1801,7 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "channels:read",
   "whatsapp_templates:read",
   "knowledge:read",
+  "growth_links:read",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1796,11 +1817,12 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "channels:read",
   "whatsapp_templates:read",
   "knowledge:read",
+  "growth_links:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(14).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(15).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -3545,6 +3567,137 @@ export type UpdateSavedReplyRequest = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
+// Fase 13B — Growth Tools: tautan publik per channel (/go/:slug),
+// halaman arahan pemilih channel, dan analitik per tautan.
+//
+// Bentuk publik: GET /go/:slug (tanpa autentikasi) mencatat klik lalu
+// 302 ke URL platform; picker me-render halaman arahan. Atribusi
+// kontak terjadi di jalur inbound (Telegram /start <slug>, referral
+// Meta, sesi webchat ?src=) — WhatsApp memang tidak punya jalur
+// payload, jadi untuk WA hanya klik yang tercatat (dinyatakan jujur
+// di UI). Permukaan v1 untuk sumber daya ini BACA saja
+// (growth_links:read); tulis = kurasi UI dashboard (slug publik +
+// branding), lihat docs/COVERAGE-MATRIX.md.
+// ---------------------------------------------------------------------------
+
+export const GrowthLinkKindSchema = z.enum(["single", "picker"]);
+export type GrowthLinkKind = z.infer<typeof GrowthLinkKindSchema>;
+
+/**
+ * Slug publik: 3–64 karakter huruf kecil/angka/strip, tidak diawali
+ * atau diakhiri strip. Batas 64 juga menjaga payload `/start` Telegram
+ * (maks 64 karakter) tetap sah.
+ */
+export const GrowthLinkSlugSchema = z
+  .string()
+  .regex(
+    /^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$/,
+    "Slug must be 3-64 chars of lowercase letters, digits and hyphens",
+  );
+export type GrowthLinkSlug = z.infer<typeof GrowthLinkSlugSchema>;
+
+/** Ringkasan akun channel sebagaimana dirujuk tautan growth. */
+export const GrowthLinkChannelSummarySchema = z.object({
+  id: z.string().uuid(),
+  provider: ChannelProviderSchema,
+  displayName: z.string().nullable(),
+  /** Username Page (messenger) / akun IG / nomor tampil WhatsApp. */
+  publicHandle: z.string().nullable(),
+  /** Username bot Telegram (tanpa '@'); provider lain null. */
+  botUsername: z.string().nullable(),
+  status: ChannelAccountStatusSchema,
+});
+export type GrowthLinkChannelSummary = z.infer<
+  typeof GrowthLinkChannelSummarySchema
+>;
+
+/** Angka analitik yang DITURUNKAN dari growth_link_events (bukan penghitung tersimpan). */
+export const GrowthLinkStatsSchema = z.object({
+  clicks: z.number().int(),
+  pickerViews: z.number().int(),
+  conversions: z.number().int(),
+});
+export type GrowthLinkStats = z.infer<typeof GrowthLinkStatsSchema>;
+
+export const GrowthLinkResponseSchema = z.object({
+  id: z.string().uuid(),
+  kind: GrowthLinkKindSchema,
+  label: z.string(),
+  slug: z.string(),
+  /** Path publik tautan ini (origin dashboard + path ini = URL utuh). */
+  publicPath: z.string(),
+  channelAccountId: z.string().uuid().nullable(),
+  /** Akun tujuan untuk kind 'single'; null untuk picker. */
+  channel: GrowthLinkChannelSummarySchema.nullable(),
+  pickerChannelIds: z.array(z.string().uuid()),
+  /** Ringkasan akun picker, urut seperti pickerChannelIds. */
+  pickerChannels: z.array(GrowthLinkChannelSummarySchema),
+  autoTag: z.string().nullable(),
+  prefillText: z.string().nullable(),
+  isActive: z.boolean(),
+  stats: GrowthLinkStatsSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type GrowthLinkResponse = z.infer<typeof GrowthLinkResponseSchema>;
+
+export const GrowthLinkListResponseSchema = z.object({
+  links: z.array(GrowthLinkResponseSchema),
+});
+export type GrowthLinkListResponse = z.infer<
+  typeof GrowthLinkListResponseSchema
+>;
+
+export const CreateGrowthLinkRequestSchema = z.object({
+  kind: GrowthLinkKindSchema,
+  label: z.string().trim().min(1).max(128),
+  /** Kosongkan untuk digenerate server dari label. */
+  slug: GrowthLinkSlugSchema.optional(),
+  /** Wajib untuk kind 'single' (ditegakkan layanan: 422 bila absen/salah). */
+  channelAccountId: z.string().uuid().optional(),
+  /** Wajib >= 2 untuk kind 'picker' (ditegakkan layanan). */
+  pickerChannelIds: z.array(z.string().uuid()).max(10).optional(),
+  autoTag: z.string().trim().min(1).max(64).nullable().optional(),
+  prefillText: z.string().trim().min(1).max(1000).nullable().optional(),
+});
+export type CreateGrowthLinkRequest = z.infer<
+  typeof CreateGrowthLinkRequestSchema
+>;
+
+/** Edit parsial: hanya field yang disebut yang berubah (route menolak objek kosong). */
+export const UpdateGrowthLinkRequestSchema = z.object({
+  label: z.string().trim().min(1).max(128).optional(),
+  slug: GrowthLinkSlugSchema.optional(),
+  channelAccountId: z.string().uuid().optional(),
+  pickerChannelIds: z.array(z.string().uuid()).max(10).optional(),
+  autoTag: z.string().trim().min(1).max(64).nullable().optional(),
+  prefillText: z.string().trim().min(1).max(1000).nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+export type UpdateGrowthLinkRequest = z.infer<
+  typeof UpdateGrowthLinkRequestSchema
+>;
+
+/** Satu kontak teratribusi (event conversion terbaru dulu). */
+export const GrowthLinkAttributedContactSchema = z.object({
+  contactId: z.string().uuid(),
+  name: z.string(),
+  /** Nilai kolom sumber kontak (mis. "growth:promo"), null bila kontak sudah terhapus sumbernya. */
+  source: z.string().nullable(),
+  convertedAt: z.string().datetime(),
+});
+export type GrowthLinkAttributedContact = z.infer<
+  typeof GrowthLinkAttributedContactSchema
+>;
+
+export const GrowthLinkAttributedContactsResponseSchema = z.object({
+  contacts: z.array(GrowthLinkAttributedContactSchema),
+});
+export type GrowthLinkAttributedContactsResponse = z.infer<
+  typeof GrowthLinkAttributedContactsResponseSchema
+>;
+
+// ---------------------------------------------------------------------------
 // Fase 15A — Permukaan publik v1: query tambahan + REGISTRY permukaan.
 //
 // Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
@@ -3859,6 +4012,25 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     contractSchemas: ["KbStatsResponseSchema"],
     sdkMethod: "getKnowledgeStats",
     mcpTool: "get_knowledge_stats",
+    mcpTier: "read",
+  },
+  // --- Fase 13B: growth links — permukaan BACA (tulis dashboard-only) --
+  {
+    method: "GET",
+    path: "/v1/growth-links",
+    scope: "growth_links:read",
+    contractSchemas: ["GrowthLinkListResponseSchema"],
+    sdkMethod: "listGrowthLinks",
+    mcpTool: "list_growth_links",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/growth-links/:id",
+    scope: "growth_links:read",
+    contractSchemas: ["GrowthLinkResponseSchema"],
+    sdkMethod: "getGrowthLink",
+    mcpTool: "get_growth_link",
     mcpTier: "read",
   },
 ];
