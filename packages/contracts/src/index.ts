@@ -2497,7 +2497,9 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *   graph = { nodes: FlowNode[], edges: FlowEdge[] }
  *   FlowNode = { id: string, type: FlowNodeType, config: object,
  *                position?: { x: number, y: number } }
- *   FlowEdge = { from: nodeId, to: nodeId, branch?: "yes" | "no" }
+ *   FlowEdge = { from: nodeId, to: nodeId,
+ *                branch?: "yes" | "no" | "a" | "b" | "replied" |
+ *                         "timeout" }
  *
  * `position` adalah metadata TAMPILAN milik builder (Fase 8B): disimpan
  * apa adanya di graf yang sama (satu sumber kebenaran), diterima
@@ -2507,8 +2509,11 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  * Tepat SATU node `trigger` per flow; eksekusi mulai dari node yang
  * ditunjuk edge keluar trigger. Node tanpa edge keluar = akhir run
  * (node `end` adalah penanda eksplisit untuk hal yang sama). Edge
- * `branch` hanya sah keluar dari node `condition` (wajib ada cabang
- * `yes` DAN `no` — ditegakkan saat aktivasi, bukan di skema bentuk).
+ * `branch` hanya sah keluar dari node bercabang, dan himpunan cabang
+ * yang wajib lengkap ditegakkan saat aktivasi (bukan di skema bentuk):
+ * `condition` → "yes"+"no", `ab_split` → "a"+"b",
+ * `wait_reply` → "replied"+"timeout". Node lain tidak boleh membawa
+ * branch.
  *
  * Tipe node v1 dan config-nya:
  * - trigger       { kind: "keyword", keywords: string[], match:
@@ -2532,6 +2537,62 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  * - ai_response   {} — memanggil jalur agent.respond yang ada.
  * - handoff       {} — agent_enabled=false pada percakapan + audit.
  * - end           {}
+ *
+ * Tipe node tambahan (Fase 12A):
+ * - set_field     { field, value } — field: "name"|"phone"|"email"|
+ *                   "custom:<key>"; value dirender persis seperti
+ *                   send_message ({name} + spintax) lalu ditulis ke
+ *                   kontak run (kolom atau custom_fields); terlihat
+ *                   oleh condition field_equals pada langkah berikutnya.
+ * - http_request  { method: "GET"|"POST"|"PUT"|"PATCH"|"DELETE", url,
+ *                   headers?: { [nama]: nilai }, body?: string,
+ *                   saveToField?: "custom:<key>" } — permintaan HTTP
+ *                   dari worker dengan timeout 10 detik. Substitusi
+ *                   variabel pada url/headers/body SENGAJA SEMPIT dan
+ *                   TANPA spintax: hanya `{name}` (nama kontak) dan
+ *                   `{{field:<key>}}` (nilai contacts.custom_fields).
+ *                   Status + potongan respons dicatat di detail
+ *                   langkah; saveToField menyimpan body respons
+ *                   (terpotong 2000 char) HANYA bila status 2xx.
+ *                   Kegagalan jaringan/non-2xx tercatat sebagai langkah
+ *                   gagal di detail tetapi RUN TERUS ke node berikutnya
+ *                   (keputusan desain 12A — webhook pihak ketiga yang
+ *                   mati tidak boleh membunuh percakapan).
+ * - goto_flow     { flowId } — memulai run BARU pada flow tujuan
+ *                   (harus ACTIVE, tenant sama; flow itu sendiri sah
+ *                   sebagai tujuan) untuk kontak/percakapan yang sama;
+ *                   run asal selesai `completed` dengan detail goto.
+ *                   Kedalaman rantai dibawa di context run
+ *                   (`gotoDepth`, mulai 0); goto yang akan membuat
+ *                   kedalaman > 5 GAGAL: langkah `goto_depth_exceeded`,
+ *                   run asal `failed`. Run goto TIDAK lahir dari pesan
+ *                   masuk sehingga `triggerMessageId`-nya null (konteks
+ *                   menyimpan `rootTriggerMessageId` untuk node yang
+ *                   membutuhkannya, mis. ai_response).
+ * - ab_split      { percentA: int 1..99 } — cabang edge "a"/"b";
+ *                   pilihan acak per run dicatat di detail langkah.
+ *                   (Lapisan eksperimen A/B penuh = Fase 13D.)
+ * - send_payment_link { productId } — memakai layanan payment link
+ *                   yang sama dengan tool agent (link SIMULASI
+ *                   berlabel) lalu mengirimkannya sebagai pesan keluar
+ *                   pada percakapan run. Produk tak ditemukan/arsip:
+ *                   langkah gagal tercatat, run `failed`
+ *                   (payment_product_unavailable) — kegagalan keras,
+ *                   karena mengirim link yang salah/ tidak ada lebih
+ *                   buruk daripada menghentikan run.
+ * - wait_reply    { amount: int ≥ 0, unit } — run parkir `waiting`
+ *                   PADA node ini (seperti delay, tetapi menunggu
+ *                   balasan): pesan masuk berikutnya dari kontak pada
+ *                   percakapan itu melanjutkan run lewat branch
+ *                   "replied"; tenggat lewat tanpa balasan → job
+ *                   resume menjalankan branch "timeout". Pesan yang
+ *                   melanjutkan wait_reply TETAP diproses pemicu lain
+ *                   seperti biasa (keyword/sequence/flow lain boleh
+ *                   ikut menembak — tidak ada penekanan ganda selain
+ *                   bahwa run yang sama tidak dilanjutkan dua kali).
+ *                   Satu pesan masuk melanjutkan SEMUA run wait_reply
+ *                   yang parkir di percakapan itu. Opt-out membatalkan
+ *                   run parkir seperti delay.
  */
 export const FlowStatusSchema = z.enum(["draft", "active", "archived"]);
 export type FlowStatus = z.infer<typeof FlowStatusSchema>;
@@ -2557,6 +2618,13 @@ export const FlowNodeTypeSchema = z.enum([
   "ai_response",
   "handoff",
   "end",
+  // Fase 12A
+  "set_field",
+  "http_request",
+  "goto_flow",
+  "ab_split",
+  "send_payment_link",
+  "wait_reply",
 ]);
 export type FlowNodeType = z.infer<typeof FlowNodeTypeSchema>;
 
@@ -2608,6 +2676,26 @@ export const FlowNodeConfigSchema = z.union([
   z.object({ tag: z.string().min(1).max(64) }),
   z.object({ stage: z.string().min(1).max(64) }),
   z.object({ automationId: z.string().uuid() }),
+  // Fase 12A — bentuk kasar; keabsahan rinci (rentang persen, rujukan
+  // flow/produk aktif, format field) ditegakkan validasi aktivasi.
+  z.object({
+    field: z.string().min(1).max(128),
+    value: z.string().max(4096),
+  }),
+  z.object({
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+    url: z.string().min(1).max(2048),
+    headers: z.record(z.string(), z.string()).optional(),
+    body: z.string().max(8192).optional(),
+    saveToField: z.string().min(1).max(128).optional(),
+  }),
+  z.object({ flowId: z.string().uuid() }),
+  z.object({ percentA: z.number().int().min(1).max(99) }),
+  z.object({ productId: z.string().uuid() }),
+  z.object({
+    amount: z.number().int().min(0).max(100_000),
+    unit: z.enum(["seconds", "minutes", "hours"]),
+  }),
   // ai_response / handoff / end: config kosong.
   z.object({}),
 ]);
@@ -2631,10 +2719,21 @@ export const FlowNodeSchema = z.object({
 });
 export type FlowNode = z.infer<typeof FlowNodeSchema>;
 
+/** Cabang edge: condition yes/no, ab_split a/b, wait_reply replied/timeout. */
+export const FlowEdgeBranchSchema = z.enum([
+  "yes",
+  "no",
+  "a",
+  "b",
+  "replied",
+  "timeout",
+]);
+export type FlowEdgeBranch = z.infer<typeof FlowEdgeBranchSchema>;
+
 export const FlowEdgeSchema = z.object({
   from: z.string().min(1).max(128),
   to: z.string().min(1).max(128),
-  branch: z.enum(["yes", "no"]).optional(),
+  branch: FlowEdgeBranchSchema.optional(),
 });
 export type FlowEdge = z.infer<typeof FlowEdgeSchema>;
 
@@ -2710,7 +2809,9 @@ export const FlowRunResponseSchema = z.object({
   conversationId: z.string().uuid(),
   contactId: z.string().uuid(),
   contactName: z.string(),
-  triggerMessageId: z.string().uuid(),
+  // Null untuk run yang lahir dari goto_flow (Fase 12A) — run semacam
+  // itu tidak dipicu pesan masuk.
+  triggerMessageId: z.string().uuid().nullable(),
   status: FlowRunStatusSchema,
   currentNodeId: z.string().nullable(),
   stepCount: z.number().int().nonnegative(),

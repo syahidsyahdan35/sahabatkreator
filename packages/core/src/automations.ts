@@ -461,6 +461,13 @@ export interface EvaluateInboundResult {
   flowDuplicateStarts: number;
   /** Fase 8A: run flow `waiting` yang dibatalkan karena kontak opt-out. */
   cancelledFlowRuns: number;
+  /**
+   * Fase 12A: run wait_reply parkir yang dilanjutkan pesan ini lewat
+   * branch "replied". Dihitung tertangani flow (worker tidak
+   * meneruskan ke agent) — pesan itu adalah bagian dari perjalanan
+   * flow yang sedang menunggu, dan cabang replied adalah responsnya.
+   */
+  flowWaitReplyResumed: number;
 }
 
 /**
@@ -600,6 +607,7 @@ export async function evaluateInboundMessageForAutomations(
       flowRunsStarted: 0,
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
+      flowWaitReplyResumed: 0,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
   // tembakan automation dan (karena `evaluated` false) worker juga tidak
@@ -613,6 +621,7 @@ export async function evaluateInboundMessageForAutomations(
       flowRunsStarted: 0,
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
+      flowWaitReplyResumed: 0,
     };
   const text = context.message.contentText ?? "";
 
@@ -894,6 +903,7 @@ export async function evaluateInboundMessageForAutomations(
     flowRunsStarted: flowOutcome.startedRunIds.length,
     flowDuplicateStarts: flowOutcome.duplicateStarts,
     cancelledFlowRuns: flowOutcome.cancelledRunIds.length,
+    flowWaitReplyResumed: flowOutcome.resumedRunIds.length,
   };
 }
 

@@ -2014,5 +2014,53 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
   );
 }
 
+// ---------- 31. Fase 12A: flow_runs.trigger_message_id NULLABLE ----------
+// Migrasi 0038 (prasyarat node goto_flow): (a) kolom trigger_message_id
+// kini is_nullable = YES; (b) run goto (trigger NULL) bisa ditulis dalam
+// konteks tenant pemilik; (c) DUA run NULL pada flow yang sama sama-sama
+// diterima — index unik parsial memang mengabaikan NULL, sehingga
+// rantai goto tidak mati oleh constraint idempotensi pesan; (d) tenant
+// lain tidak melihat run-run itu.
+const FLOW12_ID = "a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0";
+const GOTO_RUN_1 = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1";
+const GOTO_RUN_2 = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2";
+{
+  const col = await db.query<{ is_nullable: string }>(
+    `SELECT is_nullable FROM information_schema.columns
+      WHERE table_name = 'flow_runs' AND column_name = 'trigger_message_id'`,
+  );
+  assert.equal(col.rows[0].is_nullable, "YES");
+  await db.query(
+    `INSERT INTO flows (id, tenant_id, name, status, graph)
+     VALUES ($1, $2, 'Flow 12A', 'active', '{"nodes":[],"edges":[]}')`,
+    [FLOW12_ID, TENANT_A],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    await tx.query(
+      `INSERT INTO flow_runs (id, tenant_id, flow_id, conversation_id, contact_id, trigger_message_id, status, context)
+       VALUES ($1, $2, $3, $4, $5, NULL, 'running', '{"gotoDepth":1}'::jsonb),
+              ($6, $2, $3, $4, $5, NULL, 'completed', '{"gotoDepth":2}'::jsonb)`,
+      [GOTO_RUN_1, TENANT_A, FLOW12_ID, CONV_A, CONTACT_A, GOTO_RUN_2],
+    );
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_runs WHERE flow_id = $1 AND trigger_message_id IS NULL`,
+      [FLOW12_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_runs WHERE flow_id = $1`,
+      [FLOW12_ID],
+    );
+    return { own, other };
+  });
+  assert.equal(views.own.rows[0].n, "2");
+  assert.equal(views.other.rows[0].n, "0");
+  console.log(
+    "[31] Fase 12A: flow_runs.trigger_message_id nullable (migrasi 0038) — run goto tanpa pesan pemicu tersimpan; dua run NULL pada flow sama diterima (unik parsial abaikan NULL); tenant lain 0 baris: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

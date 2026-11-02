@@ -11,6 +11,7 @@ import {
   flows,
   messages,
   outboxEvents,
+  products,
   sequenceEnrollments,
   type Contact,
   type Conversation,
@@ -23,6 +24,7 @@ import type { LlmProvider } from "@sahabat-kreator/ai";
 import { withTenantDb, type DbTx } from "./tx";
 import { renderMessageText } from "./render-text";
 import { respondToInboundMessage } from "./agent-runtime";
+import { buildPaymentUrl, createPaymentLink } from "./products";
 
 /**
  * Flow Engine (Fase 8A) — eksekutor graf node di worker.
@@ -70,9 +72,31 @@ import { respondToInboundMessage } from "./agent-runtime";
  *   balasan terkirim; suggest → saran tercatat; agent tak ada/
  *   nonaktif untuk percakapan → langkah `skipped` beralasan, run
  *   lanjut (BUKAN crash).
+ *
+ * FASE 12A — enam tipe node baru (kontrak didokumentasikan penuh di
+ * packages/contracts): set_field, http_request, goto_flow, ab_split,
+ * send_payment_link, wait_reply. Keputusan desain yang mengikat:
+ * - http_request TIDAK PERNAH menggagalkan run: kegagalan jaringan/
+ *   non-2xx tercatat di detail langkah (`http_error`) dan run lanjut
+ *   ke node berikutnya. Timeout 10 detik; substitusi variabel sempit
+ *   ({name} + {{field:<key>}}, tanpa spintax).
+ * - goto_flow memulai run BARU (trigger_message_id NULL — migrasi
+ *   0038) dan menyelesaikan run asal; kedalaman rantai di context
+ *   (`gotoDepth`, maks FLOW_GOTO_MAX_DEPTH) menahan siklus A→B→A.
+ * - wait_reply parkir PADA nodenya (context.wait {nodeId, deadline,
+ *   parkedAt}): balasan kontak melanjutkannya lewat branch "replied"
+ *   dari jalur evaluasi pesan masuk (pesan yang sama TETAP diproses
+ *   pemicu lain seperti biasa), tenggat lewat → job resume yang sama
+ *   menjalankan branch "timeout". Opt-out membatalkan seperti delay.
  */
 
 export const FLOW_MAX_STEPS = 100;
+
+/** Kedalaman rantai goto_flow maksimum (context.gotoDepth run baru). */
+export const FLOW_GOTO_MAX_DEPTH = 5;
+
+/** Timeout permintaan node http_request (milidetik). */
+export const FLOW_HTTP_TIMEOUT_MS = 10_000;
 
 export type FlowStatus = Flow["status"];
 export type FlowRunStatus = FlowRun["status"];
@@ -89,10 +113,13 @@ export interface FlowGraphNode {
   position?: { x: number; y: number };
 }
 
+/** Cabang edge — selaras FlowEdgeBranchSchema di kontrak. */
+export type FlowBranch = "yes" | "no" | "a" | "b" | "replied" | "timeout";
+
 export interface FlowGraphEdge {
   from: string;
   to: string;
-  branch?: "yes" | "no";
+  branch?: FlowBranch;
 }
 
 export interface FlowGraphData {
@@ -112,7 +139,23 @@ const NODE_TYPES = new Set([
   "ai_response",
   "handoff",
   "end",
+  // Fase 12A
+  "set_field",
+  "http_request",
+  "goto_flow",
+  "ab_split",
+  "send_payment_link",
+  "wait_reply",
 ]);
+
+const FLOW_BRANCHES: readonly FlowBranch[] = [
+  "yes",
+  "no",
+  "a",
+  "b",
+  "replied",
+  "timeout",
+];
 
 function isValidFlowPosition(
   value: unknown,
@@ -166,7 +209,11 @@ export function normalizeFlowGraph(raw: unknown): FlowGraphData {
         .map((e) => ({
           from: e.from,
           to: e.to,
-          branch: e.branch === "yes" || e.branch === "no" ? e.branch : undefined,
+          branch:
+            typeof e.branch === "string" &&
+            (FLOW_BRANCHES as readonly string[]).includes(e.branch)
+              ? (e.branch as FlowBranch)
+              : undefined,
         }))
     : [];
   return { nodes, edges };
@@ -184,11 +231,11 @@ function firstNodeAfterTrigger(graph: FlowGraphData): string | null {
   return edge ? edge.to : null;
 }
 
-/** Node lanjutan: untuk condition wajib menyebut branch; selain itu edge pertama. */
+/** Node lanjutan: untuk node bercabang wajib menyebut branch; selain itu edge pertama. */
 function nextNodeId(
   graph: FlowGraphData,
   nodeId: string,
-  branch?: "yes" | "no",
+  branch?: FlowBranch,
 ): string | null {
   const out = graph.edges.filter((e) => e.from === nodeId);
   if (branch) {
@@ -197,6 +244,76 @@ function nextNodeId(
   }
   const picked = out.find((e) => e.branch === undefined) ?? out[0];
   return picked ? picked.to : null;
+}
+
+/** Bentuk `flow_runs.context` yang dibaca eksekutor (defensif). */
+export interface FlowRunContextData {
+  triggerText?: string;
+  /** Kedalaman rantai goto_flow (0/absen = run dari pesan masuk). */
+  gotoDepth?: number;
+  /** Pesan pemicu run akar — untuk run yang lahir dari goto_flow. */
+  rootTriggerMessageId?: string;
+  /** Parkir wait_reply: node yang menunggu + tenggatnya. */
+  wait?: { nodeId: string; deadline: string; parkedAt: string };
+  [key: string]: unknown;
+}
+
+function runContextOf(run: FlowRun): FlowRunContextData {
+  const raw = (run.context ?? {}) as Record<string, unknown>;
+  const out: FlowRunContextData = { ...raw };
+  if (typeof raw.triggerText !== "string") delete out.triggerText;
+  if (typeof raw.gotoDepth !== "number") delete out.gotoDepth;
+  if (typeof raw.rootTriggerMessageId !== "string") {
+    delete out.rootTriggerMessageId;
+  }
+  const w = raw.wait as
+    | { nodeId?: unknown; deadline?: unknown; parkedAt?: unknown }
+    | undefined;
+  if (
+    typeof w !== "object" ||
+    w === null ||
+    typeof w.nodeId !== "string" ||
+    typeof w.deadline !== "string"
+  ) {
+    delete out.wait;
+  } else {
+    out.wait = {
+      nodeId: w.nodeId,
+      deadline: w.deadline,
+      parkedAt: typeof w.parkedAt === "string" ? w.parkedAt : w.deadline,
+    };
+  }
+  return out;
+}
+
+/** Id pesan pemicu efektif run (langsung, atau akar rantai goto). */
+function effectiveTriggerMessageId(run: FlowRun): string | null {
+  if (run.triggerMessageId) return run.triggerMessageId;
+  const ctx = runContextOf(run);
+  return ctx.rootTriggerMessageId ?? null;
+}
+
+/**
+ * Substitusi variabel node http_request (Fase 12A) — SENGAJA SEMPIT,
+ * selaras kontrak: `{name}` → nama kontak; `{{field:<key>}}` → nilai
+ * contacts.custom_fields[key] (string apa adanya; nilai non-string
+ * di-JSON-kan; kunci hilang/null → string kosong). TANPA spintax —
+ * payload HTTP harus deterministik. Urutan: field dulu, lalu {name}.
+ */
+export function renderFlowHttpTemplate(
+  template: string,
+  contact: Contact | null,
+): string {
+  const custom = (contact?.customFields ?? {}) as Record<string, unknown>;
+  const withFields = template.replace(
+    /\{\{field:([^}]+)\}\}/g,
+    (_match, key: string) => {
+      const value = custom[key.trim()];
+      if (value === undefined || value === null) return "";
+      return typeof value === "string" ? value : JSON.stringify(value);
+    },
+  );
+  return withFields.replaceAll("{name}", contact?.name ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +329,14 @@ export interface FlowGraphIssue {
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+const UUID_LIKE_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Id rujukan yang bukan UUID pasti tidak ditemukan (menghindari error PG). */
+function isUuidLike(v: string): boolean {
+  return UUID_LIKE_RE.test(v);
 }
 
 /**
@@ -308,6 +433,134 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
         err("SEQUENCE_ID_REQUIRED", "Node enroll_sequence membutuhkan config.automationId");
       }
       break;
+    case "set_field": {
+      const field = c.field;
+      const customKey =
+        typeof field === "string" && field.startsWith("custom:")
+          ? field.slice("custom:".length)
+          : null;
+      const fieldOk =
+        field === "name" ||
+        field === "phone" ||
+        field === "email" ||
+        (customKey !== null &&
+          customKey.trim().length > 0 &&
+          (field as string).length <= 128);
+      if (!fieldOk) {
+        err(
+          "SET_FIELD_FIELD_INVALID",
+          "Node set_field membutuhkan field 'name'|'phone'|'email'|'custom:<key>'",
+        );
+      }
+      if (typeof c.value !== "string") {
+        err(
+          "SET_FIELD_VALUE_INVALID",
+          "Node set_field membutuhkan config.value string (boleh kosong — membersihkan field)",
+        );
+      }
+      break;
+    }
+    case "http_request": {
+      if (
+        c.method !== "GET" &&
+        c.method !== "POST" &&
+        c.method !== "PUT" &&
+        c.method !== "PATCH" &&
+        c.method !== "DELETE"
+      ) {
+        err(
+          "HTTP_METHOD_INVALID",
+          "Node http_request membutuhkan method GET|POST|PUT|PATCH|DELETE",
+        );
+      }
+      if (!isNonEmptyString(c.url) || !/^https?:\/\//i.test(c.url)) {
+        err(
+          "HTTP_URL_INVALID",
+          "Node http_request membutuhkan config.url http(s) non-kosong",
+        );
+      }
+      if (c.headers !== undefined) {
+        const h = c.headers;
+        const headersOk =
+          typeof h === "object" &&
+          h !== null &&
+          !Array.isArray(h) &&
+          Object.values(h as Record<string, unknown>).every(
+            (v) => typeof v === "string",
+          );
+        if (!headersOk) {
+          err(
+            "HTTP_HEADERS_INVALID",
+            "Node http_request membutuhkan config.headers objek nama→string",
+          );
+        }
+      }
+      if (c.body !== undefined && typeof c.body !== "string") {
+        err("HTTP_BODY_INVALID", "Node http_request membutuhkan config.body string");
+      }
+      if (c.saveToField !== undefined) {
+        const f = c.saveToField;
+        const ok =
+          typeof f === "string" &&
+          f.startsWith("custom:") &&
+          f.slice("custom:".length).trim().length > 0;
+        if (!ok) {
+          err(
+            "HTTP_SAVE_FIELD_INVALID",
+            "Node http_request membutuhkan saveToField 'custom:<key>'",
+          );
+        }
+      }
+      break;
+    }
+    case "goto_flow":
+      if (!isNonEmptyString(c.flowId)) {
+        err("GOTO_FLOW_ID_REQUIRED", "Node goto_flow membutuhkan config.flowId");
+      }
+      break;
+    case "ab_split": {
+      const p = c.percentA;
+      if (
+        typeof p !== "number" ||
+        !Number.isInteger(p) ||
+        p < 1 ||
+        p > 99
+      ) {
+        err(
+          "AB_PERCENT_INVALID",
+          "Node ab_split membutuhkan config.percentA bilangan bulat 1..99",
+        );
+      }
+      break;
+    }
+    case "send_payment_link":
+      if (!isNonEmptyString(c.productId)) {
+        err(
+          "PAYMENT_PRODUCT_ID_REQUIRED",
+          "Node send_payment_link membutuhkan config.productId",
+        );
+      }
+      break;
+    case "wait_reply": {
+      const amount = c.amount;
+      if (
+        typeof amount !== "number" ||
+        !Number.isInteger(amount) ||
+        amount < 0
+      ) {
+        err(
+          "WAIT_AMOUNT_INVALID",
+          "Node wait_reply membutuhkan config.amount bilangan bulat ≥ 0",
+        );
+      }
+      if (c.unit !== "seconds" && c.unit !== "minutes" && c.unit !== "hours") {
+        err(
+          "WAIT_UNIT_INVALID",
+          "Node wait_reply membutuhkan unit 'seconds'|'minutes'|'hours'",
+        );
+      }
+      break;
+    }
     case "ai_response":
     case "handoff":
     case "end":
@@ -329,6 +582,14 @@ export async function validateFlowGraph(
   db: Database,
   tenantId: string,
   graph: FlowGraphData,
+  options: {
+    /**
+     * Id flow yang sedang divalidasi (saat aktivasi/endpoint validate).
+     * Node goto_flow yang menunjuk flow ITU SENDIRI sah: pada saat
+     * aktivasi berhasil flow menjadi active, jadi targetnya terpenuhi.
+     */
+    selfFlowId?: string;
+  } = {},
 ): Promise<FlowGraphIssue[]> {
   const issues: FlowGraphIssue[] = [];
   const err = (code: string, nodeId: string | null, message: string) =>
@@ -366,20 +627,57 @@ export async function validateFlowGraph(
       err("EDGE_TO_UNKNOWN", edge.from, `Edge menuju node yang tidak ada: ${edge.to}`);
     }
   }
+  // Aturan branch per tipe node bercabang (Fase 12A menggeneralisasi
+  // aturan condition 8A): himpunan branch wajib lengkap, branch di
+  // luar himpunan = EDGE_BRANCH_MISPLACED, dan node non-bercabang
+  // tidak boleh membawa branch sama sekali.
+  const BRANCH_RULES: Record<
+    string,
+    { required: { branch: FlowBranch; code: string; label: string }[] }
+  > = {
+    condition: {
+      required: [
+        { branch: "yes", code: "CONDITION_BRANCH_YES_MISSING", label: "Node condition membutuhkan edge branch 'yes'" },
+        { branch: "no", code: "CONDITION_BRANCH_NO_MISSING", label: "Node condition membutuhkan edge branch 'no'" },
+      ],
+    },
+    ab_split: {
+      required: [
+        { branch: "a", code: "AB_BRANCH_A_MISSING", label: "Node ab_split membutuhkan edge branch 'a'" },
+        { branch: "b", code: "AB_BRANCH_B_MISSING", label: "Node ab_split membutuhkan edge branch 'b'" },
+      ],
+    },
+    wait_reply: {
+      required: [
+        { branch: "replied", code: "WAIT_BRANCH_REPLIED_MISSING", label: "Node wait_reply membutuhkan edge branch 'replied'" },
+        { branch: "timeout", code: "WAIT_BRANCH_TIMEOUT_MISSING", label: "Node wait_reply membutuhkan edge branch 'timeout'" },
+      ],
+    },
+  };
   for (const node of graph.nodes) {
     issues.push(...validateFlowNodeConfig(node));
     const out = graph.edges.filter((e) => e.from === node.id);
-    if (node.type === "condition") {
-      if (!out.some((e) => e.branch === "yes")) {
-        err("CONDITION_BRANCH_YES_MISSING", node.id, "Node condition membutuhkan edge branch 'yes'");
+    const rule = BRANCH_RULES[node.type];
+    if (rule) {
+      const allowed = new Set(rule.required.map((r) => r.branch));
+      for (const req of rule.required) {
+        if (!out.some((e) => e.branch === req.branch)) {
+          err(req.code, node.id, req.label);
+        }
       }
-      if (!out.some((e) => e.branch === "no")) {
-        err("CONDITION_BRANCH_NO_MISSING", node.id, "Node condition membutuhkan edge branch 'no'");
+      for (const e of out) {
+        if (e.branch === undefined || !allowed.has(e.branch)) {
+          err(
+            "EDGE_BRANCH_MISPLACED",
+            node.id,
+            `Branch edge keluar node ${node.type} harus salah satu dari: ${[...allowed].join(", ")}`,
+          );
+        }
       }
     } else {
       for (const e of out) {
         if (e.branch !== undefined) {
-          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition");
+          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, atau wait_reply");
         }
       }
     }
@@ -416,6 +714,58 @@ export async function validateFlowGraph(
           err("SEQUENCE_WRONG_KIND", node.id, "Automation rujukan bukan sequence");
         } else if (!target.isActive) {
           err("SEQUENCE_INACTIVE", node.id, "Sequence rujukan tidak aktif");
+        }
+      }
+    });
+  }
+
+  // Referensi goto_flow & send_payment_link (Fase 12A, butuh DB):
+  // flow tujuan harus ada di tenant yang sama dan ACTIVE (flow itu
+  // sendiri dikecualikan — aktivasi membuatnya active); produk harus
+  // ada dan tidak diarsipkan (is_active).
+  const gotoRefs = graph.nodes.filter(
+    (n) => n.type === "goto_flow" && isNonEmptyString(n.config.flowId),
+  );
+  const productRefs = graph.nodes.filter(
+    (n) => n.type === "send_payment_link" && isNonEmptyString(n.config.productId),
+  );
+  if (gotoRefs.length > 0 || productRefs.length > 0) {
+    await withTenantDb(db, tenantId, async (tx) => {
+      for (const node of gotoRefs) {
+        const flowId = node.config.flowId as string;
+        if (options.selfFlowId && flowId === options.selfFlowId) continue;
+        if (!isUuidLike(flowId)) {
+          err("GOTO_FLOW_NOT_FOUND", node.id, "Flow tujuan goto tidak ada di workspace ini");
+          continue;
+        }
+        const [target] = await tx
+          .select({ id: flows.id, status: flows.status })
+          .from(flows)
+          .where(and(eq(flows.tenantId, tenantId), eq(flows.id, flowId)))
+          .limit(1);
+        if (!target) {
+          err("GOTO_FLOW_NOT_FOUND", node.id, "Flow tujuan goto tidak ada di workspace ini");
+        } else if (target.status !== "active") {
+          err("GOTO_FLOW_INACTIVE", node.id, "Flow tujuan goto harus berstatus aktif");
+        }
+      }
+      for (const node of productRefs) {
+        const productId = node.config.productId as string;
+        if (!isUuidLike(productId)) {
+          err("PAYMENT_PRODUCT_NOT_FOUND", node.id, "Produk rujukan tidak ada di workspace ini");
+          continue;
+        }
+        const [target] = await tx
+          .select({ id: products.id, isActive: products.isActive })
+          .from(products)
+          .where(
+            and(eq(products.tenantId, tenantId), eq(products.id, productId)),
+          )
+          .limit(1);
+        if (!target) {
+          err("PAYMENT_PRODUCT_NOT_FOUND", node.id, "Produk rujukan tidak ada di workspace ini");
+        } else if (!target.isActive) {
+          err("PAYMENT_PRODUCT_INACTIVE", node.id, "Produk rujukan tidak aktif (diarsipkan)");
         }
       }
     });
@@ -686,7 +1036,9 @@ export async function activateFlow(
     return { kind: "invalid_state", status: existing.status };
   }
   const graph = normalizeFlowGraph(existing.graph);
-  const issues = await validateFlowGraph(db, input.tenantId, graph);
+  const issues = await validateFlowGraph(db, input.tenantId, graph, {
+    selfFlowId: input.flowId,
+  });
   const errors = issues.filter((i) => i.severity === "error");
   if (errors.length > 0) return { kind: "invalid", issues };
   const warnings = issues.filter((i) => i.severity === "warning");
@@ -985,6 +1337,123 @@ export interface FlowEvaluationOutcome {
   duplicateStarts: number;
   /** Run waiting yang dibatalkan karena kontak opt-out. */
   cancelledRunIds: string[];
+  /** Run wait_reply parkir yang dilanjutkan pesan ini (branch replied). */
+  resumedRunIds: string[];
+}
+
+/**
+ * Menyelesaikan parkir wait_reply satu run DALAM transaksi berjalan:
+ * menulis baris langkah resolusi (outcome = branch), membersihkan
+ * context.wait, dan memajukan run ke node cabang — atau menyelesaikan
+ * run bila cabang tidak punya node lanjutan. `run` harus keadaan
+ * segar yang dibaca dalam transaksi ini. Dipakai dua jalur: balasan
+ * kontak (jalur evaluasi pesan masuk) dan tenggat lewat (eksekutor).
+ */
+async function resolveParkedWaitReply(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  resolution: { branch: "replied" | "timeout"; extraDetail: Record<string, unknown> },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number }> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "wait_reply",
+    detail: { outcome: resolution.branch, ...resolution.extraDetail },
+  });
+  const nextId = nextNodeId(graph, node.id, resolution.branch);
+  const context = { ...runContextOf(run) };
+  delete context.wait;
+  const patch: Partial<FlowRun> = {
+    stepCount: run.stepCount + 1,
+    nextStepSeq: seq + 1,
+    context,
+    updatedAt: now,
+  };
+  if (nextId === null) {
+    patch.status = "completed";
+    patch.currentNodeId = null;
+    patch.completedAt = now;
+    await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+    await flowAudit(tx, tenantId, {
+      actorType: "system",
+      actorId: `flow:${run.flowId}`,
+      action: "flow.run_completed",
+      flowId: run.flowId,
+      meta: {
+        flowRunId: run.id,
+        conversationId: run.conversationId,
+        stepCount: run.stepCount + 1,
+        reason: `wait_reply_${resolution.branch}`,
+      },
+    });
+    return { status: "completed", nextStepSeq: seq + 1 };
+  }
+  patch.status = "running";
+  patch.currentNodeId = nextId;
+  await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+  return { status: "running", nextStepSeq: seq + 1 };
+}
+
+/**
+ * Melanjutkan SEMUA run wait_reply yang parkir di percakapan ini
+ * dengan pesan masuk yang baru tiba (branch "replied"), lalu
+ * mengantrekan langkah lanjutan tiap run lewat outbox. Run waiting
+ * biasa (delay) tidak disentuh — penanda parkirnya adalah
+ * context.wait yang nodeId-nya sama dengan currentNodeId.
+ */
+async function resumeParkedWaitReplyRuns(
+  tx: DbTx,
+  tenantId: string,
+  input: { conversationId: string; messageId: string },
+): Promise<string[]> {
+  const waiting = await tx
+    .select()
+    .from(flowRuns)
+    .where(
+      and(
+        eq(flowRuns.tenantId, tenantId),
+        eq(flowRuns.conversationId, input.conversationId),
+        eq(flowRuns.status, "waiting"),
+      ),
+    );
+  const resumed: string[] = [];
+  for (const run of waiting) {
+    const ctx = runContextOf(run);
+    if (!ctx.wait || run.currentNodeId !== ctx.wait.nodeId) continue;
+    const [flow] = await tx
+      .select()
+      .from(flows)
+      .where(and(eq(flows.tenantId, tenantId), eq(flows.id, run.flowId)))
+      .limit(1);
+    if (!flow) continue;
+    const graph = normalizeFlowGraph(flow.graph);
+    const node = graph.nodes.find((n) => n.id === ctx.wait!.nodeId);
+    if (!node || node.type !== "wait_reply") continue;
+    const result = await resolveParkedWaitReply(tx, tenantId, run, graph, node, {
+      branch: "replied",
+      extraDetail: { messageId: input.messageId, deadline: ctx.wait.deadline },
+    });
+    if (result.status === "running") {
+      await tx.insert(outboxEvents).values({
+        tenantId,
+        type: "flow.step_due",
+        payload: {
+          runId: run.id,
+          stepSeq: result.nextStepSeq,
+          resumeAt: new Date().toISOString(),
+        },
+      });
+    }
+    resumed.push(run.id);
+  }
+  return resumed;
 }
 
 /**
@@ -1061,6 +1530,7 @@ export async function startFlowRunsForInboundMessage(
     startedRunIds: [],
     duplicateStarts: 0,
     cancelledRunIds: [],
+    resumedRunIds: [],
   };
   if (!input.contact) return outcome;
 
@@ -1072,6 +1542,18 @@ export async function startFlowRunsForInboundMessage(
     );
     return outcome;
   }
+
+  // Fase 12A: pesan ini adalah BALASAN bagi run wait_reply yang parkir
+  // di percakapan ini — lanjutkan semuanya lewat branch "replied"
+  // SEBELUM pemicu flow biasa dievaluasi. Pesan yang sama tetap
+  // diproses pemicu lain seperti biasa (keputusan desain terdokumentasi
+  // di kontrak): melanjutkan wait_reply tidak menekan trigger lain.
+  outcome.resumedRunIds = await withTenantDb(db, tenantId, (tx) =>
+    resumeParkedWaitReplyRuns(tx, tenantId, {
+      conversationId,
+      messageId,
+    }),
+  );
 
   const activeFlows = await withTenantDb(db, tenantId, (tx) =>
     tx
@@ -1278,9 +1760,15 @@ async function advanceRun(
   node: FlowGraphNode,
   input: {
     detail: Record<string, unknown>;
-    branch?: "yes" | "no";
+    branch?: FlowBranch;
     /** Node delay: run menunggu selama ini lalu resume. */
     waitMs?: number;
+    /**
+     * Node wait_reply (Fase 12A): run parkir PADA node ini sendiri
+     * (bukan node berikutnya) — context.wait menandai parkirnya agar
+     * jalur balasan & jalur tenggat bisa membedakannya dari delay.
+     */
+    parkWaitReplyMs?: number;
     /** Node end: selesaikan walau ada edge keluar. */
     forceComplete?: boolean;
   },
@@ -1295,6 +1783,42 @@ async function advanceRun(
     nodeType: node.type,
     detail: input.detail,
   });
+
+  if (input.parkWaitReplyMs !== undefined) {
+    const resumeAt = new Date(now.getTime() + input.parkWaitReplyMs);
+    const context: FlowRunContextData = {
+      ...runContextOf(run),
+      wait: {
+        nodeId: node.id,
+        deadline: resumeAt.toISOString(),
+        parkedAt: now.toISOString(),
+      },
+    };
+    await tx
+      .update(flowRuns)
+      .set({
+        stepCount: run.stepCount + 1,
+        nextStepSeq: seq + 1,
+        status: "waiting",
+        currentNodeId: node.id,
+        context,
+        updatedAt: now,
+      })
+      .where(eq(flowRuns.id, run.id));
+    // Job tenggat: relay menerjemahkannya menjadi job flow.step
+    // tertunda; job itu menjalankan branch "timeout" bila run masih
+    // parkir (balasan yang datang lebih dulu membuatnya basi).
+    await tx.insert(outboxEvents).values({
+      tenantId,
+      type: "flow.step_due",
+      payload: {
+        runId: run.id,
+        stepSeq: seq + 1,
+        resumeAt: resumeAt.toISOString(),
+      },
+    });
+    return { status: "waiting" };
+  }
 
   const nextId = input.forceComplete
     ? null
@@ -1404,13 +1928,25 @@ async function failRun(
 
 interface NodeEffects {
   detail: Record<string, unknown>;
-  branch?: "yes" | "no";
+  branch?: FlowBranch;
   waitMs?: number;
+  parkWaitReplyMs?: number;
   forceComplete?: boolean;
   outboundMessageId?: string;
 }
 
-class FlowNodeError extends Error {}
+/**
+ * Kegagalan keras satu node: run menjadi `failed`. `code` opsional
+ * menjadi error_code run (default lapisan eksekutor: "step_error") —
+ * dipakai kode spesifik seperti goto_depth_exceeded.
+ */
+class FlowNodeError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
+}
 
 async function executeNodeInTx(
   tx: DbTx,
@@ -1736,6 +2272,195 @@ async function executeNodeInTx(
       };
     }
 
+    case "set_field": {
+      if (!ctx.contact) throw new FlowNodeError("kontak run tidak ditemukan");
+      const field = String(c.field ?? "");
+      // Nilai dirender PERSIS seperti send_message ({name} + spintax).
+      const rendered = renderMessageText(
+        typeof c.value === "string" ? c.value : "",
+        { name: ctx.contact.name },
+      );
+      const patch: Partial<Contact> = { updatedAt: new Date() };
+      if (field === "name") {
+        // Kolom name NOT NULL — hasil render kosong adalah kegagalan
+        // langkah yang jujur, bukan penulisan nilai rusak.
+        if (!rendered) {
+          throw new FlowNodeError("set_field name menghasilkan nilai kosong");
+        }
+        patch.name = rendered;
+      } else if (field === "phone" || field === "email") {
+        patch[field] = rendered ? rendered : null;
+      } else if (field.startsWith("custom:") && field.length > "custom:".length) {
+        const key = field.slice("custom:".length);
+        patch.customFields = {
+          ...(ctx.contact.customFields as Record<string, unknown>),
+          [key]: rendered,
+        };
+      } else {
+        throw new FlowNodeError(`set_field dengan field tidak sah: ${field}`);
+      }
+      await tx
+        .update(contacts)
+        .set(patch)
+        .where(eq(contacts.id, ctx.contact.id));
+      return {
+        detail: {
+          outcome: "field_set",
+          field,
+          value: rendered.slice(0, 200),
+        },
+      };
+    }
+
+    case "ab_split": {
+      const percentA = c.percentA;
+      if (
+        typeof percentA !== "number" ||
+        !Number.isInteger(percentA) ||
+        percentA < 1 ||
+        percentA > 99
+      ) {
+        throw new FlowNodeError("ab_split dengan config.percentA tidak sah");
+      }
+      // Acak per run; hasil undian DICATAT agar distribusi bisa diaudit
+      // dari log langkah (dan Fase 13D bisa menempel di sini).
+      const roll = Math.floor(Math.random() * 100);
+      const branch = roll < percentA ? ("a" as const) : ("b" as const);
+      return {
+        detail: { outcome: "split", percentA, roll, branch },
+        branch,
+      };
+    }
+
+    case "wait_reply": {
+      const amount = typeof c.amount === "number" ? c.amount : NaN;
+      const unitMs =
+        c.unit === "seconds" ? 1_000 : c.unit === "minutes" ? 60_000 : c.unit === "hours" ? 3_600_000 : NaN;
+      if (!Number.isFinite(amount) || !Number.isFinite(unitMs)) {
+        throw new FlowNodeError("wait_reply dengan config amount/unit tidak sah");
+      }
+      const waitMs = Math.max(0, Math.floor(amount * unitMs));
+      return {
+        detail: {
+          outcome: "waiting",
+          waitMs,
+          deadline: new Date(Date.now() + waitMs).toISOString(),
+          amount,
+          unit: String(c.unit),
+        },
+        parkWaitReplyMs: waitMs,
+      };
+    }
+
+    case "goto_flow": {
+      const targetId = String(c.flowId ?? "");
+      if (!targetId || !isUuidLike(targetId)) {
+        throw new FlowNodeError(
+          "flow tujuan goto tidak ada atau tidak aktif",
+          "goto_target_unavailable",
+        );
+      }
+      const runCtx = runContextOf(run);
+      const depth = runCtx.gotoDepth ?? 0;
+      // Pengaman siklus: kedalaman dibawa di konteks dan diwariskan ke
+      // run tujuan; goto yang melewati batas GAGAL (run asal failed),
+      // bukan diam-diam berhenti — operator harus melihat siklusnya.
+      if (depth + 1 > FLOW_GOTO_MAX_DEPTH) {
+        throw new FlowNodeError(
+          `rantai goto melebihi kedalaman maksimum ${FLOW_GOTO_MAX_DEPTH}`,
+          "goto_depth_exceeded",
+        );
+      }
+      const [target] = await tx
+        .select()
+        .from(flows)
+        .where(and(eq(flows.tenantId, tenantId), eq(flows.id, targetId)))
+        .limit(1);
+      if (!target || target.status !== "active") {
+        throw new FlowNodeError(
+          "flow tujuan goto tidak ada atau tidak aktif",
+          "goto_target_unavailable",
+        );
+      }
+      const targetGraph = normalizeFlowGraph(target.graph);
+      const firstNodeId = firstNodeAfterTrigger(targetGraph);
+      const now = new Date();
+      const rootTriggerMessageId = effectiveTriggerMessageId(run);
+      const [newRun] = await tx
+        .insert(flowRuns)
+        .values({
+          tenantId,
+          flowId: target.id,
+          conversationId: run.conversationId,
+          contactId: run.contactId,
+          // Run goto tidak dipicu pesan masuk (migrasi 0038).
+          triggerMessageId: null,
+          status: firstNodeId ? "running" : "completed",
+          currentNodeId: firstNodeId,
+          nextStepSeq: 1,
+          stepCount: 0,
+          context: {
+            triggerText: runCtx.triggerText ?? "",
+            gotoDepth: depth + 1,
+            ...(rootTriggerMessageId ? { rootTriggerMessageId } : {}),
+            viaGoto: {
+              fromRunId: run.id,
+              fromFlowId: run.flowId,
+              nodeId: node.id,
+            },
+          },
+          completedAt: firstNodeId ? null : now,
+        })
+        .returning();
+      await flowAudit(tx, tenantId, {
+        actorType: "system",
+        actorId: `flow:${target.id}`,
+        action: "flow.run_started",
+        flowId: target.id,
+        meta: {
+          flowRunId: newRun.id,
+          conversationId: run.conversationId,
+          via: "goto",
+          fromRunId: run.id,
+          fromFlowId: run.flowId,
+          gotoDepth: depth + 1,
+        },
+      });
+      if (!firstNodeId) {
+        await flowAudit(tx, tenantId, {
+          actorType: "system",
+          actorId: `flow:${target.id}`,
+          action: "flow.run_completed",
+          flowId: target.id,
+          meta: {
+            flowRunId: newRun.id,
+            conversationId: run.conversationId,
+            reason: "empty_flow",
+          },
+        });
+      } else {
+        await tx.insert(outboxEvents).values({
+          tenantId,
+          type: "flow.step_due",
+          payload: {
+            runId: newRun.id,
+            stepSeq: 1,
+            resumeAt: now.toISOString(),
+          },
+        });
+      }
+      return {
+        detail: {
+          outcome: "goto",
+          targetFlowId: target.id,
+          targetRunId: newRun.id,
+          gotoDepth: depth + 1,
+        },
+        // Run asal selesai di sini — kelanjutannya hidup di run tujuan.
+        forceComplete: true,
+      };
+    }
+
     case "handoff": {
       await tx
         .update(conversations)
@@ -1898,6 +2623,83 @@ export async function executeFlowStep(
       };
     }
 
+    // Fase 12A — run parkir di wait_reply: job yang tiba adalah job
+    // tenggatnya (seq sudah dicocokkan di pintu masuk). Bila run masih
+    // parkir saat job ini diproses, tenggat lewat tanpa balasan →
+    // selesaikan parkir lewat branch "timeout", lalu loop lanjut ke
+    // node cabang seperti langkah biasa. Balasan yang datang lebih
+    // dulu sudah menyelesaikan parkir (context.wait hilang / status
+    // berubah) sehingga pemeriksaan segar di dalam transaksi menolak.
+    const parkedCtx = runContextOf(run);
+    if (
+      run.status === "waiting" &&
+      node.type === "wait_reply" &&
+      parkedCtx.wait &&
+      parkedCtx.wait.nodeId === node.id
+    ) {
+      const resolved: AdvanceResult = await withTenantDb(
+        db,
+        tenantId,
+        async (tx) => {
+          const [fresh] = await tx
+            .select()
+            .from(flowRuns)
+            .where(and(eq(flowRuns.tenantId, tenantId), eq(flowRuns.id, runId)))
+            .limit(1);
+          if (!fresh || isTerminalStatus(fresh.status)) {
+            return { applied: false, reason: "run_terminal" as const };
+          }
+          const freshCtx = runContextOf(fresh);
+          if (
+            fresh.status !== "waiting" ||
+            !freshCtx.wait ||
+            freshCtx.wait.nodeId !== node.id ||
+            fresh.nextStepSeq !== run.nextStepSeq
+          ) {
+            return { applied: false, reason: "stale_step" as const };
+          }
+          const parkedAtMs = Date.parse(freshCtx.wait.parkedAt);
+          const r = await resolveParkedWaitReply(
+            tx,
+            tenantId,
+            fresh,
+            graph,
+            node,
+            {
+              branch: "timeout",
+              extraDetail: {
+                deadline: freshCtx.wait.deadline,
+                waitedMs: Number.isNaN(parkedAtMs)
+                  ? null
+                  : Math.max(0, Date.now() - parkedAtMs),
+              },
+            },
+          );
+          return { applied: true, status: r.status };
+        },
+      );
+      if (!resolved.applied) {
+        return {
+          executed: stepsExecuted > 0,
+          reason:
+            resolved.reason === "stale_step" ? "stale_step" : "run_terminal",
+          conversationId: run.conversationId,
+          stepsExecuted,
+        };
+      }
+      stepsExecuted += 1;
+      if (isTerminalStatus(resolved.status!)) {
+        return {
+          executed: true,
+          status: resolved.status,
+          conversationId: run.conversationId,
+          outboundMessageId: lastOutboundMessageId,
+          stepsExecuted,
+        };
+      }
+      continue;
+    }
+
     // Cap langkah: graf melingkar tanpa delay berhenti di sini.
     if (run.stepCount >= FLOW_MAX_STEPS) {
       await withTenantDb(db, tenantId, (tx) =>
@@ -1925,7 +2727,12 @@ export async function executeFlowStep(
     // lanjut — agent yang tidak tersedia BUKAN kegagalan flow.
     if (node.type === "ai_response") {
       let detail: Record<string, unknown>;
-      if (!deps.resolveLlmProvider) {
+      // Run goto tidak punya trigger_message_id sendiri — pakai pesan
+      // pemicu run akar dari konteks (Fase 12A).
+      const aiMessageId = effectiveTriggerMessageId(run);
+      if (!aiMessageId) {
+        detail = { outcome: "skipped", reason: "no_trigger_message" };
+      } else if (!deps.resolveLlmProvider) {
         detail = { outcome: "skipped", reason: "llm_unavailable" };
       } else {
         try {
@@ -1933,7 +2740,7 @@ export async function executeFlowStep(
           const res = await respondToInboundMessage(db, provider, {
             tenantId,
             conversationId: run.conversationId,
-            messageId: run.triggerMessageId,
+            messageId: aiMessageId,
             publicBaseUrl: deps.publicBaseUrl,
           });
           detail = {
@@ -1988,6 +2795,342 @@ export async function executeFlowStep(
       continue;
     }
 
+    // Node http_request (Fase 12A): fetch DI LUAR transaksi langkah.
+    // Node ini TIDAK PERNAH menggagalkan run (keputusan desain di
+    // kontrak): config rusak, jaringan mati, dan non-2xx semuanya
+    // menjadi detail langkah `http_error` dan run lanjut ke node
+    // berikutnya. saveToField hanya menulis pada respons 2xx.
+    if (node.type === "http_request") {
+      const c = node.config;
+      const contact = ctxState.contact;
+      const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(
+        String(c.method),
+      )
+        ? String(c.method)
+        : "POST";
+      const url = renderFlowHttpTemplate(
+        typeof c.url === "string" ? c.url : "",
+        contact,
+      );
+      const headers: Record<string, string> = {};
+      if (
+        typeof c.headers === "object" &&
+        c.headers !== null &&
+        !Array.isArray(c.headers)
+      ) {
+        for (const [k, v] of Object.entries(
+          c.headers as Record<string, unknown>,
+        )) {
+          if (typeof v === "string") {
+            headers[k] = renderFlowHttpTemplate(v, contact);
+          }
+        }
+      }
+      const bodyText =
+        typeof c.body === "string"
+          ? renderFlowHttpTemplate(c.body, contact)
+          : "";
+      const saveFieldRaw =
+        typeof c.saveToField === "string" ? c.saveToField : "";
+      const saveKey =
+        saveFieldRaw.startsWith("custom:") && saveFieldRaw.length > 7
+          ? saveFieldRaw.slice("custom:".length)
+          : null;
+      const startedAtMs = Date.now();
+      let httpStatus: number | null = null;
+      let responseText = "";
+      let errorText: string | null = null;
+      if (!url) {
+        errorText = "url_kosong";
+      } else {
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          FLOW_HTTP_TIMEOUT_MS,
+        );
+        try {
+          const sendBody = method !== "GET" && bodyText.length > 0;
+          const hasContentType = Object.keys(headers).some(
+            (k) => k.toLowerCase() === "content-type",
+          );
+          const res = await fetch(url, {
+            method,
+            headers: {
+              ...(sendBody && !hasContentType
+                ? { "content-type": "application/json" }
+                : {}),
+              ...headers,
+            },
+            ...(sendBody ? { body: bodyText } : {}),
+            signal: controller.signal,
+            redirect: "follow",
+          });
+          httpStatus = res.status;
+          responseText = (await res.text()).slice(0, 10_000);
+        } catch (err) {
+          errorText =
+            err instanceof Error
+              ? `${err.name}: ${err.message}`.slice(0, 300)
+              : "network_error";
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      const httpOk =
+        httpStatus !== null && httpStatus >= 200 && httpStatus < 300;
+      const detail: Record<string, unknown> = {
+        outcome: httpOk ? "http_response" : "http_error",
+        method,
+        url: url.slice(0, 300),
+        status: httpStatus,
+        durationMs: Date.now() - startedAtMs,
+        responsePreview: responseText.slice(0, 500),
+        ...(errorText ? { error: errorText } : {}),
+        ...(saveKey && httpOk ? { savedToField: `custom:${saveKey}` } : {}),
+      };
+      const applied: AdvanceResult = await withTenantDb(
+        db,
+        tenantId,
+        async (tx) => {
+          const [fresh] = await tx
+            .select()
+            .from(flowRuns)
+            .where(and(eq(flowRuns.tenantId, tenantId), eq(flowRuns.id, runId)))
+            .limit(1);
+          if (!fresh || isTerminalStatus(fresh.status)) {
+            return { applied: false, reason: "run_terminal" as const };
+          }
+          if (fresh.nextStepSeq !== run.nextStepSeq) {
+            return { applied: false, reason: "stale_step" as const };
+          }
+          if (saveKey && httpOk) {
+            const [freshContact] = await tx
+              .select({ customFields: contacts.customFields })
+              .from(contacts)
+              .where(eq(contacts.id, run.contactId))
+              .limit(1);
+            if (freshContact) {
+              await tx
+                .update(contacts)
+                .set({
+                  customFields: {
+                    ...(freshContact.customFields as Record<string, unknown>),
+                    [saveKey]: responseText.slice(0, 2000),
+                  },
+                  updatedAt: new Date(),
+                })
+                .where(eq(contacts.id, run.contactId));
+            }
+          }
+          const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+            detail,
+          });
+          return { applied: true, status: adv.status };
+        },
+      );
+      if (!applied.applied) {
+        return {
+          executed: stepsExecuted > 0,
+          reason:
+            applied.reason === "stale_step" ? "stale_step" : "run_terminal",
+          conversationId: run.conversationId,
+          stepsExecuted,
+        };
+      }
+      stepsExecuted += 1;
+      if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
+        return {
+          executed: true,
+          status: applied.status,
+          conversationId: run.conversationId,
+          outboundMessageId: lastOutboundMessageId,
+          stepsExecuted,
+        };
+      }
+      continue;
+    }
+
+    // Node send_payment_link (Fase 12A): layanan payment link yang
+    // sama dengan tool agent 4A (createPaymentLink membuka
+    // transaksinya sendiri) dipanggil DI LUAR transaksi langkah.
+    // Produk tak ditemukan/arsip = kegagalan keras yang tercatat
+    // (payment_product_unavailable) — berbeda dari http_request,
+    // karena mengirim link pembayaran yang salah/tidak ada lebih
+    // buruk daripada menghentikan run.
+    if (node.type === "send_payment_link") {
+      const productId = String(node.config.productId ?? "");
+      const product = isUuidLike(productId)
+        ? await withTenantDb(db, tenantId, async (tx) => {
+            const [row] = await tx
+              .select({
+                id: products.id,
+                name: products.name,
+                isActive: products.isActive,
+              })
+              .from(products)
+              .where(
+                and(
+                  eq(products.tenantId, tenantId),
+                  eq(products.id, productId),
+                ),
+              )
+              .limit(1);
+            return row ?? null;
+          })
+        : null;
+      if (!product || !product.isActive) {
+        await withTenantDb(db, tenantId, (tx) =>
+          failRun(
+            tx,
+            tenantId,
+            run,
+            node,
+            "payment_product_unavailable",
+            "produk untuk send_payment_link tidak ditemukan atau tidak aktif",
+            {
+              outcome: "failed",
+              reason: "payment_product_unavailable",
+              productId,
+            },
+          ),
+        );
+        return {
+          executed: true,
+          status: "failed",
+          conversationId: run.conversationId,
+          stepsExecuted: stepsExecuted + 1,
+        };
+      }
+      const created = await createPaymentLink(
+        db,
+        { tenantId },
+        {
+          productId: product.id,
+          contactId: run.contactId,
+          conversationId: run.conversationId,
+        },
+        { actorType: "system", actorId: `flow:${run.flowId}` },
+      );
+      if (created.kind !== "ok") {
+        await withTenantDb(db, tenantId, (tx) =>
+          failRun(
+            tx,
+            tenantId,
+            run,
+            node,
+            "payment_link_failed",
+            `payment link gagal dibuat: ${created.kind}`,
+            { outcome: "failed", reason: "payment_link_failed", productId },
+          ),
+        );
+        return {
+          executed: true,
+          status: "failed",
+          conversationId: run.conversationId,
+          stepsExecuted: stepsExecuted + 1,
+        };
+      }
+      // Format teks PERSIS pola tool agent 4A.
+      const paymentUrl = buildPaymentUrl(deps.publicBaseUrl, created.link.code);
+      const paymentText = `Link pembayaran ${product.name}: ${paymentUrl} (berlaku 7 hari)`;
+      const applied: AdvanceResult = await withTenantDb(
+        db,
+        tenantId,
+        async (tx) => {
+          const [fresh] = await tx
+            .select()
+            .from(flowRuns)
+            .where(and(eq(flowRuns.tenantId, tenantId), eq(flowRuns.id, runId)))
+            .limit(1);
+          if (!fresh || isTerminalStatus(fresh.status)) {
+            return { applied: false, reason: "run_terminal" as const };
+          }
+          if (fresh.nextStepSeq !== run.nextStepSeq) {
+            return { applied: false, reason: "stale_step" as const };
+          }
+          if (!ctxState.conversation) {
+            await failRun(
+              tx,
+              tenantId,
+              fresh,
+              node,
+              "step_error",
+              "percakapan run tidak ditemukan",
+              { outcome: "failed" },
+            );
+            return { applied: true, status: "failed" as const };
+          }
+          const [outbound] = await tx
+            .insert(messages)
+            .values({
+              tenantId,
+              conversationId: run.conversationId,
+              direction: "outbound",
+              senderType: "system",
+              type: "text",
+              contentText: paymentText,
+              status: "queued",
+            })
+            .returning();
+          const now = new Date();
+          await tx
+            .update(conversations)
+            .set({ lastMessageAt: now, updatedAt: now })
+            .where(eq(conversations.id, run.conversationId));
+          await tx.insert(outboxEvents).values({
+            tenantId,
+            type: "message.queued",
+            payload: {
+              provider: ctxState.conversation.provider,
+              conversationId: run.conversationId,
+              messageId: outbound.id,
+              via: "flow",
+              flowId: run.flowId,
+              runId: run.id,
+              paymentLinkId: created.link.id,
+            },
+          });
+          const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+            detail: {
+              outcome: "payment_link_sent",
+              productId: product.id,
+              paymentLinkId: created.link.id,
+              code: created.link.code,
+              amountIdr: created.link.amountIdr,
+            },
+          });
+          return {
+            applied: true,
+            status: adv.status,
+            outboundMessageId: outbound.id,
+          };
+        },
+      );
+      if (!applied.applied) {
+        return {
+          executed: stepsExecuted > 0,
+          reason:
+            applied.reason === "stale_step" ? "stale_step" : "run_terminal",
+          conversationId: run.conversationId,
+          stepsExecuted,
+        };
+      }
+      stepsExecuted += 1;
+      if (applied.outboundMessageId) {
+        lastOutboundMessageId = applied.outboundMessageId;
+      }
+      if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
+        return {
+          executed: true,
+          status: applied.status,
+          conversationId: run.conversationId,
+          outboundMessageId: lastOutboundMessageId,
+          stepsExecuted,
+        };
+      }
+      continue;
+    }
+
     // Node biasa: efek + baris langkah + kemajuan run dalam SATU
     // transaksi tenant. Kegagalan node (FlowNodeError) menandai run
     // failed dengan baris langkah error — job TIDAK melempar.
@@ -2009,9 +3152,15 @@ export async function executeFlowStep(
         effects = await executeNodeInTx(tx, tenantId, freshCtx, node);
       } catch (err) {
         if (err instanceof FlowNodeError) {
-          await failRun(tx, tenantId, fresh, node, "step_error", err.message, {
-            outcome: "failed",
-          });
+          await failRun(
+            tx,
+            tenantId,
+            fresh,
+            node,
+            err.code ?? "step_error",
+            err.message,
+            { outcome: "failed", ...(err.code ? { reason: err.code } : {}) },
+          );
           return { applied: true, status: "failed" as const };
         }
         throw err;
@@ -2020,6 +3169,7 @@ export async function executeFlowStep(
         detail: effects.detail,
         branch: effects.branch,
         waitMs: effects.waitMs,
+        parkWaitReplyMs: effects.parkWaitReplyMs,
         forceComplete: effects.forceComplete,
       });
       return {

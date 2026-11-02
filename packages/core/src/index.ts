@@ -383,7 +383,10 @@ export {
 } from "./whatsapp-templates";
 export {
   FLOW_MAX_STEPS,
+  FLOW_GOTO_MAX_DEPTH,
+  FLOW_HTTP_TIMEOUT_MS,
   normalizeFlowGraph,
+  renderFlowHttpTemplate,
   validateFlowGraph,
   validateFlowNodeConfig,
   createFlow,
@@ -401,6 +404,8 @@ export {
   type FlowGraphData,
   type FlowGraphNode,
   type FlowGraphEdge,
+  type FlowBranch,
+  type FlowRunContextData,
   type FlowGraphIssue,
   type FlowStatus,
   type FlowRunStatus,

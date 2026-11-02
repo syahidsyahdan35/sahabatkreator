@@ -102,10 +102,16 @@ export const flowRuns = pgTable(
     contactId: uuid("contact_id")
       .notNull()
       .references(() => contacts.id, { onDelete: "cascade" }),
-    /** Pesan masuk yang memulai run ini (idempotensi: unik per flow). */
-    triggerMessageId: uuid("trigger_message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
+    /**
+     * Pesan masuk yang memulai run ini (idempotensi: unik per flow).
+     * NULLABLE sejak Fase 12A (migrasi 0038): run yang lahir dari node
+     * goto_flow tidak dipicu pesan masuk; konteksnya menyimpan
+     * rootTriggerMessageId sebagai gantinya. Index unik parsial sudah
+     * mengabaikan NULL sejak 0031.
+     */
+    triggerMessageId: uuid("trigger_message_id").references(() => messages.id, {
+      onDelete: "cascade",
+    }),
     status: flowRunStatusEnum("status").notNull().default("running"),
     /** Node yang akan dieksekusi langkah berikutnya; null bila terminal. */
     currentNodeId: varchar("current_node_id", { length: 128 }),
@@ -121,7 +127,10 @@ export const flowRuns = pgTable(
     /**
      * Konteks eksekusi: { triggerText } — teks pesan pemicu (untuk
      * predikat message_contains) + fakta langkah yang perlu bertahan
-     * lintas resume (mis. outboundMessageId terakhir).
+     * lintas resume (mis. outboundMessageId terakhir). Fase 12A
+     * menambah: `gotoDepth` (kedalaman rantai goto_flow),
+     * `rootTriggerMessageId` (pesan pemicu run akar untuk run goto),
+     * dan `wait` ({ nodeId, deadline } — parkir node wait_reply).
      */
     context: jsonb("context").notNull().default({}),
     /** Alasan terminal non-sukses: step_cap_exceeded, contact_opted_out, dst. */

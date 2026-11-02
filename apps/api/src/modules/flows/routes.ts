@@ -358,6 +358,7 @@ export function createFlowsRoutes(bundle: AuthBundle | null) {
       bundle.db,
       g.tenant.id,
       normalizeFlowGraph(graph),
+      { selfFlowId: id },
     );
     return c.json(FlowValidationResponseSchema.parse(graphIssuesBody(issues)));
   });

@@ -242,7 +242,10 @@ const bullWorker = new Worker<MainJobData>(
         result.fired.length === 0 &&
         result.skippedDuplicates === 0 &&
         result.flowRunsStarted === 0 &&
-        result.flowDuplicateStarts === 0
+        result.flowDuplicateStarts === 0 &&
+        // Fase 12A: pesan yang melanjutkan run wait_reply parkir juga
+        // tertangani flow — cabang replied adalah responsnya.
+        result.flowWaitReplyResumed === 0
       ) {
         // Fase 9A — batching: job respond ditunda sebesar jendela
         // batch (env AGENT_BATCH_WINDOW_MS, default 5000). Job yang
