@@ -51,6 +51,7 @@ export const SEQUENCE_STEP_JOB = "sequence.step";
 export const BROADCAST_DISPATCH_JOB = "broadcast.dispatch";
 export const FLOW_STEP_JOB = "flow.step";
 export const COMMENT_EVALUATE_JOB = "comment.evaluate";
+export const KB_EMBED_JOB = "kb.embed";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -137,6 +138,21 @@ export interface CommentEvaluateJobData {
   outboxEventId: string;
 }
 
+/**
+ * Job Fase 12D: bangkitkan embedding untuk chunk satu dokumen KB
+ * (retrieval semantik). Di-enqueue oleh relay outbox dari event
+ * `kb.embed_requested` (ditulis core dalam transaksi yang sama dengan
+ * pembuatan dokumen/impor berkas). jobId deterministik dari id event
+ * outbox; core sendiri idempoten (hanya chunk ber-embedding NULL yang
+ * diproses), jadi eksekusi ulang aman. Tanpa provider embedding aktif,
+ * processor selesai tanpa efek — chunk tetap bisa dicari full-text.
+ */
+export interface KbEmbedJobData {
+  tenantId: string;
+  documentId: string;
+  outboxEventId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -170,6 +186,11 @@ export function commentEvaluateJobId(outboxEventId: string): string {
   return `comment-evaluate-${outboxEventId}`;
 }
 
+/** jobId deterministik embedding KB dari id event outbox. */
+export function kbEmbedJobId(outboxEventId: string): string {
+  return `kb-embed-${outboxEventId}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -186,7 +207,8 @@ export type MainJobData =
   | SequenceStepJobData
   | BroadcastDispatchJobData
   | FlowStepJobData
-  | CommentEvaluateJobData;
+  | CommentEvaluateJobData
+  | KbEmbedJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -335,6 +357,31 @@ export async function enqueueCommentEvaluate(
     ...options,
   });
   return job.id ?? commentEvaluateJobId(data.outboxEventId);
+}
+
+/**
+ * Meng-enqueue pembangkitan embedding untuk satu dokumen KB dari
+ * event `kb.embed_requested`. Aman dipanggil berulang: jobId diturunkan
+ * dari id event outbox. attempts 3 + backoff eksponensial = retry
+ * wajar untuk kegagalan provider sesaat; kegagalan permanen (mis.
+ * model salah dimensi) berakhir sebagai job gagal yang terlihat di
+ * log, BUKAN dokumen yang gagal disimpan (dokumen sudah tersimpan
+ * lebih dulu; embedding menyusul atau tidak sama sekali).
+ */
+export async function enqueueKbEmbed(
+  queue: MainQueue,
+  data: KbEmbedJobData,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(KB_EMBED_JOB, data, {
+    jobId: kbEmbedJobId(data.outboxEventId),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? kbEmbedJobId(data.outboxEventId);
 }
 
 export {

@@ -4,6 +4,7 @@ import {
   kbChunks,
   kbDocuments,
   kbSourceDocuments,
+  outboxEvents,
   type Database,
 } from "@sahabat-kreator/db";
 import { extractText, getDocumentProxy } from "unpdf";
@@ -192,6 +193,13 @@ export async function importKbFile(
           content,
         })),
       );
+      // Fase 12D: chunk impor ikut antre embedding (event yang sama
+      // seperti entri tulis tangan — relay worker → job `kb.embed`).
+      await tx.insert(outboxEvents).values({
+        tenantId: ctx.tenantId,
+        type: "kb.embed_requested",
+        payload: { documentId: doc.id },
+      });
     }
     await tx.insert(auditLogs).values({
       tenantId: ctx.tenantId,

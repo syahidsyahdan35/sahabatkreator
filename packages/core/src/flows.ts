@@ -22,7 +22,7 @@ import {
   type FlowRun,
   type FlowRunStep,
 } from "@sahabat-kreator/db";
-import type { LlmProvider } from "@sahabat-kreator/ai";
+import type { EmbeddingProvider, LlmProvider } from "@sahabat-kreator/ai";
 import { withTenantDb, type DbTx } from "./tx";
 import { renderMessageText } from "./render-text";
 import { respondToInboundMessage } from "./agent-runtime";
@@ -1739,6 +1739,12 @@ export interface FlowStepDeps {
    * resolver, node ai_response tercatat `skipped/llm_unavailable`.
    */
   resolveLlmProvider?: () => Promise<LlmProvider>;
+  /**
+   * Resolver provider embedding untuk node `ai_response` (Fase 12D) —
+   * pola yang sama seperti resolver LLM; null/absen = retrieval
+   * full-text murni di dalam jalur agent.
+   */
+  resolveEmbeddingProvider?: () => Promise<EmbeddingProvider | null>;
   /** Base URL publik untuk tool agent (send_payment_link). */
   publicBaseUrl?: string;
 }
@@ -2813,11 +2819,15 @@ export async function executeFlowStep(
       } else {
         try {
           const provider = await deps.resolveLlmProvider();
+          const embeddingProvider = deps.resolveEmbeddingProvider
+            ? await deps.resolveEmbeddingProvider().catch(() => null)
+            : null;
           const res = await respondToInboundMessage(db, provider, {
             tenantId,
             conversationId: run.conversationId,
             messageId: aiMessageId,
             publicBaseUrl: deps.publicBaseUrl,
+            embeddingProvider,
           });
           detail = {
             outcome: res.responded ? "responded" : "skipped",

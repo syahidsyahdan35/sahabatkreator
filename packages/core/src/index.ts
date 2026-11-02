@@ -114,9 +114,27 @@ export {
   buildFtsOrQuery,
   KB_CHUNK_SIZE,
   KB_CHUNK_OVERLAP,
+  KB_RRF_K,
+  KB_VECTOR_MIN_SIMILARITY,
   type KbDocumentWithChunkCount,
   type KbSearchHit,
+  type KbSearchOptions,
 } from "./kb";
+export {
+  KB_EMBED_BATCH_SIZE,
+  KB_EMBEDDING_REF_TYPE,
+  countPendingKbChunks,
+  embedKbDocumentChunks,
+  embedKbQueryText,
+  embedPendingKbChunksForTenant,
+  getKbEmbeddingStats,
+  listTenantIdsWithPendingKbChunks,
+  resetKbEmbeddingsForTenant,
+  resolveEmbeddingProvider,
+  type EmbeddingResolutionOptions,
+  type KbEmbedOutcome,
+  type KbEmbeddingStats,
+} from "./kb-embeddings";
 export {
   KB_FILE_CHUNK_MAX,
   KB_FILE_CHUNK_OVERLAP,

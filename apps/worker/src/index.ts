@@ -1,11 +1,16 @@
 import { Worker } from "bullmq";
 import { loadEnv, META_GRAPH_API_VERSION } from "@sahabat-kreator/config";
 import { createDb } from "@sahabat-kreator/db";
-import { createLlmProvider, type LlmProvider } from "@sahabat-kreator/ai";
+import {
+  createLlmProvider,
+  type EmbeddingProvider,
+  type LlmProvider,
+} from "@sahabat-kreator/ai";
 import { MetaGraphClient } from "@sahabat-kreator/channel-messenger";
 import {
   INTEGRATION_LOG_RETENTION_DAYS,
   dispatchBroadcast,
+  embedKbDocumentChunks,
   evaluateCommentForAutomations,
   evaluateInboundMessageForAutomations,
   executeFlowStep,
@@ -14,6 +19,7 @@ import {
   purgeExpiredTrashedChannels,
   reconcileBroadcasts,
   relayUnpublishedOutboxEvents,
+  resolveEmbeddingProvider,
   resolveOpenRouterConfig,
   respondToInboundMessage,
   type CommentGraphActions,
@@ -25,6 +31,7 @@ import {
   BROADCAST_DISPATCH_JOB,
   COMMENT_EVALUATE_JOB,
   FLOW_STEP_JOB,
+  KB_EMBED_JOB,
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
   createAutomationQueue,
@@ -35,12 +42,14 @@ import {
   enqueueBroadcastDispatch,
   enqueueCommentEvaluate,
   enqueueFlowStep,
+  enqueueKbEmbed,
   enqueueSequenceStep,
   type AgentRespondJobData,
   type AutomationEvaluateJobData,
   type BroadcastDispatchJobData,
   type CommentEvaluateJobData,
   type FlowStepJobData,
+  type KbEmbedJobData,
   type MainJobData,
   type SequenceStepJobData,
 } from "@sahabat-kreator/queue";
@@ -100,6 +109,13 @@ import {
  *    `executeFlowStep` di core (graf node: kirim pesan, kondisi, delay,
  *    tag/stage, enroll sequence, respons AI, handoff) dengan log per
  *    langkah di `flow_run_steps`.`
+ * 7. EMBEDDING KB (Fase 12D): relay menerjemahkan event outbox
+ *    `kb.embed_requested` (ditulis core saat dokumen KB dibuat atau
+ *    berkas diimpor) menjadi job `kb.embed`; processor-nya menjalankan
+ *    `embedKbDocumentChunks` di core dengan provider embedding yang
+ *    di-resolve per job (mock paksa via env / OpenRouter panel→env /
+ *    nonaktif). Retrieval agent & node flow ai_response memakai
+ *    provider yang sama untuk meng-embed kueri — hibrida bila aktif.
  *
  * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
  * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
@@ -157,6 +173,27 @@ async function resolveAgentLlmProvider(): Promise<LlmProvider> {
     openrouterApiKey: orConfig?.apiKey,
     openrouterModel: orConfig?.model,
   });
+}
+
+// Provider EMBEDDING agent (Fase 12D): di-resolve per job dengan
+// resolver core yang sama seperti LLM (kunci OpenRouter Panel → env),
+// DITAMBAH env EMBEDDING_PROVIDER: 'mock' memaksa mock deterministik
+// (rantai uji — tidak pernah menyentuh provider asli walau kunci panel
+// terisi). Tanpa kunci & tanpa paksaan mock → null: job `kb.embed`
+// selesai tanpa efek dan retrieval agent berjalan full-text murni.
+// Kegagalan resolusi TIDAK boleh mematikan job agent — diperlakukan
+// sama seperti "tidak aktif".
+async function resolveWorkerEmbeddingProvider(): Promise<EmbeddingProvider | null> {
+  try {
+    return await resolveEmbeddingProvider(db, {
+      platform: platformSettingsOptions,
+      providerEnv: env.EMBEDDING_PROVIDER,
+      modelEnv: env.OPENROUTER_EMBEDDING_MODEL,
+    });
+  } catch (err) {
+    console.error("[worker] resolusi provider embedding gagal (diperlakukan nonaktif):", err);
+    return null;
+  }
 }
 
 void resolveAgentLlmProvider()
@@ -328,6 +365,7 @@ const bullWorker = new Worker<MainJobData>(
         },
         {
           resolveLlmProvider: resolveAgentLlmProvider,
+          resolveEmbeddingProvider: resolveWorkerEmbeddingProvider,
           publicBaseUrl: env.BETTER_AUTH_URL,
         },
       );
@@ -391,14 +429,41 @@ const bullWorker = new Worker<MainJobData>(
       }
       return result;
     }
+    if (job.name === KB_EMBED_JOB) {
+      // Fase 12D: bangkitkan embedding chunk satu dokumen KB. Tanpa
+      // provider aktif → selesai tanpa efek (chunk tetap NULL, bisa
+      // di-backfill nanti saat kunci tersedia). Error provider
+      // DILEMPAR agar BullMQ retry (attempts 3, backoff) — kegagalan
+      // permanen terlihat sebagai job gagal, bukan dokumen hilang
+      // (dokumennya sudah tersimpan sejak event ditulis).
+      const data = job.data as KbEmbedJobData;
+      const embeddingProvider = await resolveWorkerEmbeddingProvider();
+      if (!embeddingProvider) {
+        return { embedded: 0, reason: "embedding_inactive" };
+      }
+      const result = await embedKbDocumentChunks(db, embeddingProvider, {
+        tenantId: data.tenantId,
+        documentId: data.documentId,
+      });
+      if (result.embedded > 0) {
+        console.log(
+          `[worker] kb.embed document=${data.documentId} embedded=${result.embedded} tokensIn=${result.tokensIn} provider=${embeddingProvider.name}`,
+        );
+      }
+      return result;
+    }
     if (job.name === AGENT_RESPOND_JOB) {
       const data = job.data as AgentRespondJobData;
       // Fase 6C: provider di-resolve per job (panel → env; lihat di atas).
       const llmProvider = await resolveAgentLlmProvider();
+      // Fase 12D: provider embedding juga per job — retrieval KB di
+      // core menjadi hibrida bila aktif, full-text murni bila tidak.
+      const embeddingProvider = await resolveWorkerEmbeddingProvider();
       const result = await respondToInboundMessage(db, llmProvider, {
         tenantId: data.tenantId,
         conversationId: data.conversationId,
         messageId: data.messageId,
+        embeddingProvider,
         // Untuk tool send_payment_link (Fase 4A): URL /pay/:code yang
         // dikirim agent harus absolut, berbasis URL publik aplikasi.
         publicBaseUrl: env.BETTER_AUTH_URL,
@@ -561,6 +626,25 @@ async function relayTick(): Promise<void> {
         await enqueueCommentEvaluate(queue, {
           tenantId: event.tenantId,
           commentId: payload.commentId,
+          outboxEventId: event.id,
+        });
+        return;
+      }
+      // Fase 12D: dokumen KB baru/diimpor meminta embedding → job
+      // `kb.embed` (jobId deterministik dari id event). Job menemukan
+      // provider nonaktif → selesai tanpa efek; chunk yang tertunda
+      // bisa di-backfill kapan pun lewat skrip backfill:kb-embeddings.
+      if (event.type === "kb.embed_requested") {
+        const payload = event.payload as { documentId?: unknown };
+        if (typeof payload.documentId !== "string") {
+          console.warn(
+            `[worker] event kb.embed_requested ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        await enqueueKbEmbed(queue, {
+          tenantId: event.tenantId,
+          documentId: payload.documentId,
           outboxEventId: event.id,
         });
         return;

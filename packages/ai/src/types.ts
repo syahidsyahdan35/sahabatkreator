@@ -86,3 +86,52 @@ export interface LlmProvider {
   readonly name: string;
   chat(request: LlmChatRequest): Promise<LlmChatResult>;
 }
+
+// ---------------------------------------------------------------------------
+// Embedding (Fase 12D) — retrieval semantik Knowledge Base
+// ---------------------------------------------------------------------------
+
+/**
+ * Dimensi vektor embedding yang dipakai kolom `kb_chunks.embedding`
+ * (vector(1536), disiapkan sejak Fase 3A). Provider embedding WAJIB
+ * menghasilkan vektor sebesar ini; model berdimensi lain ditolak keras
+ * di lapisan provider agar vektor dari ruang yang berbeda tidak pernah
+ * tercampur dalam satu kolom.
+ */
+export const EMBEDDING_DIMENSIONS = 1536;
+
+export interface EmbeddingUsage {
+  /** Token input yang dilaporkan provider (OpenRouter: prompt_tokens). */
+  tokensIn: number;
+  /**
+   * Biaya aktual USD — HANYA bila provider melaporkannya pada respons
+   * yang sama. Aturan kejujuran yang sama seperti `LlmUsage.costUsd`:
+   * tidak pernah diestimasi; mock membiarkannya undefined.
+   */
+  costUsd?: number;
+}
+
+export interface EmbeddingResult {
+  /** Satu vektor per teks input, urutan sama dengan input. */
+  vectors: number[][];
+  usage: EmbeddingUsage;
+  /** Nama model yang benar-benar dipakai (untuk usage_ledger). */
+  model: string;
+  /** 'mock' | 'openrouter' — dicatat apa adanya di ledger. */
+  provider: string;
+}
+
+/**
+ * Kontrak provider embedding — SENGAJA terpisah dari `LlmProvider`:
+ * tidak semua proses/pengujian butuh keduanya, dan resolusinya pun
+ * berbeda (embedding nonaktif dengan anggun TANPA kunci; LLM mock
+ * adalah fallback aktif). Pemanggil menerima `EmbeddingProvider | null`
+ * dari resolver core; null = fitur semantik mati, retrieval jatuh ke
+ * full-text murni.
+ */
+export interface EmbeddingProvider {
+  readonly name: string;
+  /** Model efektif provider ini (untuk status UI & ledger). */
+  readonly model: string;
+  embed(texts: string[]): Promise<EmbeddingResult>;
+}

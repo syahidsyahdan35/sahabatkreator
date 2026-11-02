@@ -83,6 +83,19 @@ const EnvSchema = z.object({
    */
   LLM_PROVIDER: z.enum(["mock", "openrouter"]).default("mock"),
   /**
+   * Pemilihan provider EMBEDDING untuk retrieval semantik KB (Fase 12D):
+   * - tidak diisi (auto): embedding aktif memakai OpenRouter bila ada
+   *   kunci efektif (Panel Admin → env), selain itu NONAKTIF dan
+   *   retrieval jatuh ke full-text murni;
+   * - 'mock': paksa provider mock deterministik (rantai uji — vektor
+   *   diturunkan dari hash token + peta konsep kecil, BUKAN model asli);
+   * - 'openrouter': paksa OpenRouter (tetap nonaktif-anggun tanpa kunci,
+   *   tidak pernah gagal keras seperti LLM_PROVIDER).
+   */
+  EMBEDDING_PROVIDER: z.enum(["mock", "openrouter"]).optional(),
+  /** Model embedding OpenRouter (wajib 1536 dimensi); default di kode provider. */
+  OPENROUTER_EMBEDDING_MODEL: z.string().min(1).optional(),
+  /**
    * Jendela batching balasan AI (Fase 9A): job `agent.respond` untuk
    * pesan pemicu dijadwalkan worker dengan delay sebesar ini; job yang
    * pesannya sudah disusul pesan masuk yang lebih baru MENYERAH

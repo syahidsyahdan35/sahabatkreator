@@ -2154,5 +2154,75 @@ const KB_MANUAL_12C = "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3";
   );
 }
 
+// ---------- 33. Fase 12D: embedding KB (vector(1536) di kb_chunks) ----------
+// Kolom `embedding` sudah ada sejak migrasi 0009 (Fase 3A) — fase ini
+// membuktikan operasi pgvector-nya di level skema: (a) vektor 1536
+// dimensi tersimpan & vector_dims benar; (b) pencarian tetangga
+// terdekat (operator cosine <=>) mengembalikan chunk yang vektornya
+// identik dengan kueri; (c) dalam konteks RLS tenant lain, kueri
+// vektor melihat 0 baris (isolasi berlaku juga untuk jalur semantik);
+// (d) chunk ber-embedding NULL tidak ikut hasil vektor tetapi tetap
+// terhitung sebagai tertunda.
+const KB_DOC_12D = "e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1";
+function oneHotVector(index: number): string {
+  const parts = new Array<string>(1536).fill("0");
+  parts[index] = "1";
+  return `[${parts.join(",")}]`;
+}
+{
+  const VEC_A = oneHotVector(0);
+  const VEC_B = oneHotVector(1);
+  await db.query(
+    `INSERT INTO kb_documents (id, tenant_id, title, content)
+     VALUES ($1, $2, 'Dokumen 12D', 'isi dokumen uji vektor')`,
+    [KB_DOC_12D, TENANT_A],
+  );
+  const inserted = await db.query<{ id: string; chunk_index: number }>(
+    `INSERT INTO kb_chunks (tenant_id, document_id, chunk_index, content, embedding)
+     VALUES ($1, $2, 0, 'chunk vektor a', $3::vector),
+            ($1, $2, 1, 'chunk vektor b', $4::vector),
+            ($1, $2, 2, 'chunk tanpa vektor', NULL)
+     RETURNING id, chunk_index`,
+    [TENANT_A, KB_DOC_12D, VEC_A, VEC_B],
+  );
+  const chunkA = inserted.rows.find((r) => r.chunk_index === 0)!.id;
+  const dims = await db.query<{ d: number }>(
+    `SELECT vector_dims(embedding) AS d FROM kb_chunks WHERE id = $1`,
+    [chunkA],
+  );
+  assert.equal(dims.rows[0].d, 1536);
+
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const nearest = await tx.query<{ id: string; dist: number }>(
+      `SELECT id, (embedding <=> $1::vector) AS dist FROM kb_chunks
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> $1::vector
+        LIMIT 1`,
+      [VEC_A],
+    );
+    const counts = await tx.query<{ embedded: string; pending: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM kb_chunks WHERE embedding IS NOT NULL) AS embedded,
+         (SELECT count(*)::text FROM kb_chunks WHERE embedding IS NULL AND document_id = $1) AS pending`,
+      [KB_DOC_12D],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM kb_chunks WHERE embedding IS NOT NULL`,
+    );
+    return { nearest, counts, other };
+  });
+  assert.equal(views.nearest.rows[0].id, chunkA);
+  assert.ok(Math.abs(views.nearest.rows[0].dist) < 1e-6);
+  assert.equal(views.counts.rows[0].pending, "1");
+  assert.ok(Number(views.counts.rows[0].embedded) >= 2);
+  assert.equal(views.other.rows[0].n, "0");
+  console.log(
+    "[33] Fase 12D: kb_chunks.embedding vector(1536) — vector_dims 1536, tetangga cosine terdekat = chunk identik (jarak ~0), chunk NULL terhitung tertunda, tenant lain 0 baris pada kueri vektor: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

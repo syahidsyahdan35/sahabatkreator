@@ -12,6 +12,7 @@ import {
 import {
   AGENT_TOOLS,
   isPipelineStage,
+  type EmbeddingProvider,
   type LlmProvider,
   type LlmToolCall,
 } from "@sahabat-kreator/ai";
@@ -20,6 +21,7 @@ import { withTenantDb, type DbTx } from "./tx";
 import { getActiveAgent } from "./agents";
 import { listMessages } from "./conversations";
 import { searchKbChunks } from "./kb";
+import { embedKbQueryText } from "./kb-embeddings";
 import {
   buildPaymentUrl,
   createPaymentLink,
@@ -45,7 +47,10 @@ import {
  * 3. Cek caps harian tenant (AGENT_DAILY_RESPONSE_CAP respons/hari dari
  *    usage_ledger; lewat → audit `agent.capped`, tidak menjawab).
  * 4. Rakit konteks: prompt sistem agent + riwayat 20 pesan terakhir +
- *    retrieval KB (full-text, top 5) untuk teks pesan pemicu.
+ *    retrieval KB untuk teks pesan pemicu (full-text top 5; HIBRIDA
+ *    full-text + vektor sejak Fase 12D bila pemanggil menyerahkan
+ *    provider embedding aktif — kegagalan embedding kueri jatuh ke
+ *    full-text murni, tidak pernah menggagalkan jawaban).
  * 5. Panggil provider LLM (@sahabat-kreator/ai). Error/timeout provider →
  *    audit `agent.failed`, TIDAK ada pesan keluar, job tidak crash.
  * 6. Catat metering: usage_ledger type='ai_token' (qty = total token;
@@ -437,6 +442,12 @@ export async function respondToInboundMessage(
     tenantId: string;
     conversationId: string;
     messageId: string;
+    /**
+     * Provider embedding aktif proses pemanggil (Fase 12D; di-resolve
+     * worker per job, panel → env). Null/absen = retrieval full-text
+     * murni seperti sebelum 12D.
+     */
+    embeddingProvider?: EmbeddingProvider | null;
     /** Base URL publik untuk tool send_payment_link (dari env worker). */
     publicBaseUrl?: string;
     /**
@@ -571,7 +582,27 @@ export async function respondToInboundMessage(
     limit: HISTORY_LIMIT,
   })) ?? [];
   const triggerText = message.contentText ?? "";
-  const hits = await searchKbChunks(db, ctx, triggerText, KB_HIT_LIMIT);
+  // Fase 12D: embed kueri SEKALI bila provider embedding aktif; error
+  // provider apa pun (jaringan, model, dimensi) ditelan di sini dan
+  // pencarian berjalan full-text murni — retrieval tidak boleh
+  // menggagalkan jawaban agent. Usage panggilan kueri dicatat
+  // embedKbQueryText sebagai baris kb_embedding (bukan agent_response,
+  // jadi tidak menyentuh cap harian).
+  let queryEmbedding: number[] | null = null;
+  if (input.embeddingProvider && triggerText.trim().length > 0) {
+    try {
+      queryEmbedding = await embedKbQueryText(db, input.embeddingProvider, {
+        tenantId,
+        text: triggerText,
+        refId: messageId,
+      });
+    } catch {
+      queryEmbedding = null;
+    }
+  }
+  const hits = await searchKbChunks(db, ctx, triggerText, KB_HIT_LIMIT, {
+    queryEmbedding,
+  });
 
   const languageLine = agent.config.language
     ? `\nBahasa balasan: ${agent.config.language}.`
@@ -621,6 +652,10 @@ export async function respondToInboundMessage(
     model: result.model,
     conversationId,
     kbChunkIds: hits.map((h) => h.chunkId),
+    // Fase 12D: mode retrieval yang benar-benar terjadi pada respons
+    // ini ('hybrid' hanya bila vektor kueri berhasil dibuat DAN
+    // pencarian memakainya) — jejak jujur untuk debug kualitas KB.
+    retrieval: queryEmbedding ? "hybrid" : "fts",
   };
 
   if (!text && result.toolCalls.length === 0) {
