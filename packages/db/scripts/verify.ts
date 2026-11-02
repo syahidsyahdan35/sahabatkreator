@@ -615,5 +615,66 @@ console.log(
   "[12] Fase 6A: lengan app.telegram_channel_account_id hanya membuka baris akun itu; bot_username terbaca; pindai app.system_delivery='telegram' hanya menghasilkan antrean percakapan telegram lintas tenant: OK",
 );
 
+// ---------- 13. Fase 6A.1: grup Telegram (provider_chat_id + sender_name) ----------
+// Kolom baru migrasi 0019 harus ada; percakapan grup tenant A
+// (provider_chat_id negatif + title) dengan pesan outbound `queued` harus
+// teresolusi alamat balasannya ke ID GRUP lewat query poller
+// (coalesce provider_chat_id → external_user_id identitas), sementara
+// percakapan privat lama (provider_chat_id NULL) jatuh kembali ke id
+// kontak. Pesan masuk grup membawa sender_name; pesan privat NULL.
+const TG_GROUP_CONV = "34343434-3434-4434-8434-343434343434";
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider, provider_chat_id, title)
+   VALUES ($1, $2, $3, $4, 'telegram', '-1001234567890', 'Grup Uji 6A.1')`,
+  [TG_GROUP_CONV, TENANT_A, TG_ACC_A, CONTACT_A],
+);
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, sender_name, type, content_text, status)
+   VALUES ($1, $2, 'inbound', 'contact', 'Anggota Satu', 'text', 'Halo dari grup', 'received'),
+          ($1, $2, 'outbound', 'user', NULL, 'text', 'Balasan ke grup', 'queued'),
+          ($1, $3, 'inbound', 'contact', NULL, 'text', 'Halo privat', 'received')`,
+  [TENANT_A, TG_GROUP_CONV, TG_CONV_A],
+);
+const colCheck = await db.query<{ column_name: string }>(
+  `SELECT column_name FROM information_schema.columns
+    WHERE table_name IN ('conversations', 'messages')
+      AND column_name IN ('provider_chat_id', 'title', 'sender_name')
+    ORDER BY column_name`,
+);
+assert.deepEqual(
+  colCheck.rows.map((r) => r.column_name),
+  ["provider_chat_id", "sender_name", "title"],
+);
+const groupSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.system_delivery', 'telegram', true)`);
+  // Cerminan query core `listQueuedTelegramDeliveries` (Fase 6A.1):
+  // alamat = coalesce(provider_chat_id percakapan, identitas kontak).
+  return tx.query<{ content_text: string; chat_id: string }>(
+    `SELECT m.content_text,
+            coalesce(cv.provider_chat_id, ci.external_user_id) AS chat_id
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_accounts ca ON ca.id = cv.channel_account_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.direction = 'outbound' AND m.status = 'queued'
+      ORDER BY m.content_text`,
+  );
+});
+assert.deepEqual(
+  groupSeen.rows.map((r) => `${r.content_text}:${r.chat_id}`),
+  ["Balasan ke grup:-1001234567890", "Balasan telegram uji:424242"],
+);
+const senderNames = await db.query<{ sender_name: string | null }>(
+  `SELECT sender_name FROM messages WHERE conversation_id = $1 AND direction = 'inbound'`,
+  [TG_GROUP_CONV],
+);
+assert.deepEqual(senderNames.rows.map((r) => r.sender_name), ["Anggota Satu"]);
+console.log(
+  "[13] Fase 6A.1: kolom provider_chat_id/title/sender_name ada; alamat balasan grup teresolusi ke id grup negatif lewat coalesce & privat lama jatuh ke identitas kontak; sender_name tersimpan per pesan grup: OK",
+);
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

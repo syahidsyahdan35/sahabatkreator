@@ -132,6 +132,22 @@ export const conversations = pgTable(
       .references(() => contacts.id, { onDelete: "cascade" }),
     /** Denormalisasi dari channel_accounts.provider agar daftar inbox murah. */
     provider: channelProviderEnum("provider").notNull(),
+    /**
+     * Id chat di sisi provider = ALAMAT BALASAN percakapan ini (Fase 6A.1).
+     * Pada Telegram: `chat.id` sebagai string — positif untuk chat privat
+     * (== id user), negatif untuk grup/supergrup. Sampai 6A poller
+     * menganggap alamat balasan = identitas kontak, yang hanya benar untuk
+     * privat; kolom ini memisahkan keduanya. NULL untuk baris lama /
+     * provider lain — poller jatuh kembali ke external_id identitas kontak.
+     */
+    providerChatId: varchar("provider_chat_id", { length: 255 }),
+    /**
+     * Judul percakapan di provider (Fase 6A.1) — HANYA diisi untuk
+     * percakapan grup Telegram (`chat.title`); percakapan privat & provider
+     * lain NULL dan tampil memakai nama kontak. Kehadiran judul inilah
+     * penanda percakapan grup bagi API/UI (`isGroup`).
+     */
+    title: varchar("title", { length: 255 }),
     status: conversationStatusEnum("status").notNull().default("open"),
     assigneeUserId: uuid("assignee_user_id").references(() => users.id, {
       onDelete: "set null",
@@ -167,6 +183,14 @@ export const messages = pgTable(
       .references(() => conversations.id, { onDelete: "cascade" }),
     direction: messageDirectionEnum("direction").notNull(),
     senderType: messageSenderTypeEnum("sender_type").notNull(),
+    /**
+     * Nama pengirim per pesan (Fase 6A.1) — snapshot nama anggota saat
+     * pesan grup Telegram masuk. Percakapan grup menampung banyak
+     * pengirim, sedangkan baris percakapan hanya menunjuk SATU kontak,
+     * jadi atribusi penulis per pesan hidup di sini. NULL di luar grup
+     * (privat: pengirimnya ya kontak percakapan itu sendiri).
+     */
+    senderName: varchar("sender_name", { length: 255 }),
     type: messageTypeEnum("type").notNull().default("text"),
     contentText: text("content_text"),
     mediaId: uuid("media_id").references(() => media.id, { onDelete: "set null" }),

@@ -29,9 +29,14 @@ import { withTenantDb } from "./tx";
  * jadi relay worker, automation, sequence, dan agent AI bekerja tanpa
  * tahu-menahu soal Telegram.
  *
- * Cakupan v1: chat privat (di Telegram privat, `from.id` == `chat.id`,
- * jadi id pengirim sekaligus alamat balasan untuk sendMessage). Chat grup
- * tidak ditolak, tetapi identitas tetap per pengirim.
+ * Chat privat & grup (Fase 6A.1): identitas kontak selalu per PENGIRIM
+ * (`from.id`), tetapi alamat balasan adalah id CHAT
+ * (`conversations.provider_chat_id` = `chat.id`; negatif untuk grup).
+ * Percakapan grup: SATU per (akun, chat grup), berlabel judul grup
+ * (`conversations.title`), menampung pesan banyak anggota — atribusi
+ * penulis per pesan disimpan di `messages.sender_name`. Kontak jangkar
+ * percakapan grup = pengirim pertama (semantik sequence per-kontak tetap
+ * menunjuk kontak percakapan, sama seperti privat).
  */
 
 export interface CreateTelegramChannelInput {
@@ -133,21 +138,36 @@ export async function resolveTelegramAccountById(
 }
 
 export interface RecordTelegramInboundInput {
-  /** Id user Telegram pengirim (`from.id`) — identitas kontak & alamat balasan. */
+  /** Id user Telegram pengirim (`from.id`) — identitas kontak (atribusi). */
   senderExternalId: string;
   senderName: string;
   senderUsername?: string;
+  /** Id chat Telegram (`chat.id`) — ALAMAT BALASAN; negatif untuk grup. */
+  chatExternalId: string;
+  /** Grup/supergrup → satu percakapan per grup; privat → per kontak. */
+  isGroup: boolean;
+  /** Judul grup (`chat.title`); hanya untuk grup. */
+  chatTitle?: string | null;
   /** Id pesan unik global untuk dedup webhook: `telegram:<botId>:<message_id>`. */
   providerMessageId: string;
   text: string;
 }
 
 /**
- * Menyimpan pesan inbound Telegram: temukan/buat kontak (identitas =
- * user id pengirim pada akun bot ini) + percakapan terbuka, lalu baris
- * pesan + unread + event outbox `message.received` dalam SATU transaksi
- * tenant (pola webchat persis). Idempoten terhadap retry webhook Telegram:
- * provider_message_id yang sama mengembalikan pesan yang sudah ada.
+ * Menyimpan pesan inbound Telegram: temukan/buat kontak pengirim
+ * (identitas = user id pengirim pada akun bot ini) + percakapan terbuka,
+ * lalu baris pesan + unread + event outbox `message.received` dalam SATU
+ * transaksi tenant (pola webchat persis). Idempoten terhadap retry
+ * webhook Telegram: provider_message_id yang sama mengembalikan pesan
+ * yang sudah ada.
+ *
+ * Resolusi percakapan (Fase 6A.1):
+ * - Grup: berdasarkan `provider_chat_id` (= id grup) pada akun ini —
+ *   SATU percakapan per grup, siapa pun anggotanya yang menulis. Kontak
+ *   baris percakapan = pengirim PERTAMA (jangkar); pesan berikutnya dari
+ *   anggota lain TIDAK memindahkan jangkar itu.
+ * - Privat: berdasarkan kontak pengirim (perilaku 6A), dan
+ *   `provider_chat_id` diisi/dirapikan ke id chat (= id pengirim).
  */
 export async function recordTelegramInboundMessage(
   db: Database,
@@ -188,22 +208,50 @@ export async function recordTelegramInboundMessage(
       });
     }
 
-    const [existingConv] = await tx
-      .select()
-      .from(conversations)
-      .where(
-        and(
-          eq(conversations.tenantId, account.tenantId),
-          eq(conversations.channelAccountId, account.id),
-          eq(conversations.contactId, contactId),
-        ),
-      )
-      .orderBy(desc(conversations.createdAt))
-      .limit(1);
+    const [existingConv] = input.isGroup
+      ? await tx
+          .select()
+          .from(conversations)
+          .where(
+            and(
+              eq(conversations.tenantId, account.tenantId),
+              eq(conversations.channelAccountId, account.id),
+              eq(conversations.providerChatId, input.chatExternalId),
+            ),
+          )
+          .orderBy(desc(conversations.createdAt))
+          .limit(1)
+      : await tx
+          .select()
+          .from(conversations)
+          .where(
+            and(
+              eq(conversations.tenantId, account.tenantId),
+              eq(conversations.channelAccountId, account.id),
+              eq(conversations.contactId, contactId),
+            ),
+          )
+          .orderBy(desc(conversations.createdAt))
+          .limit(1);
 
     let conversationId: string;
     if (existingConv && existingConv.status !== "closed") {
       conversationId = existingConv.id;
+      // Rapikan kolom 6A.1 pada percakapan lama: judul grup bisa berubah
+      // di Telegram; provider_chat_id privat lama bisa masih NULL.
+      const patch: { title?: string; providerChatId?: string } = {};
+      if (input.isGroup && input.chatTitle && existingConv.title !== input.chatTitle) {
+        patch.title = input.chatTitle;
+      }
+      if (existingConv.providerChatId !== input.chatExternalId) {
+        patch.providerChatId = input.chatExternalId;
+      }
+      if (Object.keys(patch).length > 0) {
+        await tx
+          .update(conversations)
+          .set(patch)
+          .where(eq(conversations.id, existingConv.id));
+      }
     } else {
       const [conv] = await tx
         .insert(conversations)
@@ -212,6 +260,8 @@ export async function recordTelegramInboundMessage(
           channelAccountId: account.id,
           contactId,
           provider: "telegram",
+          providerChatId: input.chatExternalId,
+          title: input.isGroup ? (input.chatTitle ?? null) : null,
           status: "open",
         })
         .returning();
@@ -234,6 +284,9 @@ export async function recordTelegramInboundMessage(
         conversationId,
         direction: "inbound",
         senderType: "contact",
+        // Atribusi penulis per pesan HANYA untuk grup (banyak penulis);
+        // privat NULL karena penulisnya ya kontak percakapan itu.
+        senderName: input.isGroup ? input.senderName : null,
         type: "text",
         contentText: input.text,
         providerMessageId: input.providerMessageId,
@@ -274,7 +327,12 @@ export interface TelegramQueuedDelivery {
   channelAccountId: string;
   /** Envelope enkripsi token bot akun pemilik (dekripsi di lapisan pengirim). */
   encryptedBotToken: string | null;
-  /** Alamat balasan: external_user_id identitas telegram kontak. */
+  /**
+   * Alamat balasan (Fase 6A.1): `conversations.provider_chat_id` — id grup
+   * (negatif) untuk percakapan grup, id user untuk privat. Baris lama
+   * yang belum ter-backfill jatuh kembali ke external_user_id identitas
+   * kontak percakapan.
+   */
   chatExternalId: string;
 }
 
@@ -302,7 +360,7 @@ export async function listQueuedTelegramDeliveries(
         contentText: messages.contentText,
         channelAccountId: channelAccounts.id,
         encryptedBotToken: channelAccounts.accessTokenEncrypted,
-        chatExternalId: channelIdentities.externalUserId,
+        chatExternalId: sql<string>`coalesce(${conversations.providerChatId}, ${channelIdentities.externalUserId})`,
       })
       .from(messages)
       .innerJoin(
@@ -330,5 +388,41 @@ export async function listQueuedTelegramDeliveries(
       .orderBy(asc(messages.createdAt))
       .limit(limit);
     return rows;
+  });
+}
+
+export interface TelegramMyChatMemberInput {
+  /** Id chat tempat status bot berubah (grup: negatif). */
+  chatExternalId: string;
+  chatTitle?: string | null;
+  /** Status baru bot di chat itu dari Telegram (member/administrator/kicked/left/...). */
+  memberStatus: string;
+}
+
+/**
+ * Mencatat update `my_chat_member` (Fase 6A.1): bot dimasukkan/dikeluarkan
+ * dari sebuah chat. BUKAN pesan — tidak membuat kontak/percakapan/pesan;
+ * cukup satu baris audit agar pemilik punya jejak kapan botnya masuk grup.
+ * Tidak fatal bila gagal: pemanggil (route webhook) mengabaikan error-nya
+ * agar webhook tetap menjawab 200.
+ */
+export async function recordTelegramMyChatMember(
+  db: Database,
+  account: Pick<TelegramAccountRef, "id" | "tenantId">,
+  input: TelegramMyChatMemberInput,
+): Promise<void> {
+  await withTenantDb(db, account.tenantId, async (tx) => {
+    await tx.insert(auditLogs).values({
+      tenantId: account.tenantId,
+      actorType: "system",
+      actorId: "telegram-webhook",
+      action: "telegram.my_chat_member",
+      meta: {
+        channelAccountId: account.id,
+        chatId: input.chatExternalId,
+        chatTitle: input.chatTitle ?? null,
+        memberStatus: input.memberStatus,
+      },
+    });
   });
 }

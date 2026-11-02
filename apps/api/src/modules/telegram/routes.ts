@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import {
   recordTelegramInboundMessage,
+  recordTelegramMyChatMember,
   resolveTelegramAccountById,
   verifyChannelWebhookSecret,
 } from "@sahabat-kreator/core";
@@ -68,6 +69,23 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
       return c.json({ ok: true });
     }
 
+    // Update `my_chat_member` (Fase 6A.1): bot dimasukkan/dikeluarkan
+    // grup. Bukan pesan — tidak membuat percakapan; cukup jejak audit.
+    // Kegagalan mencatat TIDAK boleh menggagalkan webhook (tetap 200).
+    const memberUpdate = (payload as TelegramUpdate).my_chat_member;
+    if (memberUpdate?.chat && typeof memberUpdate.chat.id === "number") {
+      try {
+        await recordTelegramMyChatMember(bundle.db, account, {
+          chatExternalId: String(memberUpdate.chat.id),
+          chatTitle: memberUpdate.chat.title ?? null,
+          memberStatus: memberUpdate.new_chat_member?.status ?? "unknown",
+        });
+      } catch (err) {
+        console.error("[telegram] gagal mencatat my_chat_member", err);
+      }
+      return c.json({ ok: true });
+    }
+
     const events = parseTelegramUpdate(payload);
     if (events.length > 0) {
       const update = payload as TelegramUpdate;
@@ -85,6 +103,11 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
           senderExternalId: event.message.senderExternalId,
           senderName,
           senderUsername: from?.username,
+          // Fase 6A.1: alamat balasan = id CHAT (grup: id grup negatif),
+          // terpisah dari identitas pengirim di atas.
+          chatExternalId: event.message.conversationExternalId,
+          isGroup: event.message.conversationKind === "group",
+          chatTitle: event.message.conversationTitle ?? null,
           // Index unik provider_message_id bersifat global → sematkan id
           // bot agar pesan dari bot berbeda tidak bertabrakan.
           providerMessageId: `telegram:${account.externalId}:${event.message.providerMessageId ?? event.providerEventId ?? ""}`,

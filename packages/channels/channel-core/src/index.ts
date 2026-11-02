@@ -29,10 +29,22 @@ export type StandardMessageType =
   | "reaction"
   | "unknown";
 
+/** Jenis percakapan di provider: privat 1:1 atau grup (banyak anggota). */
+export type StandardConversationKind = "private" | "group";
+
 /** Pesan yang sudah dinormalisasi dari format provider apa pun. */
 export interface StandardMessage {
   providerMessageId?: string;
   conversationExternalId: string;
+  /**
+   * Jenis percakapan sumber pesan (Fase 6A.1). Opsional: adapter yang
+   * belum membedakan mengosongkannya dan pemanggil menganggap privat.
+   * Untuk grup, `conversationExternalId` adalah id GRUP (alamat balasan),
+   * yang berbeda dari `senderExternalId` anggota yang menulis.
+   */
+  conversationKind?: StandardConversationKind;
+  /** Judul percakapan di provider (judul grup); hanya untuk grup. */
+  conversationTitle?: string;
   senderExternalId: string;
   direction: MessageDirection;
   type: StandardMessageType;

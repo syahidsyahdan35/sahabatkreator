@@ -26,6 +26,12 @@ import { withTenantDb } from "./tx";
 
 export interface ConversationWithSummary extends Conversation {
   contactName: string;
+  /**
+   * Percakapan grup (Fase 6A.1): hanya percakapan grup yang membawa
+   * `title` dari provider (judul grup Telegram); privat/provider lain
+   * titlenya NULL. UI menampilkan `title ?? contactName` sebagai nama.
+   */
+  isGroup: boolean;
   lastMessagePreview: string | null;
   lastMessageDirection: Message["direction"] | null;
 }
@@ -71,6 +77,7 @@ export async function listConversations(
       return {
         ...r.conversation,
         contactName: r.contactName,
+        isGroup: r.conversation.title !== null,
         lastMessagePreview: last?.contentText ?? null,
         lastMessageDirection: last?.direction ?? null,
       };

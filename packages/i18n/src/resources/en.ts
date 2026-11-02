@@ -101,6 +101,7 @@ export const en = {
     unreadLabel: "{count} unread",
     deliveryNote: "Webchat replies are delivered live to the visitor (status becomes Sent when they are connected). Other channels still save replies with Queued status.",
     mediaMessage: "Media message",
+    groupLabel: "Group",
     senderAgent: "AI Agent",
     senderSystem: "System",
     status: {

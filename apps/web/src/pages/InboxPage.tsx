@@ -239,6 +239,9 @@ export function InboxPage({ t, locale }: InboxPageProps) {
             <ul className="flex-1 divide-y divide-line overflow-y-auto">
               {conversations.map((conv) => {
                 const isActive = conv.id === selectedId;
+                // Percakapan grup (Fase 6A.1) tampil dengan judul grupnya;
+                // privat tetap nama kontak.
+                const displayName = conv.title ?? conv.contactName;
                 return (
                   <li key={conv.id}>
                     <button
@@ -249,12 +252,12 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                       }`}
                     >
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-sm font-bold text-accent">
-                        {conv.contactName.trim().charAt(0).toUpperCase() || "?"}
+                        {displayName.trim().charAt(0).toUpperCase() || "?"}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline justify-between gap-2">
                           <span className="truncate text-sm font-semibold text-ink">
-                            {conv.contactName}
+                            {displayName}
                           </span>
                           {conv.lastMessageAt ? (
                             <span className="shrink-0 text-[11px] text-muted">
@@ -269,6 +272,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                           <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-medium text-ink">
                             {t(`inbox.providers.${conv.provider}` as TranslationKey)}
                           </span>
+                          {conv.isGroup ? (
+                            <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">
+                              {t("inbox.groupLabel")}
+                            </span>
+                          ) : null}
                           <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-medium text-muted">
                             {t(`inbox.status.${conv.status}` as TranslationKey)}
                           </span>
@@ -304,10 +312,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                   </button>
                   <div className="min-w-0">
                     <div className="truncate text-sm font-bold text-ink">
-                      {selected.contactName}
+                      {selected.title ?? selected.contactName}
                     </div>
                     <div className="text-xs text-muted">
                       {t(`inbox.providers.${selected.provider}` as TranslationKey)}
+                      {selected.isGroup ? ` · ${t("inbox.groupLabel")}` : ""}
                       {" · "}
                       {t(`inbox.status.${selected.status}` as TranslationKey)}
                       {selected.unreadCount > 0
@@ -346,6 +355,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                                 : "rounded-bl-sm bg-surface text-ink shadow-sm"
                             }`}
                           >
+                            {!outbound && msg.senderName ? (
+                              <p className="mb-0.5 text-[11px] font-semibold text-accent">
+                                {msg.senderName}
+                              </p>
+                            ) : null}
                             <p className="whitespace-pre-wrap break-words">
                               {msg.contentText ?? (
                                 <span className="italic">{t("inbox.mediaMessage")}</span>

@@ -46,9 +46,24 @@ export interface TelegramUser {
 export interface TelegramChat {
   id: number;
   type?: string;
+  /** Judul grup/supergrup (chat privat tidak punya title). */
+  title?: string;
   first_name?: string;
   last_name?: string;
   username?: string;
+}
+
+/** Anggota chat dalam update `my_chat_member` (status bot di chat itu). */
+export interface TelegramChatMember {
+  user?: TelegramUser;
+  status?: string;
+}
+
+export interface TelegramChatMemberUpdated {
+  chat: TelegramChat;
+  from?: TelegramUser;
+  new_chat_member?: TelegramChatMember;
+  old_chat_member?: TelegramChatMember;
 }
 
 export interface TelegramMessage {
@@ -64,6 +79,8 @@ export interface TelegramUpdate {
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  /** Bot dimasukkan/dikeluarkan dari grup — BUKAN pesan; ditangani route. */
+  my_chat_member?: TelegramChatMemberUpdated;
   [key: string]: unknown;
 }
 
@@ -169,11 +186,18 @@ export class TelegramBotApiClient {
     await this.call<boolean>("setWebhook", {
       url: input.url,
       secret_token: input.secretToken,
-      allowed_updates: ["message"],
+      // `my_chat_member` agar bot tahu saat dimasukkan/dikeluarkan grup
+      // (Fase 6A.1) — update itu bukan pesan dan hanya dicatat audit.
+      allowed_updates: ["message", "my_chat_member"],
     });
   }
 
-  /** Kirim pesan teks ke chat (chat_id = id user pada chat privat). */
+  /**
+   * Kirim pesan teks ke chat. `chat_id` adalah alamat chat tujuan:
+   * id user pada chat privat, id grup (negatif) pada grup — pemanggil
+   * mengambilnya dari `conversations.provider_chat_id`, BUKAN dari
+   * identitas pengirim pesan terakhir (Fase 6A.1).
+   */
   async sendMessage(input: {
     chatId: string;
     text: string;
@@ -193,8 +217,15 @@ export class TelegramBotApiClient {
 /**
  * Menormalkan satu update Telegram menjadi StandardEvent. Hanya pesan
  * teks (`message.text`) yang menjadi `message.received`; update lain
- * (edited, channel post, callback, non-teks) menghasilkan array kosong
- * agar pemanggil menjawab 200 dan mengabaikannya dengan aman.
+ * (edited, channel post, my_chat_member, callback, non-teks)
+ * menghasilkan array kosong agar pemanggil menjawab 200 dan
+ * mengabaikannya dengan aman.
+ *
+ * Grup (Fase 6A.1): `chat.type` group/supergroup → conversationKind
+ * "group" + conversationTitle dari `chat.title`. Perhatikan pemisahan
+ * yang menjadi inti dukungan grup: `conversationExternalId` = id CHAT
+ * (grup: negatif, alamat balasan), `senderExternalId` = id ANGGOTA yang
+ * menulis — keduanya hanya sama pada chat privat.
  */
 export function parseTelegramUpdate(payload: unknown): StandardEvent[] {
   if (typeof payload !== "object" || payload === null) return [];
@@ -209,6 +240,8 @@ export function parseTelegramUpdate(payload: unknown): StandardEvent[] {
     typeof message.date === "number"
       ? new Date(message.date * 1000).toISOString()
       : new Date().toISOString();
+  const isGroup =
+    message.chat.type === "group" || message.chat.type === "supergroup";
   return [
     {
       type: "message.received",
@@ -217,6 +250,10 @@ export function parseTelegramUpdate(payload: unknown): StandardEvent[] {
       message: {
         providerMessageId: String(message.message_id),
         conversationExternalId: String(message.chat.id),
+        conversationKind: isGroup ? "group" : "private",
+        conversationTitle: isGroup
+          ? (message.chat.title ?? undefined)
+          : undefined,
         senderExternalId: String(message.from.id),
         direction: "inbound",
         type: "text",

@@ -182,6 +182,13 @@ export const ConversationResponseSchema = z.object({
   channelAccountId: z.string().uuid(),
   contactId: z.string().uuid(),
   contactName: z.string(),
+  /**
+   * Judul percakapan di provider (Fase 6A.1) — judul grup Telegram;
+   * null untuk percakapan privat (tampilkan contactName).
+   */
+  title: z.string().nullable(),
+  /** Percakapan grup (banyak anggota) vs privat 1:1 (Fase 6A.1). */
+  isGroup: z.boolean(),
   provider: ChannelProviderSchema,
   status: ConversationStatusSchema,
   assigneeUserId: z.string().uuid().nullable(),
@@ -208,6 +215,8 @@ export const MessageResponseSchema = z.object({
   conversationId: z.string().uuid(),
   direction: MessageDirectionSchema,
   senderType: MessageSenderTypeSchema,
+  /** Nama anggota pengirim — hanya terisi pada pesan masuk grup (Fase 6A.1). */
+  senderName: z.string().nullable(),
   type: MessageTypeSchema,
   contentText: z.string().nullable(),
   mediaId: z.string().uuid().nullable(),

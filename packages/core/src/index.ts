@@ -125,10 +125,12 @@ export {
   resolveTelegramAccountById,
   recordTelegramInboundMessage,
   listQueuedTelegramDeliveries,
+  recordTelegramMyChatMember,
   type CreateTelegramChannelInput,
   type TelegramAccountRef,
   type RecordTelegramInboundInput,
   type TelegramQueuedDelivery,
+  type TelegramMyChatMemberInput,
 } from "./telegram";
 export {
   resolveWebchatAccountBySiteKey,

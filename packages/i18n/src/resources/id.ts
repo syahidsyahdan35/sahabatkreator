@@ -100,6 +100,7 @@ export const id: Resources = {
     unreadLabel: "{count} belum dibaca",
     deliveryNote: "Balasan Webchat terkirim langsung ke pengunjung (status menjadi Terkirim saat ia terhubung). Channel lain masih menyimpan balasan dengan status Antre.",
     mediaMessage: "Pesan media",
+    groupLabel: "Grup",
     senderAgent: "Agent AI",
     senderSystem: "Sistem",
     status: {

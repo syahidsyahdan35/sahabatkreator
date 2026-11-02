@@ -8,6 +8,7 @@ export function serializeMessage(row: Message): MessageResponse {
     conversationId: row.conversationId,
     direction: row.direction,
     senderType: row.senderType,
+    senderName: row.senderName,
     type: row.type,
     contentText: row.contentText,
     mediaId: row.mediaId,

@@ -30,6 +30,8 @@ export function serializeConversation(row: ConversationWithSummary): Conversatio
     channelAccountId: row.channelAccountId,
     contactId: row.contactId,
     contactName: row.contactName,
+    title: row.title,
+    isGroup: row.isGroup,
     provider: row.provider,
     status: row.status,
     assigneeUserId: row.assigneeUserId,

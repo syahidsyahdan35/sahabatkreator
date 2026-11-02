@@ -134,6 +134,13 @@
       "when": 1793582334000,
       "tag": "0018_rls_telegram",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793584914795,
+      "tag": "0019_telegram_group_chats",
+      "breakpoints": true
     }
   ]
 }
