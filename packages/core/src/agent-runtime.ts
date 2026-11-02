@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, gte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, ne, sql } from "drizzle-orm";
 import {
   auditLogs,
   agentSuggestions,
@@ -488,6 +488,13 @@ export async function respondToInboundMessage(
             eq(messages.conversationId, conversationId),
             eq(messages.direction, "inbound"),
             eq(messages.senderType, "contact"),
+            // Pesan pemicu sendiri WAJIB dikecualikan: createdAt di
+            // Postgres berpresisi mikrodetik sedangkan Date JS hanya
+            // milidetik (terpotong saat dibaca), jadi perbandingan
+            // `>` polos bisa mencocokkan baris pemicu itu sendiri —
+            // job pesan terakhir pun ikut menyerah (bug Fase 9A yang
+            // tertangkap rantai staging: supersededBy == trigger).
+            ne(messages.id, messageId),
             gt(messages.createdAt, message.createdAt),
           ),
         )
