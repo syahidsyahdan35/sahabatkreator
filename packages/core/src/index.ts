@@ -43,6 +43,8 @@ export {
 export {
   listConversations,
   getConversation,
+  assignConversation,
+  type AssignConversationResult,
   listMessages,
   queueOutboundMessage,
   queueOutboundMessageForApiKey,
@@ -401,6 +403,37 @@ export {
   type UpdateSavedReplyResult,
   type DeleteSavedReplyResult,
 } from "./saved-replies";
+export {
+  listConversationNotes,
+  createConversationNote,
+  deleteConversationNote,
+  type ConversationNoteWithAuthor,
+  type CreateNoteResult,
+  type DeleteNoteResult,
+} from "./conversation-notes";
+export {
+  listTeamMembers,
+  listInvitations,
+  createInvitation,
+  revokeInvitation,
+  findInvitationByToken,
+  acceptInvitation,
+  updateMemberRole,
+  removeMember,
+  invitationStatus,
+  isTeamManager,
+  INVITATION_TTL_MS,
+  type TeamMemberRow,
+  type InvitableRole,
+  type InvitationStatus,
+  type CreateInvitationResult,
+  type RevokeInvitationResult,
+  type AcceptInvitationResult,
+  type UpdateMemberRoleResult,
+  type RemoveMemberResult,
+  type InvitationLookup,
+  type Invitation,
+} from "./team";
 export {
   PLATFORM_SETTING_KEYS,
   PLATFORM_PUBLIC_CONFIG_KEYS,

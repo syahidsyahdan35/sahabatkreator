@@ -175,6 +175,8 @@ export const conversations = pgTable(
   },
   (t) => [
     index("conversations_tenant_id_idx").on(t.tenantId),
+    // Fase 9C: filter inbox "milik saya / belum ditugaskan".
+    index("conversations_tenant_assignee_idx").on(t.tenantId, t.assigneeUserId),
     index("conversations_tenant_status_last_message_idx").on(
       t.tenantId,
       t.status,
@@ -273,6 +275,44 @@ export type Conversation = typeof conversations.$inferSelect;
 export type NewConversation = typeof conversations.$inferInsert;
 export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
+
+/**
+ * Catatan internal percakapan (Fase 9C) — tabel TERPISAH dari `messages`
+ * secara sengaja: semua jalur keluar (poller provider, flush webchat,
+ * broadcast, agent) hanya membaca `messages`, jadi catatan di sini tidak
+ * bisa terkirim ke kontak — bukan difilter, melainkan tidak berada di
+ * tabel yang dibaca pengirim. `author_user_id` ON DELETE SET NULL:
+ * catatan bertahan walau penulis keluar/terhapus (UI menampilkan label
+ * cadangan untuk penulis null).
+ */
+export const conversationNotes = pgTable(
+  "conversation_notes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("conversation_notes_tenant_id_idx").on(t.tenantId),
+    index("conversation_notes_conversation_created_idx").on(
+      t.conversationId,
+      t.createdAt,
+    ),
+  ],
+);
+
+export type ConversationNote = typeof conversationNotes.$inferSelect;
+export type NewConversationNote = typeof conversationNotes.$inferInsert;
 export const channelIdentities = pgTable(
   "channel_identities",
   {

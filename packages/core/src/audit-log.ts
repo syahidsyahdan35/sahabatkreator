@@ -36,7 +36,10 @@ import { withTenantDb, type DbTx } from "./tx";
  *   channel, message, automation, sequence, agent, contact
  *   (`contact.tagged`/`contact.stage_changed` — aksi TOOL agent,
  *   actor-nya tetap `agent`), payment_link, payment, api_key,
- *   telegram, integration, platform_settings (tenant NULL).
+ *   telegram, integration, platform_settings (tenant NULL),
+ *   conversation (Fase 9C: assigned/unassigned/note_created/
+ *   note_deleted) dan team (Fase 9C: invited/invitation_revoked/
+ *   member_joined/role_changed/member_removed).
  * - meta: id referensi + fakta berkode per action. Penulis audit secara
  *   eksplisit TIDAK menulis rahasia (token/secret tidak pernah masuk
  *   meta; platform_settings hanya menulis nama kunci). Satu-satunya
@@ -130,6 +133,11 @@ const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
   ["flowRunId", "flow_run"],
   ["flowId", "flow"],
   ["savedReplyId", "saved_reply"],
+  // Fase 9C: aksi tim menargetkan undangan/member; noteId sebelum
+  // conversationId agar aksi catatan menargetkan catatannya sendiri.
+  ["invitationId", "invitation"],
+  ["memberUserId", "member"],
+  ["noteId", "conversation_note"],
   // broadcastId didahulukan dari channelAccountId: meta broadcast.*
   // membawa keduanya, dan target utamanya adalah broadcast-nya.
   ["broadcastId", "broadcast"],

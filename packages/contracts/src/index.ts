@@ -51,6 +51,20 @@ export const ErrorCodeSchema = z.enum([
   "FLOW_INVALID_STATE",
   // Fase 9B: merge kontak ke dirinya sendiri → 422.
   "CONTACT_MERGE_SAME",
+  // Fase 9C: kedalaman inbox tim — penerima tugas bukan member workspace
+  // → 422; siklus hidup undangan tim (kedaluwarsa / dicabut / sudah
+  // diterima → 422; email sesi != email undangan → 403; email sudah
+  // menjadi member → 409); pemilik workspace dilindungi dari penurunan
+  // peran & pengeluaran, dan member tidak bisa mengeluarkan dirinya
+  // lewat endpoint tim → 422.
+  "ASSIGNEE_NOT_MEMBER",
+  "INVITATION_EXPIRED",
+  "INVITATION_REVOKED",
+  "INVITATION_ALREADY_ACCEPTED",
+  "INVITATION_EMAIL_MISMATCH",
+  "INVITATION_ALREADY_MEMBER",
+  "TEAM_OWNER_PROTECTED",
+  "TEAM_SELF_ACTION",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -280,6 +294,13 @@ export const ConversationResponseSchema = z.object({
   provider: ChannelProviderSchema,
   status: ConversationStatusSchema,
   assigneeUserId: z.string().uuid().nullable(),
+  /**
+   * Nama tampil penerima tugas (Fase 9C): nama user penerima tugas, jatuh
+   * ke email bila nama kosong; null bila percakapan belum ditugaskan atau
+   * penerimanya sudah tidak bisa diresolusi. UI menampilkan chip penugasan
+   * dari dua field ini tanpa query tambahan.
+   */
+  assigneeName: z.string().nullable(),
   agentEnabled: z.boolean(),
   unreadCount: z.number().int().nonnegative(),
   lastMessageAt: z.string().datetime().nullable(),
@@ -296,6 +317,152 @@ export const ConversationListResponseSchema = z.object({
 });
 export type ConversationListResponse = z.infer<
   typeof ConversationListResponseSchema
+>;
+
+/**
+ * Penugasan percakapan (Fase 9C): tetapkan penerima tugas ke member
+ * workspace mana pun, atau lepaskan dengan `assigneeUserId: null`.
+ * Penerima yang bukan member ditolak server (422 ASSIGNEE_NOT_MEMBER) —
+ * kontrak di sini hanya memeriksa bentuk UUID.
+ */
+export const AssignConversationRequestSchema = z.object({
+  assigneeUserId: z.string().uuid().nullable(),
+});
+export type AssignConversationRequest = z.infer<
+  typeof AssignConversationRequestSchema
+>;
+
+/**
+ * Catatan internal percakapan (Fase 9C): catatan tim yang TIDAK PERNAH
+ * terkirim ke kontak — disimpan di tabel terpisah dari pesan dan tidak
+ * punya jalur ke provider mana pun. `authorName` adalah label tampil
+ * penulis (nama, jatuh ke email); null bila penulis sudah terhapus
+ * (UI memakai label cadangan "mantan anggota").
+ */
+export const ConversationNoteResponseSchema = z.object({
+  id: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  authorUserId: z.string().uuid().nullable(),
+  authorName: z.string().nullable(),
+  body: z.string(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type ConversationNoteResponse = z.infer<
+  typeof ConversationNoteResponseSchema
+>;
+
+export const ConversationNoteListResponseSchema = z.object({
+  notes: z.array(ConversationNoteResponseSchema),
+});
+export type ConversationNoteListResponse = z.infer<
+  typeof ConversationNoteListResponseSchema
+>;
+
+export const CreateConversationNoteRequestSchema = z.object({
+  body: z.string().trim().min(1).max(4000),
+});
+export type CreateConversationNoteRequest = z.infer<
+  typeof CreateConversationNoteRequestSchema
+>;
+
+/**
+ * Tim workspace (Fase 9C): member + undangan. Peran mengikuti
+ * MemberRoleSchema yang ada (owner|admin|agent|viewer); peran `owner`
+ * TIDAK bisa diberikan lewat undangan maupun perubahan peran — kepemilikan
+ * tidak berpindah lewat permukaan ini.
+ */
+export const InvitableRoleSchema = z.enum(["admin", "agent", "viewer"]);
+export type InvitableRole = z.infer<typeof InvitableRoleSchema>;
+
+export const TeamMemberResponseSchema = z.object({
+  userId: z.string().uuid(),
+  email: z.string(),
+  name: z.string().nullable(),
+  role: MemberRoleSchema,
+  /** Baris ini adalah user sesi yang sedang melihat (UI menandai "Anda"). */
+  isSelf: z.boolean(),
+  createdAt: z.string().datetime(),
+});
+export type TeamMemberResponse = z.infer<typeof TeamMemberResponseSchema>;
+
+export const TeamMemberListResponseSchema = z.object({
+  members: z.array(TeamMemberResponseSchema),
+});
+export type TeamMemberListResponse = z.infer<typeof TeamMemberListResponseSchema>;
+
+/** Status turunan undangan — dihitung server dari kolom waktunya. */
+export const InvitationStatusSchema = z.enum([
+  "pending",
+  "accepted",
+  "revoked",
+  "expired",
+]);
+export type InvitationStatus = z.infer<typeof InvitationStatusSchema>;
+
+export const InvitationResponseSchema = z.object({
+  id: z.string().uuid(),
+  email: z.string(),
+  role: InvitableRoleSchema,
+  status: InvitationStatusSchema,
+  /**
+   * Tautan terima utuh — HANYA disertakan pada respons PEMBUATAN
+   * undangan (sekali lihat, pola kunci API 5A): yang tersimpan di server
+   * hanya HASH tokennya, jadi tautan tidak bisa ditampilkan ulang dari
+   * daftar; untuk tautan baru, cabut undangan lama & undang ulang.
+   * Null di semua permukaan lain.
+   */
+  inviteUrl: z.string().nullable(),
+  expiresAt: z.string().datetime(),
+  createdAt: z.string().datetime(),
+});
+export type InvitationResponse = z.infer<typeof InvitationResponseSchema>;
+
+export const InvitationListResponseSchema = z.object({
+  invitations: z.array(InvitationResponseSchema),
+});
+export type InvitationListResponse = z.infer<typeof InvitationListResponseSchema>;
+
+export const CreateInvitationRequestSchema = z.object({
+  email: z.string().trim().email().max(320),
+  role: InvitableRoleSchema.default("agent"),
+});
+export type CreateInvitationRequest = z.infer<
+  typeof CreateInvitationRequestSchema
+>;
+
+export const UpdateMemberRoleRequestSchema = z.object({
+  role: InvitableRoleSchema,
+});
+export type UpdateMemberRoleRequest = z.infer<
+  typeof UpdateMemberRoleRequestSchema
+>;
+
+/**
+ * Pratinjau undangan untuk halaman terima (/invite/:token): cukup untuk
+ * menampilkan "Anda diundang ke workspace X sebagai peran Y" dan apakah
+ * email sesi cocok — token tidak pernah dikembalikan lagi.
+ */
+export const InvitationPreviewResponseSchema = z.object({
+  tenantId: z.string().uuid(),
+  tenantName: z.string(),
+  email: z.string(),
+  role: InvitableRoleSchema,
+  status: InvitationStatusSchema,
+  /** Email user sesi == email undangan (penerimaan hanya boleh olehnya). */
+  emailMatches: z.boolean(),
+  expiresAt: z.string().datetime(),
+});
+export type InvitationPreviewResponse = z.infer<
+  typeof InvitationPreviewResponseSchema
+>;
+
+export const AcceptInvitationResponseSchema = z.object({
+  tenantId: z.string().uuid(),
+  role: MemberRoleSchema,
+});
+export type AcceptInvitationResponse = z.infer<
+  typeof AcceptInvitationResponseSchema
 >;
 
 /**

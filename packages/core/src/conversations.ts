@@ -5,6 +5,7 @@ import {
   contacts,
   conversations,
   messages,
+  tenantMembers,
   users,
   type Conversation,
   type Database,
@@ -255,6 +256,13 @@ export function extractRawProviderMessageId(
 export interface ConversationWithSummary extends Conversation {
   contactName: string;
   /**
+   * Label tampil penerima tugas (Fase 9C): nama user penerima tugas,
+   * jatuh ke email bila namanya kosong; null bila belum ditugaskan.
+   * Diresolusi di query daftar (left join `users` global) agar UI tidak
+   * perlu memetakan assigneeUserId ke daftar member sendiri.
+   */
+  assigneeName: string | null;
+  /**
    * Percakapan grup (Fase 6A.1; sejak 6A.2 diturunkan dari kolom `kind`,
    * bukan lagi kehadiran `title`). UI menampilkan `title ?? contactName`
    * sebagai nama tampilan.
@@ -274,18 +282,38 @@ export interface ConversationWithSummary extends Conversation {
 export async function listConversations(
   db: Database,
   ctx: Pick<TenantContext, "tenantId">,
-  input: { status?: Conversation["status"] },
+  input: {
+    status?: Conversation["status"];
+    /**
+     * Filter penugasan (Fase 9C): `mine` = hanya yang ditugaskan ke
+     * `assignmentUserId` (user sesi — wajib disertakan pemanggil),
+     * `unassigned` = hanya yang assignee_user_id-nya NULL. Tanpa filter
+     * = semua (perilaku lama).
+     */
+    assignment?: "mine" | "unassigned";
+    assignmentUserId?: string;
+  },
 ): Promise<ConversationWithSummary[]> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const conditions = [eq(conversations.tenantId, ctx.tenantId)];
     if (input.status) conditions.push(eq(conversations.status, input.status));
+    if (input.assignment === "mine" && input.assignmentUserId) {
+      conditions.push(eq(conversations.assigneeUserId, input.assignmentUserId));
+    } else if (input.assignment === "unassigned") {
+      conditions.push(isNull(conversations.assigneeUserId));
+    }
     const rows = await tx
       .select({
         conversation: conversations,
         contactName: contacts.name,
+        assigneeName: users.name,
+        assigneeEmail: users.email,
       })
       .from(conversations)
       .innerJoin(contacts, eq(conversations.contactId, contacts.id))
+      // Fase 9C: label penerima tugas — `users` tabel global tanpa RLS,
+      // left join agar percakapan tanpa penugasan tetap muncul.
+      .leftJoin(users, eq(conversations.assigneeUserId, users.id))
       // Fase 6I: percakapan milik channel yang sedang di Sampah hilang
       // dari inbox (kontaknya sendiri tetap ada di CRM) sampai channel
       // dipulihkan atau di-purge permanen.
@@ -320,6 +348,10 @@ export async function listConversations(
       return {
         ...r.conversation,
         contactName: r.contactName,
+        assigneeName:
+          r.conversation.assigneeUserId !== null
+            ? (r.assigneeName ?? r.assigneeEmail ?? null)
+            : null,
         isGroup: r.conversation.kind === "group",
         isChannel,
         // Channel: unread ditegakkan 0 di permukaan API (Fase 6A.2) —
@@ -330,6 +362,90 @@ export async function listConversations(
         lastMessageDirection: last?.direction ?? null,
       };
     });
+  });
+}
+
+export type AssignConversationResult =
+  | { kind: "assigned"; conversation: Conversation }
+  | { kind: "conversation_not_found" }
+  | { kind: "assignee_not_member" };
+
+/**
+ * Menetapkan / melepas penerima tugas percakapan (Fase 9C).
+ *
+ * Aturan (ditegakkan DI SINI):
+ * - Percakapan harus milik tenant ini (selain itu `conversation_not_found`
+ *   → 404 di API; isolation RLS + filter tenant ganda).
+ * - Penerima (bila tidak null) harus MEMBER tenant ini — dicek dari
+ *   `tenant_members` dalam konteks tenant yang sama; user yang ada tapi
+ *   bukan member (atau tidak ada sama sekali) → `assignee_not_member`.
+ * - Penugasan TIDAK menyentuh `agent_enabled`: siapa yang menangani dan
+ *   apakah AI boleh menjawab adalah dua sumbu terpisah (handoff tetap
+ *   milik kolom agent_enabled).
+ * Audit `conversation.assigned` / `conversation.unassigned` ditulis dalam
+ * transaksi yang sama, meta berisi id saja (tanpa nama/email).
+ */
+export async function assignConversation(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId" | "userId"> & { userId: string },
+  conversationId: string,
+  assigneeUserId: string | null,
+): Promise<AssignConversationResult> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [conv] = await tx
+      .select({
+        id: conversations.id,
+        assigneeUserId: conversations.assigneeUserId,
+      })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.id, conversationId),
+        ),
+      )
+      .limit(1);
+    if (!conv) return { kind: "conversation_not_found" } as const;
+
+    if (assigneeUserId !== null) {
+      const [member] = await tx
+        .select({ id: tenantMembers.id })
+        .from(tenantMembers)
+        .where(
+          and(
+            eq(tenantMembers.tenantId, ctx.tenantId),
+            eq(tenantMembers.userId, assigneeUserId),
+          ),
+        )
+        .limit(1);
+      if (!member) return { kind: "assignee_not_member" } as const;
+    }
+
+    const [updated] = await tx
+      .update(conversations)
+      .set({ assigneeUserId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.id, conversationId),
+        ),
+      )
+      .returning();
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: "user",
+      actorId: ctx.userId,
+      action:
+        assigneeUserId === null
+          ? "conversation.unassigned"
+          : "conversation.assigned",
+      meta: {
+        conversationId,
+        assigneeUserId,
+        previousAssigneeUserId: conv.assigneeUserId,
+      },
+    });
+    return { kind: "assigned", conversation: updated } as const;
   });
 }
 

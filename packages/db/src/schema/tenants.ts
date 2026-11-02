@@ -74,6 +74,13 @@ export const invitations = pgTable(
     tokenHash: varchar("token_hash", { length: 255 }).notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    /**
+     * Pencabutan undangan (Fase 9C): diisi saat owner/admin mencabut
+     * undangan yang masih pending; undangan yang dicabut tidak bisa
+     * diterima lagi. Status turunan: pending = accepted_at NULL &
+     * revoked_at NULL & expires_at > now(); selain itu terminal.
+     */
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

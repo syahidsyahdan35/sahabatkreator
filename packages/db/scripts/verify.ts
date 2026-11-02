@@ -59,7 +59,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 2 tabel Fase 7C (broadcasts, broadcast_recipients)
 // + 3 tabel Fase 8A (flows, flow_runs, flow_run_steps)
 // + 1 tabel Fase 9A (saved_replies)
-assert.equal(Number(tablesRes.rows[0].count), 40);
+// + 1 tabel Fase 9C (conversation_notes)
+assert.equal(Number(tablesRes.rows[0].count), 41);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -143,7 +144,10 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada flows, flow_runs, flow_run_steps (Fase 8A,
 //   migrasi 0031) = 51.
 // + tenant_isolation pada saved_replies (Fase 9A, migrasi 0033) = 52.
-assert.equal(Number(policies.rows[0].count), 52);
+// + tenant_isolation pada conversation_notes dan lengan baca
+//   `invitation_token_lookup` pada invitations (Fase 9C, migrasi
+//   0035) = 54.
+assert.equal(Number(policies.rows[0].count), 54);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -160,7 +164,8 @@ await db.exec(`
     platform_settings, profile_photos, integration_log,
     broadcasts, broadcast_recipients,
     flows, flow_runs, flow_run_steps,
-    saved_replies
+    saved_replies,
+    conversation_notes
   TO app_user;
 `);
 
@@ -1737,6 +1742,94 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
   assert.equal(views.other.rows[0].n, "0");
   console.log(
     "[27] Fase 9B: usage_ledger.meta — default '{}' untuk baris lama; rincian ai_token teragregasi dalam konteks tenant pemilik; tenant lain 0 baris: OK",
+  );
+}
+
+// ---------- 28. Fase 9C: conversation_notes + lengan undangan ----------
+{
+  const NOTE_ID = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1";
+  const NOTE_HASH =
+    "9c1111111111111111111111111111111111111111111111111111111111aaaa";
+  const OTHER_HASH =
+    "9c2222222222222222222222222222222222222222222222222222222222bbbb";
+  // Undangan di tenant A dengan hash yang diketahui + satu undangan
+  // lain (hash berbeda) sebagai kontrol negatif lengan token.
+  await db.query(
+    `INSERT INTO invitations (tenant_id, email, role, token_hash, expires_at)
+     VALUES ($1, 'invitee-9c@example.com', 'agent', $2, now() + interval '7 days'),
+            ($1, 'lain-9c@example.com', 'viewer', $3, now() + interval '7 days')`,
+    [TENANT_A, NOTE_HASH, OTHER_HASH],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    // Catatan di bawah konteks tenant pemilik (CONV_A milik TENANT_A).
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    await tx.query(
+      `INSERT INTO conversation_notes (id, tenant_id, conversation_id, author_user_id, body)
+       VALUES ($1, $2, $3, $4, 'catatan internal verify 9C')`,
+      [NOTE_ID, TENANT_A, CONV_A, USER_A],
+    );
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM conversation_notes WHERE id = $1`,
+      [NOTE_ID],
+    );
+    // Insert catatan silang (tenant konteks A, baris ber-tenant B) ditolak RLS.
+    let crossInsertBlocked = false;
+    await tx.query(`SAVEPOINT sp_notes1`);
+    try {
+      await tx.query(
+        `INSERT INTO conversation_notes (tenant_id, conversation_id, body)
+         VALUES ($1, $2, 'silang')`,
+        [TENANT_B, CONV_A],
+      );
+    } catch {
+      crossInsertBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_notes1`);
+    }
+    // Tenant B tidak melihat catatan A.
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM conversation_notes WHERE id = $1`,
+      [NOTE_ID],
+    );
+    // Tanpa konteks tenant: catatan 0 baris (fail-closed)…
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const noCtx = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM conversation_notes`,
+    );
+    // …tetapi lengan undangan membuka TEPAT baris pemilik hash token.
+    await tx.query(
+      `SELECT set_config('app.invitation_token_hash', $1, true)`,
+      [NOTE_HASH],
+    );
+    const byToken = await tx.query<{ email: string }>(
+      `SELECT email FROM invitations`,
+    );
+    // Hash yang tidak cocok tidak membuka apa pun.
+    await tx.query(
+      `SELECT set_config('app.invitation_token_hash', $1, true)`,
+      ["9cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+    );
+    const wrongToken = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM invitations`,
+    );
+    return { own, other, noCtx, byToken, wrongToken, crossInsertBlocked };
+  });
+  assert.equal(views.own.rows[0].n, "1");
+  assert.equal(views.other.rows[0].n, "0");
+  assert.equal(views.noCtx.rows[0].n, "0");
+  assert.equal(views.crossInsertBlocked, true);
+  assert.equal(views.byToken.rows.length, 1);
+  assert.equal(views.byToken.rows[0].email, "invitee-9c@example.com");
+  assert.equal(views.wrongToken.rows[0].n, "0");
+  // Kolom revoked_at (Fase 9C) ada di invitations.
+  const revokedCol = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_name = 'invitations' AND column_name = 'revoked_at'`,
+  );
+  assert.equal(revokedCol.rows[0].n, "1");
+  console.log(
+    "[28] Fase 9C: conversation_notes terisolasi per tenant (insert silang ditolak, tanpa konteks 0 baris); lengan invitation_token_lookup membuka tepat baris pemilik hash & menolak hash lain; invitations.revoked_at ada: OK",
   );
 }
 
