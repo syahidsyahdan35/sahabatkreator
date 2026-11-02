@@ -1736,6 +1736,17 @@ export const ApiKeyScopeSchema = z.enum([
   // Fase 10B: permukaan publik komentar (aturan sinkronisasi kontrak).
   "comments:read",
   "comments:write",
+  // Fase 15A: permukaan BACA publik untuk sumber daya yang sebelumnya
+  // hanya dashboard (aturan sinkronisasi kontrak dijalankan retrospektif).
+  // Tulis untuk sumber daya ini tetap dashboard-only — lihat
+  // docs/COVERAGE-MATRIX.md untuk alasan per sumber daya.
+  "broadcasts:read",
+  "flows:read",
+  "automations:read",
+  "agents:read",
+  "channels:read",
+  "whatsapp_templates:read",
+  "knowledge:read",
 ]);
 export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
 
@@ -1747,6 +1758,13 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "products:read",
   "comments:read",
   "comments:write",
+  "broadcasts:read",
+  "flows:read",
+  "automations:read",
+  "agents:read",
+  "channels:read",
+  "whatsapp_templates:read",
+  "knowledge:read",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1755,11 +1773,18 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "conversations:read",
   "products:read",
   "comments:read",
+  "broadcasts:read",
+  "flows:read",
+  "automations:read",
+  "agents:read",
+  "channels:read",
+  "whatsapp_templates:read",
+  "knowledge:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(7).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(14).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -3481,3 +3506,322 @@ export const UpdateSavedReplyRequestSchema = z.object({
 export type UpdateSavedReplyRequest = z.infer<
   typeof UpdateSavedReplyRequestSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Fase 15A — Permukaan publik v1: query tambahan + REGISTRY permukaan.
+//
+// Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
+// packages/contracts adalah sumber kebenaran tunggal; setiap kemampuan
+// yang masuk permukaan publik WAJIB punya pemetaan kontrak → API v1 →
+// SDK → MCP dalam fase yang sama. PUBLIC_V1_SURFACE di bawah adalah
+// registry pemetaan itu — satu entri per rute publik. Skrip
+// `check:drift` (packages/sdk/scripts/check-drift.ts, jalankan
+// `pnpm check:drift`) memeriksa registry ini terhadap implementasi
+// nyata (rute di modul public-v1, metode SDK, tool MCP) dan GAGAL
+// bila ada rute publik tanpa pemetaan atau pemetaan yang menunjuk
+// nama yang tidak ada. Matriks cakupan lengkap (termasuk permukaan
+// dashboard-only yang disengaja) hidup di docs/COVERAGE-MATRIX.md.
+//
+// Seksi ini sengaja di AKHIR file: skema query broadcast/flow merujuk
+// skema status yang didefinisikan di seksi sumber dayanya masing-masing.
+// ---------------------------------------------------------------------------
+
+/** Query daftar broadcast API publik /v1 (Fase 15A) — paginasi kursor seperti dashboard. */
+export const V1ListBroadcastsQuerySchema = z.object({
+  status: BroadcastStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+export type ListBroadcastsQuery = z.infer<typeof V1ListBroadcastsQuerySchema>;
+
+/** Query daftar flow API publik /v1 (Fase 15A) — paginasi kursor seperti dashboard. */
+export const V1ListFlowsQuerySchema = z.object({
+  status: FlowStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+export type ListFlowsQuery = z.infer<typeof V1ListFlowsQuerySchema>;
+
+/** Query daftar template WhatsApp API publik /v1 (Fase 15A) — cermin selalu per akun channel. */
+export const V1ListWhatsAppTemplatesQuerySchema = z.object({
+  channelAccountId: z.string().uuid(),
+});
+export type ListWhatsAppTemplatesQuery = z.infer<
+  typeof V1ListWhatsAppTemplatesQuerySchema
+>;
+
+/** Tier tool MCP untuk satu rute: read = jalan selalu; write = butuh MCP_ALLOW_WRITES=1. */
+export type PublicSurfaceMcpTier = "read" | "write";
+
+/**
+ * Satu rute API publik v1 dan pemetaannya ke permukaan lain.
+ *
+ * - `scope`: scope API key yang dituntut rute; null = cukup kunci sah
+ *   apa pun (hanya /v1/me).
+ * - `contractSchemas`: nama ekspor skema kontrak yang membentuk
+ *   request/response rute ini — diverifikasi check:drift benar-benar
+ *   ada di paket ini.
+ * - `sdkMethod`: nama metode pada SahabatKreatorClient; null hanya
+ *   bila disengaja dan `exclusionReason` terisi.
+ * - `mcpTool`/`mcpTier`: nama tool MCP + tiernya; null hanya bila
+ *   disengaja dan `exclusionReason` terisi.
+ */
+export interface PublicV1RouteMapping {
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  path: string;
+  scope: ApiKeyScope | null;
+  contractSchemas: string[];
+  sdkMethod: string | null;
+  mcpTool: string | null;
+  mcpTier: PublicSurfaceMcpTier | null;
+  exclusionReason?: string;
+}
+
+/**
+ * REGISTRY permukaan publik v1 — daftar kanonis semua rute /v1.
+ * Menambah rute publik = menambah entri di sini pada fase yang sama,
+ * atau check:drift gagal.
+ */
+export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
+  {
+    method: "GET",
+    path: "/v1/me",
+    scope: null,
+    contractSchemas: ["PublicMeResponseSchema"],
+    sdkMethod: "me",
+    mcpTool: "whoami",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/contacts",
+    scope: "contacts:read",
+    contractSchemas: ["V1ListContactsQuerySchema", "ContactListResponseSchema"],
+    sdkMethod: "listContacts",
+    mcpTool: "list_contacts",
+    mcpTier: "read",
+  },
+  {
+    method: "POST",
+    path: "/v1/contacts",
+    scope: "contacts:write",
+    contractSchemas: ["CreateContactRequestSchema", "ContactResponseSchema"],
+    sdkMethod: "createContact",
+    mcpTool: "create_contact",
+    mcpTier: "write",
+  },
+  {
+    method: "PATCH",
+    path: "/v1/contacts/:id",
+    scope: "contacts:write",
+    contractSchemas: ["UpdateContactRequestSchema", "ContactResponseSchema"],
+    sdkMethod: "updateContact",
+    mcpTool: "update_contact",
+    mcpTier: "write",
+  },
+  {
+    method: "GET",
+    path: "/v1/conversations",
+    scope: "conversations:read",
+    contractSchemas: [
+      "V1ListConversationsQuerySchema",
+      "ConversationListResponseSchema",
+    ],
+    sdkMethod: "listConversations",
+    mcpTool: "list_conversations",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/conversations/:id/messages",
+    scope: "conversations:read",
+    contractSchemas: ["V1ListMessagesQuerySchema", "MessageListResponseSchema"],
+    sdkMethod: "listMessages",
+    mcpTool: "list_messages",
+    mcpTier: "read",
+  },
+  {
+    method: "POST",
+    path: "/v1/conversations/:id/messages",
+    scope: "messages:write",
+    contractSchemas: ["SendMessageRequestSchema", "MessageResponseSchema"],
+    sdkMethod: "sendMessage",
+    mcpTool: "send_message",
+    mcpTier: "write",
+  },
+  {
+    method: "GET",
+    path: "/v1/products",
+    scope: "products:read",
+    contractSchemas: ["ProductListResponseSchema"],
+    sdkMethod: "listProducts",
+    mcpTool: "list_products",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/comments",
+    scope: "comments:read",
+    contractSchemas: ["V1ListCommentsQuerySchema", "CommentListResponseSchema"],
+    sdkMethod: "listComments",
+    mcpTool: "list_comments",
+    mcpTier: "read",
+  },
+  {
+    method: "POST",
+    path: "/v1/comments/:id/hide",
+    scope: "comments:write",
+    contractSchemas: ["CommentResponseSchema"],
+    sdkMethod: "hideComment",
+    mcpTool: "hide_comment",
+    mcpTier: "write",
+  },
+  {
+    method: "POST",
+    path: "/v1/comments/:id/unhide",
+    scope: "comments:write",
+    contractSchemas: ["CommentResponseSchema"],
+    sdkMethod: "unhideComment",
+    mcpTool: "unhide_comment",
+    mcpTier: "write",
+  },
+  // --- Fase 15A: permukaan BACA baru (sebelumnya dashboard-only) -------
+  {
+    method: "GET",
+    path: "/v1/broadcasts",
+    scope: "broadcasts:read",
+    contractSchemas: ["V1ListBroadcastsQuerySchema", "BroadcastListResponseSchema"],
+    sdkMethod: "listBroadcasts",
+    mcpTool: "list_broadcasts",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/broadcasts/:id",
+    scope: "broadcasts:read",
+    contractSchemas: ["BroadcastResponseSchema"],
+    sdkMethod: "getBroadcast",
+    mcpTool: "get_broadcast",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/flows",
+    scope: "flows:read",
+    contractSchemas: ["V1ListFlowsQuerySchema", "FlowListResponseSchema"],
+    sdkMethod: "listFlows",
+    mcpTool: "list_flows",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/flows/:id",
+    scope: "flows:read",
+    contractSchemas: ["FlowResponseSchema"],
+    sdkMethod: "getFlow",
+    mcpTool: "get_flow",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/flow-templates",
+    scope: "flows:read",
+    contractSchemas: ["FlowTemplateListResponseSchema"],
+    sdkMethod: "listFlowTemplates",
+    mcpTool: "list_flow_templates",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/automations",
+    scope: "automations:read",
+    contractSchemas: ["AutomationListResponseSchema"],
+    sdkMethod: "listAutomations",
+    mcpTool: "list_automations",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/automations/:id",
+    scope: "automations:read",
+    contractSchemas: ["AutomationResponseSchema"],
+    sdkMethod: "getAutomation",
+    mcpTool: "get_automation",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/agents",
+    scope: "agents:read",
+    contractSchemas: ["AgentListResponseSchema"],
+    sdkMethod: "listAgents",
+    mcpTool: "list_agents",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/agents/:id",
+    scope: "agents:read",
+    contractSchemas: ["AgentResponseSchema"],
+    sdkMethod: "getAgent",
+    mcpTool: "get_agent",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/channels",
+    scope: "channels:read",
+    contractSchemas: ["ChannelAccountListResponseSchema"],
+    sdkMethod: "listChannels",
+    mcpTool: "list_channels",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/channels/:id",
+    scope: "channels:read",
+    contractSchemas: ["ChannelAccountResponseSchema"],
+    sdkMethod: "getChannel",
+    mcpTool: "get_channel",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/whatsapp-templates",
+    scope: "whatsapp_templates:read",
+    contractSchemas: [
+      "V1ListWhatsAppTemplatesQuerySchema",
+      "WhatsAppTemplateListResponseSchema",
+    ],
+    sdkMethod: "listWhatsAppTemplates",
+    mcpTool: "list_whatsapp_templates",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/knowledge/documents",
+    scope: "knowledge:read",
+    contractSchemas: ["KbDocumentListResponseSchema"],
+    sdkMethod: "listKnowledgeDocuments",
+    mcpTool: "list_knowledge_documents",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/knowledge/documents/:id",
+    scope: "knowledge:read",
+    contractSchemas: ["KbDocumentResponseSchema"],
+    sdkMethod: "getKnowledgeDocument",
+    mcpTool: "get_knowledge_document",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/knowledge/stats",
+    scope: "knowledge:read",
+    contractSchemas: ["KbStatsResponseSchema"],
+    sdkMethod: "getKnowledgeStats",
+    mcpTool: "get_knowledge_stats",
+    mcpTier: "read",
+  },
+];

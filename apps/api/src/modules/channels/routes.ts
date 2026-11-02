@@ -72,7 +72,7 @@ function serializeChannelHealth(health: ChannelHealthInfo) {
   };
 }
 
-function serializeChannel(
+export function serializeChannel(
   row: ChannelAccount,
   avatarUrl: string | null = null,
   health: ChannelHealthInfo = IDLE_CHANNEL_HEALTH,

@@ -45,7 +45,15 @@ export type ApiKeyScope =
   | "messages:write"
   | "products:read"
   | "comments:read"
-  | "comments:write";
+  | "comments:write"
+  // Fase 15A: scope baca permukaan publik baru (kontrak sumber kebenaran).
+  | "broadcasts:read"
+  | "flows:read"
+  | "automations:read"
+  | "agents:read"
+  | "channels:read"
+  | "whatsapp_templates:read"
+  | "knowledge:read";
 
 /** Hash SHA-256 (hex) dari kunci utuh — satu-satunya bentuk yang disimpan/dicari. */
 export function hashApiKey(fullKey: string): string {

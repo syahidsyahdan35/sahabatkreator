@@ -41,6 +41,13 @@ const SCOPE_LABEL_KEYS: Record<ApiKeyScope, TranslationKey> = {
   "products:read": "settings.scopeProductsRead",
   "comments:read": "settings.scopeCommentsRead",
   "comments:write": "settings.scopeCommentsWrite",
+  "broadcasts:read": "settings.scopeBroadcastsRead",
+  "flows:read": "settings.scopeFlowsRead",
+  "automations:read": "settings.scopeAutomationsRead",
+  "agents:read": "settings.scopeAgentsRead",
+  "channels:read": "settings.scopeChannelsRead",
+  "whatsapp_templates:read": "settings.scopeWhatsappTemplatesRead",
+  "knowledge:read": "settings.scopeKnowledgeRead",
 };
 
 /** Scope read tercentang secara bawaan di form (selaras default API). */

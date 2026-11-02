@@ -32,7 +32,7 @@ import { apiError, type AppContext, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeDocument(row: KbDocumentWithChunkCount): KbDocumentResponse {
+export function serializeDocument(row: KbDocumentWithChunkCount): KbDocumentResponse {
   return KbDocumentResponseSchema.parse({
     id: row.id,
     title: row.title,

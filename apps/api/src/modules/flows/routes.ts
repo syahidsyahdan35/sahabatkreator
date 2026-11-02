@@ -76,7 +76,7 @@ import { resolveTenantForUser } from "../tenants/guard";
  * terjangkau) tidak memblokir dan ikut dikembalikan saat sukses.
  */
 
-function serializeFlow(flow: FlowWithRunCount): FlowResponse {
+export function serializeFlow(flow: FlowWithRunCount): FlowResponse {
   return FlowResponseSchema.parse({
     id: flow.id,
     name: flow.name,

@@ -277,12 +277,23 @@ routes.route("/", createPayRoutes(authBundle));
 // Modul api-keys (Fase 5A) — manajemen kunci workspace /tenants/:tenantId/api-keys (sesi + owner/admin).
 routes.route("/", createApiKeysRoutes(authBundle));
 // Modul API publik /v1 (Fase 5A) — auth API key per tenant, tenant dari kunci (bukan URL).
+// Fase 15A: deps KB diteruskan agar /v1/knowledge/stats me-resolve status
+// provider embedding dengan resolver yang sama seperti modul knowledge.
 routes.route(
   "/",
-  createPublicV1Routes(authBundle, realtimePublisher, {
-    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
-    metaApiBase: env.META_API_BASE,
-  }),
+  createPublicV1Routes(
+    authBundle,
+    realtimePublisher,
+    {
+      channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+      metaApiBase: env.META_API_BASE,
+    },
+    {
+      platform: platformOptions,
+      embeddingProviderEnv: env.EMBEDDING_PROVIDER,
+      embeddingModelEnv: env.OPENROUTER_EMBEDDING_MODEL,
+    },
+  ),
 );
 // Modul webchat publik (Fase 1F) — API widget pengunjung /webchat/*.
 routes.route("/", createWebchatRoutes(authBundle, webchatOpts));

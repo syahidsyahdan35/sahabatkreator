@@ -1,46 +1,85 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import {
+  AgentListResponseSchema,
+  AutomationListResponseSchema,
+  BroadcastListResponseSchema,
+  ChannelAccountListResponseSchema,
   CommentListResponseSchema,
   ContactListResponseSchema,
   ConversationListResponseSchema,
   ConversationStatusSchema,
   CreateContactRequestSchema,
+  FLOW_TEMPLATES,
+  FlowListResponseSchema,
+  FlowTemplateListResponseSchema,
+  KbDocumentListResponseSchema,
+  KbStatsResponseSchema,
   MessageListResponseSchema,
   ProductListResponseSchema,
   PublicMeResponseSchema,
   SendMessageRequestSchema,
   UpdateContactRequestSchema,
+  V1ListBroadcastsQuerySchema,
   V1ListCommentsQuerySchema,
+  V1ListFlowsQuerySchema,
+  V1ListWhatsAppTemplatesQuerySchema,
+  WhatsAppTemplateListResponseSchema,
   type ApiKeyScope,
 } from "@sahabat-kreator/contracts";
 import {
   createContact,
+  getAgent,
+  getBroadcast,
+  getChannelAccount,
+  getChannelHealthMap,
+  getKbDocument,
+  getKbEmbeddingStats,
   getTenantNameById,
   hashApiKey,
+  IDLE_CHANNEL_HEALTH,
+  listAgents,
+  listAutomations,
+  listBroadcasts,
+  listChannelAccounts,
   listComments,
   listContacts,
   listConversations,
+  listFlows,
+  getFlow,
+  listKbDocuments,
   listMessages,
   listProducts,
+  listProfilePhotoOwnerIds,
+  listWhatsAppTemplates,
   queueOutboundMessageForApiKey,
   resolveApiKeyByHash,
+  resolveEmbeddingProvider,
   touchApiKeyLastUsed,
   updateContact,
   API_KEY_DISPLAY_PREFIX,
+  type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type ApiKeyAuthContext, type AppVariables } from "../../http";
+import { serializeAgent } from "../agents/routes";
+import { serializeAutomation } from "../automations/routes";
+import { channelAvatarUrl } from "../avatars/routes";
+import { serializeBroadcast } from "../broadcasts/routes";
+import { serializeChannel } from "../channels/routes";
 import {
   performCommentModeration,
   serializeComment,
   type CommentsModuleOptions,
 } from "../comments/routes";
 import { serializeContact } from "../contacts/routes";
+import { serializeFlow } from "../flows/routes";
 import { serializeConversation } from "../inbox/routes";
+import { serializeDocument } from "../knowledge/routes";
 import { serializeMessage } from "../messages-serialize";
 import { serializeProduct } from "../products/routes";
+import { serializeTemplate } from "../whatsapp-templates/routes";
 
 const ListContactsQuerySchema = z.object({
   search: z.string().max(255).optional(),
@@ -90,13 +129,48 @@ function extractPresentedKey(headers: Headers): string | null {
  *   POST /v1/comments/:id/unhide (comments:write) Graph dulu, lokal
  *                                                sesudahnya (helper yang
  *                                                sama dengan dashboard)
+ *   --- Fase 15A: permukaan BACA untuk sumber daya yang sebelumnya
+ *       hanya dashboard (aturan sinkronisasi kontrak; tulis tetap
+ *       dashboard-only — lihat docs/COVERAGE-MATRIX.md) ---
+ *   GET  /v1/broadcasts          (broadcasts:read)  daftar (kursor)
+ *   GET  /v1/broadcasts/:id      (broadcasts:read)  detail + statistik
+ *   GET  /v1/flows               (flows:read)       daftar (kursor)
+ *   GET  /v1/flows/:id           (flows:read)       detail + graf
+ *   GET  /v1/flow-templates      (flows:read)       katalog template
+ *   GET  /v1/automations         (automations:read) daftar
+ *   GET  /v1/automations/:id     (automations:read) detail
+ *   GET  /v1/agents              (agents:read)      daftar
+ *   GET  /v1/agents/:id          (agents:read)      detail
+ *   GET  /v1/channels            (channels:read)    daftar + kesehatan
+ *   GET  /v1/channels/:id        (channels:read)    detail + kesehatan
+ *   GET  /v1/whatsapp-templates  (whatsapp_templates:read)
+ *                                                 cermin per akun (?channelAccountId=)
+ *   GET  /v1/knowledge/documents (knowledge:read)   entri KB
+ *   GET  /v1/knowledge/documents/:id (knowledge:read)
+ *   GET  /v1/knowledge/stats     (knowledge:read)   cakupan embedding
  * Penolakan: tanpa/bukan kunci → 401 API_KEY_INVALID; kunci dicabut → 401
  * API_KEY_REVOKED; scope kurang → 403 API_KEY_SCOPE_DENIED.
+ * Registry kanonis permukaan ini: PUBLIC_V1_SURFACE di
+ * @sahabat-kreator/contracts (dijaga skrip check:drift).
  */
+
+/**
+ * Dependensi status semantik KB (Fase 15A): resolver Panel Admin proses
+ * API + env embedding — deps yang sama seperti modul knowledge, agar
+ * /v1/knowledge/stats melaporkan provider yang benar-benar di-resolve
+ * proses ini. Tanpa deps, status dilaporkan nonaktif.
+ */
+export interface PublicV1KbDeps {
+  platform?: PlatformSettingsOptions;
+  embeddingProviderEnv?: string;
+  embeddingModelEnv?: string;
+}
+
 export function createPublicV1Routes(
   bundle: AuthBundle | null,
   publisher?: RealtimePublisher | null,
   commentOpts: CommentsModuleOptions = {},
+  kbDeps: PublicV1KbDeps = {},
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -381,6 +455,322 @@ export function createPublicV1Routes(
 
   app.post("/v1/comments/:id/hide", moderateComment(true));
   app.post("/v1/comments/:id/unhide", moderateComment(false));
+
+  // ---------------------------------------------------------------------
+  // Fase 15A — permukaan BACA baru. Semua endpoint di bawah ini murni
+  // membaca lewat service core dalam konteks tenant pemilik kunci, dan
+  // memakai serializer yang SAMA dengan dashboard (tidak ada bentuk
+  // respons kedua yang bisa drift). Paginasi mengikuti pola sumber
+  // dayanya di dashboard: broadcast & flow berkursor; sisanya daftar
+  // penuh (daftar dashboard-nya memang tak berpaginasi).
+  // ---------------------------------------------------------------------
+
+  const parseUuidParam = (c: { req: { param: (k: string) => string } }) => {
+    const id = c.req.param("id");
+    return z.string().uuid().safeParse(id).success ? id : null;
+  };
+
+  app.get("/v1/broadcasts", async (c) => {
+    const denied = requireScope(c, "broadcasts:read");
+    if (denied) return denied;
+    const query = V1ListBroadcastsQuerySchema.safeParse({
+      status: c.req.query("status") || undefined,
+      cursor: c.req.query("cursor") || undefined,
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    });
+    if (!query.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
+    }
+    const auth = c.get("apiKeyAuth");
+    const page = await listBroadcasts(bundle.db, {
+      tenantId: auth.tenantId,
+      status: query.data.status,
+      cursor: query.data.cursor,
+      limit: query.data.limit,
+    });
+    const body = BroadcastListResponseSchema.parse({
+      broadcasts: page.broadcasts.map((b) => serializeBroadcast(b, b.stats)),
+      nextCursor: page.nextCursor,
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/broadcasts/:id", async (c) => {
+    const denied = requireScope(c, "broadcasts:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const auth = c.get("apiKeyAuth");
+    const result = await getBroadcast(bundle.db, {
+      tenantId: auth.tenantId,
+      broadcastId: id,
+    });
+    if (!result) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    return c.json(serializeBroadcast(result.broadcast, result.stats));
+  });
+
+  app.get("/v1/flows", async (c) => {
+    const denied = requireScope(c, "flows:read");
+    if (denied) return denied;
+    const query = V1ListFlowsQuerySchema.safeParse({
+      status: c.req.query("status") || undefined,
+      cursor: c.req.query("cursor") || undefined,
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    });
+    if (!query.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
+    }
+    const auth = c.get("apiKeyAuth");
+    const page = await listFlows(bundle.db, {
+      tenantId: auth.tenantId,
+      status: query.data.status,
+      cursor: query.data.cursor,
+      limit: query.data.limit,
+    });
+    const body = FlowListResponseSchema.parse({
+      flows: page.flows.map(serializeFlow),
+      nextCursor: page.nextCursor,
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/flows/:id", async (c) => {
+    const denied = requireScope(c, "flows:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Flow not found");
+    const auth = c.get("apiKeyAuth");
+    const flow = await getFlow(bundle.db, { tenantId: auth.tenantId, flowId: id });
+    if (!flow) return apiError(c, 404, "NOT_FOUND", "Flow not found");
+    return c.json(serializeFlow(flow));
+  });
+
+  app.get("/v1/flow-templates", async (c) => {
+    const denied = requireScope(c, "flows:read");
+    if (denied) return denied;
+    // Katalog statis dari kontrak (sumber kebenaran bersama, Fase 12B) —
+    // ringkasan yang sama seperti endpoint dashboard.
+    const body = FlowTemplateListResponseSchema.parse({
+      templates: FLOW_TEMPLATES.map((tpl) => ({
+        slug: tpl.slug,
+        nameKey: tpl.nameKey,
+        descriptionKey: tpl.descriptionKey,
+        category: tpl.category,
+        nodeCount: tpl.graph.nodes.length,
+        needs: tpl.needs,
+      })),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/automations", async (c) => {
+    const denied = requireScope(c, "automations:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listAutomations(bundle.db, { tenantId: auth.tenantId });
+    const body = AutomationListResponseSchema.parse({
+      automations: rows.map(serializeAutomation),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/automations/:id", async (c) => {
+    const denied = requireScope(c, "automations:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Automation not found");
+    const auth = c.get("apiKeyAuth");
+    // Pola yang sama seperti PATCH dashboard: bentuk WithRunCount hanya
+    // dihasilkan listAutomations — ambil dari daftar tenant sendiri.
+    const rows = await listAutomations(bundle.db, { tenantId: auth.tenantId });
+    const row = rows.find((r) => r.id === id);
+    if (!row) return apiError(c, 404, "NOT_FOUND", "Automation not found");
+    return c.json(serializeAutomation(row));
+  });
+
+  app.get("/v1/agents", async (c) => {
+    const denied = requireScope(c, "agents:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listAgents(bundle.db, { tenantId: auth.tenantId });
+    const body = AgentListResponseSchema.parse({
+      agents: rows.map(serializeAgent),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/agents/:id", async (c) => {
+    const denied = requireScope(c, "agents:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Agent not found");
+    const auth = c.get("apiKeyAuth");
+    const agent = await getAgent(bundle.db, { tenantId: auth.tenantId }, id);
+    if (!agent) return apiError(c, 404, "NOT_FOUND", "Agent not found");
+    return c.json(serializeAgent(agent));
+  });
+
+  app.get("/v1/channels", async (c) => {
+    const denied = requireScope(c, "channels:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listChannelAccounts(bundle.db, {
+      tenantId: auth.tenantId,
+    });
+    // Sama seperti daftar dashboard: avatarUrl dari foto tersimpan +
+    // kesehatan agregat satu peta. Perbedaan sadar: jalur v1 TIDAK
+    // memicu backfill malas foto bot Telegram (efek samping penulisan
+    // tidak boleh lahir dari bacaan API key).
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      "channel_account",
+      rows.map((r) => r.id),
+    );
+    const healthMap = await getChannelHealthMap(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      rows,
+    );
+    const body = ChannelAccountListResponseSchema.parse({
+      channels: rows.map((row) =>
+        serializeChannel(
+          row,
+          withPhoto.has(row.id)
+            ? channelAvatarUrl(auth.tenantId, row.id)
+            : null,
+          healthMap.get(row.id) ?? IDLE_CHANNEL_HEALTH,
+        ),
+      ),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/channels/:id", async (c) => {
+    const denied = requireScope(c, "channels:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    const auth = c.get("apiKeyAuth");
+    const row = await getChannelAccount(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      id,
+    );
+    // Akun di Sampah tidak terekspos permukaan publik (selaras daftar).
+    if (!row || row.trashedAt) {
+      return apiError(c, 404, "NOT_FOUND", "Channel not found");
+    }
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      "channel_account",
+      [row.id],
+    );
+    const healthMap = await getChannelHealthMap(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      [row],
+    );
+    return c.json(
+      serializeChannel(
+        row,
+        withPhoto.has(row.id) ? channelAvatarUrl(auth.tenantId, row.id) : null,
+        healthMap.get(row.id) ?? IDLE_CHANNEL_HEALTH,
+      ),
+    );
+  });
+
+  app.get("/v1/whatsapp-templates", async (c) => {
+    const denied = requireScope(c, "whatsapp_templates:read");
+    if (denied) return denied;
+    const query = V1ListWhatsAppTemplatesQuerySchema.safeParse({
+      channelAccountId: c.req.query("channelAccountId") || undefined,
+    });
+    if (!query.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
+    }
+    const auth = c.get("apiKeyAuth");
+    // Gerbang yang sama seperti dashboard: akun harus milik tenant ini,
+    // tidak di Sampah, dan provider WhatsApp.
+    const account = await getChannelAccount(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      query.data.channelAccountId,
+    );
+    if (!account || account.trashedAt) {
+      return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+    }
+    if (account.provider !== "whatsapp") {
+      return apiError(
+        c,
+        400,
+        "VALIDATION_ERROR",
+        "Channel account is not a WhatsApp account",
+      );
+    }
+    const rows = await listWhatsAppTemplates(bundle.db, {
+      tenantId: auth.tenantId,
+      channelAccountId: query.data.channelAccountId,
+    });
+    const body = WhatsAppTemplateListResponseSchema.parse({
+      templates: rows.map(serializeTemplate),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/knowledge/documents", async (c) => {
+    const denied = requireScope(c, "knowledge:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listKbDocuments(bundle.db, { tenantId: auth.tenantId });
+    const body = KbDocumentListResponseSchema.parse({
+      documents: rows.map(serializeDocument),
+    });
+    return c.json(body);
+  });
+
+  app.get("/v1/knowledge/documents/:id", async (c) => {
+    const denied = requireScope(c, "knowledge:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Document not found");
+    const auth = c.get("apiKeyAuth");
+    const doc = await getKbDocument(bundle.db, { tenantId: auth.tenantId }, id);
+    if (!doc) return apiError(c, 404, "NOT_FOUND", "Document not found");
+    return c.json(serializeDocument(doc));
+  });
+
+  app.get("/v1/knowledge/stats", async (c) => {
+    const denied = requireScope(c, "knowledge:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const stats = await getKbEmbeddingStats(bundle.db, {
+      tenantId: auth.tenantId,
+    });
+    // Semantik persis endpoint dashboard /kb/stats: status provider
+    // di-resolve dari deps proses API (panel → env), bukan ditebak.
+    let semanticSearch = {
+      active: false,
+      provider: null as string | null,
+      model: null as string | null,
+    };
+    if (kbDeps.platform) {
+      const provider = await resolveEmbeddingProvider(bundle.db, {
+        platform: kbDeps.platform,
+        providerEnv: kbDeps.embeddingProviderEnv,
+        modelEnv: kbDeps.embeddingModelEnv,
+      }).catch(() => null);
+      if (provider) {
+        semanticSearch = {
+          active: true,
+          provider: provider.name,
+          model: provider.model,
+        };
+      }
+    }
+    return c.json(KbStatsResponseSchema.parse({ ...stats, semanticSearch }));
+  });
 
   return app;
 }

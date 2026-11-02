@@ -59,7 +59,7 @@ export interface WhatsAppTemplatesModuleOptions {
   metaApiBase?: string;
 }
 
-function serializeTemplate(row: WhatsAppTemplate): WhatsAppTemplateResponse {
+export function serializeTemplate(row: WhatsAppTemplate): WhatsAppTemplateResponse {
   return WhatsAppTemplateResponseSchema.parse({
     id: row.id,
     channelAccountId: row.channelAccountId,

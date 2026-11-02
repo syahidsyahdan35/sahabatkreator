@@ -32,7 +32,7 @@ import { apiError, type AppContext, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeAgent(row: Agent): AgentResponse {
+export function serializeAgent(row: Agent): AgentResponse {
   return AgentResponseSchema.parse({
     id: row.id,
     name: row.name,

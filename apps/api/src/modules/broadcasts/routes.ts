@@ -64,7 +64,7 @@ import { resolveTenantForUser } from "../tenants/guard";
  * 409 BROADCAST_INVALID_STATE.
  */
 
-function serializeBroadcast(
+export function serializeBroadcast(
   broadcast: BroadcastWithChannel,
   stats: BroadcastStats,
 ): BroadcastResponse {

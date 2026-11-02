@@ -29,7 +29,7 @@ import { apiError, type AppContext, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeAutomation(row: AutomationWithRunCount): AutomationResponse {
+export function serializeAutomation(row: AutomationWithRunCount): AutomationResponse {
   return AutomationResponseSchema.parse({
     id: row.id,
     name: row.name,
