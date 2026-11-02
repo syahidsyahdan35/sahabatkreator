@@ -3748,3 +3748,121 @@ build lokal & memuat UI OAuth.
 - Bukti visual (tombol Facebook, dialog pemilih, banner) menunggu uji
   user sesuai pembagian kerja — yang terbukti: kontrak API, perilaku
   server, bundle tersaji, dan rantai end-to-end di atas.
+
+---
+
+## Update Fase 7D.1 — Halaman Legal Publik + hotfix prompt=login OAuth IG (2026-11-02)
+
+Dua pekerjaan, dua commit fitur terpisah: `68baccf` (halaman legal) dan
+`7904525` (hotfix prompt=login).
+
+### Halaman legal publik
+
+App Review Meta mensyaratkan URL Kebijakan Privasi + URL instruksi
+penghapusan data yang dapat dibuka publik; sebelum fase ini keduanya
+BELUM ADA. Kini ada tiga halaman publik dwibahasa di luar shell &
+tanpa sesi, mengikuti locale aktif pengunjung:
+
+- `GET /privacy` — Kebijakan Privasi (12 seksi)
+- `GET /terms` — Syarat Layanan (11 seksi)
+- `GET /data-deletion` — Penghapusan Data Pengguna (7 seksi; URL
+  instruksi penghapusan data untuk didaftarkan ke aplikasi Meta)
+
+Struktur: komponen bersama `apps/web/src/pages/LegalPage.tsx` (header
+ringkas: nama produk + kontrol bahasa/tema yang sama seperti permukaan
+standalone lain + tautan kembali; kaki: tautan silang antar ketiga
+halaman lewat `components/LegalLinks.tsx`) dan manifest struktur di
+komponen yang hanya merakit kunci — SELURUH teks hidup sebagai
+resource i18n terstruktur `legal.*` (judul seksi + paragraf + daftar
+butir) di `packages/i18n/src/resources/en.ts` & `id.ts`, tanpa string
+hardcoded. Tanggal berlaku: **2 November 2026** (kunci
+`legal.effectiveDate`).
+
+Isi ditulis akurat terhadap perilaku produk yang SUDAH dibangun —
+tidak mengklaim fitur/sertifikasi yang tidak ada:
+
+- Privacy: peran ganda (pengendali untuk data akun Kreator vs
+  pemroses untuk data Pelanggan Akhir atas nama Kreator); kategori
+  data (akun, kredensial channel yang disimpan TERENKRIPSI, isi
+  pesan & kontak, data pemakaian); data platform Meta/Telegram hanya
+  untuk mengoperasikan channel pemiliknya, tidak dijual, tidak untuk
+  iklan/profiling pihak ketiga; pemrosesan AI — isi pesan diteruskan
+  ke OpenRouter bila agen AI aktif; penyimpanan database + Cloudflare
+  R2; retensi nyata (log integrasi 30 hari; purge channel 30 hari
+  setelah masuk Sampah; token dihapus saat disconnect); cookie
+  esensial sesi saja; hak akses/koreksi/hapus; keamanan (enkripsi
+  envelope AES-256-GCM, isolasi per tenant); anak; perubahan; kontak.
+- Terms: deskripsi layanan; akun & kelayakan; tanggung jawab
+  pengguna (kepemilikan/otorisasi channel, kepatuhan kebijakan
+  Meta/WhatsApp/Telegram + hukum anti-spam & PDP yang berlaku,
+  larangan penyalahgunaan); konten AI dapat tidak akurat — pengguna
+  bertanggung jawab meninjau & atas pesan yang terkirim dari
+  channel-nya; sifat layanan tahap awal (staging/beta) disampaikan
+  apa adanya; kekayaan intelektual; biaya tahap ini; batas tanggung
+  jawab wajar; penghentian; hukum yang berlaku = Republik Indonesia.
+- Data deletion: disconnect menghapus token seketika; Sampah →
+  purge permanen setelah tenggang 30 hari (percakapan/pesan/
+  identitas/media channel terhapus; kontak, log audit, catatan
+  pemakaian TIDAK ikut — sesuai perilaku Fase 6I); data Meta terhapus
+  lewat jalur yang sama; penghapusan menyeluruh akun/workspace lewat
+  email dari alamat terdaftar — **penghapusan mandiri dalam aplikasi
+  BELUM ada dan dikatakan apa adanya**; retensi terbatas log
+  audit/keamanan; komitmen pemrosesan ≤30 hari.
+
+Email kontak yang diterbitkan: **`support@botara.my.id`** (konstanta
+`LEGAL_CONTACT_EMAIL` di `LegalPage.tsx`, diinterpolasi ke resource
+lewat `{email}`). ⚠️ **Alamat ini PILIHAN AWAL yang harus
+dikonfirmasi user** — belum diverifikasi sebagai kotak surat yang
+aktif/dibaca; bila user memilih alamat lain, cukup ubah satu
+konstanta itu.
+
+Tautan: footer "Privasi · Syarat · Penghapusan Data" tampil di
+`/login` dan `/register` (prop `footer` baru di `AuthLayout` +
+`LegalLinks`), tautan silang di kaki tiap halaman legal. Tautan di
+shell (Pengaturan) SENGAJA tidak ditambah: `SettingsPage` tidak
+memiliki plumbing navigasi dan manfaatnya kecil dibanding risiko
+mengubah kontrak props shell — footer auth + tautan silang +
+Panel Admin sudah menjangkau semua kebutuhan (termasuk App Review).
+
+Panel Admin: grup Meta kini menampilkan tiga URL legal sebagai baris
+read-only dengan tombol salin (`CopyableUrlRow` di `AdminPage.tsx`,
+label `admin.metaPrivacyUrlLabel` / `metaTermsUrlLabel` /
+`metaDeletionUrlLabel`), bersebelahan dengan baris Redirect URI
+OAuth. Nilainya diturunkan dari `window.location.origin` + path
+tetap (`LEGAL_PATHS`), jadi selalu menunjuk domain publik aktif.
+
+### Hotfix prompt=login (commit `7904525`)
+
+Pembuat URL dialog OAuth Instagram di
+`apps/api/src/modules/meta-oauth/routes.ts` kini menambahkan
+`prompt=login` — sesuai dokumen Unified Login terverifikasi, dialog
+selalu menampilkan pemilih akun termasuk opsi login Instagram
+(konfigurasi IG user berlabel Instagram Login Compatible); tanpa
+parameter ini pengguna yang sudah login Facebook diteruskan sebagai
+akun itu tanpa pilihan. Messenger (scope klasik) & WhatsApp
+(Embedded Signup) TIDAK diubah. Assertion rantai 7D di
+`/tmp/sk7d-local/chain.ts` diperbarui (IG: prompt=login ada; WA &
+Messenger: prompt tidak ada).
+
+### Verifikasi (tanpa Playwright)
+
+- Typecheck i18n + web + api hijau; build web & api hijau. Bundle
+  publik `index-1ql1EauZ.js` identik dengan build lokal dan memuat
+  judul ketiga halaman dalam KEDUA locale (Privacy Policy /
+  Kebijakan Privasi, Terms of Service / Syarat Layanan, Data
+  Deletion / Penghapusan Data), path `/data-deletion`, dan email
+  kontak yang diterbitkan.
+- Publik: `GET /privacy`, `/terms`, `/data-deletion`, `/login`,
+  `/register` → 200; 4 service systemd active; `/api/health` ok.
+- Rantai assertion URL ringan di server (driver `/tmp/sk7d1/`,
+  pola jendela uji 7D — admin uji di allowlist, panel dummy diisi
+  lalu DIBERSIHKAN, `.env.staging` pulih byte-identik): **18/18
+  PASS** — dialog IG memakai config_id + `prompt=login` tanpa scope;
+  dialog WA config_id tanpa prompt; dialog Messenger path
+  `/v26.0/dialog/oauth` + scope klasik tanpa prompt; sesudah
+  pembersihan panel, ketiga provider kembali tidak tersedia.
+- Batas jujur: bukti visual halaman legal (rendering, footer di
+  halaman auth, baris Panel Admin) menunggu uji user sesuai
+  pembagian kerja; yang terbukti di sini adalah typecheck, build,
+  bundle tersaji identik, status HTTP publik, dan rantai URL di
+  atas. Dialog Meta asli tetap di luar jangkauan (lihat batas 7D).
