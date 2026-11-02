@@ -114,6 +114,28 @@ function laterOf(a: Date | null, b: Date | null): Date | null {
   return a.getTime() >= b.getTime() ? a : b;
 }
 
+/**
+ * Normalisasi nilai waktu dari proyeksi SQL mentah: agregat
+ * `max(timestamptz)` lewat templat `sql` Drizzle TIDAK melewati pemeta
+ * kolom, jadi driver mengembalikannya sebagai STRING format Postgres
+ * ("2026-11-02 07:23:35.998333+00"), bukan objek Date — beda dari
+ * pembacaan kolom biasa. Ubah kembali ke Date di sini; string yang
+ * tidak dikenal diperlakukan null (fakta diabaikan, bukan ditebak).
+ */
+function toDate(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "string") {
+    // "2026-11-02 07:23:35.998333+00" → "2026-11-02T07:23:35.998333+00:00"
+    const iso = value.replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00");
+    const parsed = new Date(iso);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
 /** Kondisi SQL "baris ini adalah sinyal kegagalan" (lihat komentar modul). */
 const FAILURE_CONDITION = sql`(
   (${integrationLog.direction} = 'in' and ${integrationLog.outcome} in ('rejected_signature', 'rejected_unconfigured', 'unresolved_account', 'error', 'ignored_disconnected'))
@@ -122,11 +144,12 @@ const FAILURE_CONDITION = sql`(
 
 interface LogAggregateRow {
   channelAccountId: string | null;
-  lastInboundAt: Date | null;
+  /** Stempel dari proyeksi SQL mentah — dinormalisasi lewat `toDate`. */
+  lastInboundAt: unknown;
   lastInboundOutcome: string | null;
-  lastHealthyAt: Date | null;
-  lastDeliveredAt: Date | null;
-  lastFailureAt: Date | null;
+  lastHealthyAt: unknown;
+  lastDeliveredAt: unknown;
+  lastFailureAt: unknown;
   lastFailureOutcome: string | null;
   lastFailureErrorCode: string | null;
 }
@@ -185,19 +208,23 @@ export async function getChannelHealthMap(
 
       for (const row of rows) {
         if (!row.channelAccountId) continue;
+        const lastInboundAt = toDate(row.lastInboundAt);
+        const lastHealthyAt = toDate(row.lastHealthyAt);
+        const lastDeliveredAt = toDate(row.lastDeliveredAt);
+        const lastFailureAt = toDate(row.lastFailureAt);
         const hasActivity = Boolean(
-          row.lastInboundAt || row.lastDeliveredAt || row.lastFailureAt,
+          lastInboundAt || lastDeliveredAt || lastFailureAt,
         );
         result.set(row.channelAccountId, {
           status: computeChannelHealthStatus({
             hasActivity,
-            lastHealthyAt: row.lastHealthyAt,
-            lastFailureAt: row.lastFailureAt,
+            lastHealthyAt,
+            lastFailureAt,
           }),
-          lastInboundAt: row.lastInboundAt,
+          lastInboundAt,
           lastInboundOutcome: row.lastInboundOutcome,
-          lastDeliveredAt: row.lastDeliveredAt,
-          lastFailureAt: row.lastFailureAt,
+          lastDeliveredAt,
+          lastFailureAt,
           lastFailureOutcome: row.lastFailureOutcome,
           lastFailureErrorCode: row.lastFailureErrorCode,
         });
@@ -247,10 +274,13 @@ export async function getChannelHealthMap(
         .groupBy(conversations.channelAccountId);
 
       const inboundById = new Map(
-        inboundRows.map((r) => [r.channelAccountId, r.lastInboundAt]),
+        inboundRows.map((r) => [r.channelAccountId, toDate(r.lastInboundAt)]),
       );
       const deliveredById = new Map(
-        deliveredRows.map((r) => [r.channelAccountId, r.lastDeliveredAt]),
+        deliveredRows.map((r) => [
+          r.channelAccountId,
+          toDate(r.lastDeliveredAt),
+        ]),
       );
       for (const accountId of webchatIds) {
         const lastInboundAt = inboundById.get(accountId) ?? null;
