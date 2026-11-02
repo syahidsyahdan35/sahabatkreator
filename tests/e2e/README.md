@@ -2,7 +2,8 @@
 
 Suite pengujian browser SUNGGUHAN (Fase QA-1) terhadap aplikasi yang live:
 alur auth, workspace, kontak, webchat dua arah, automation keyword &
-sequence, persetujuan saran AI agent, produk & pembayaran simulasi, serta
+sequence, persetujuan saran AI agent, produk & pembayaran simulasi, API
+keys (buat/cabut lewat Settings, dipakai ke API publik /api/v1), serta
 UX shell (bahasa, tema, mobile).
 
 ## Cara menjalankan
@@ -24,7 +25,7 @@ E2E_BASE_URL=https://botara.my.id pnpm --filter @sahabat-kreator/e2e test
 VM ke domain publik selalu timeout (artefak proxy egress VM), sedangkan
 dari server, POST ke `https://botara.my.id` lancar (terbukti di semua fase
 pengembangan). Inilah jalur yang benar-benar dipakai sejak Fase QA-1
-(hasil run penuh: 13/13 lulus, ±3,5 menit).
+(hasil run penuh terakhir, Fase QA-2: 14/14 lulus, ±3,5 menit).
 
 Persiapan server (semuanya per-user, TANPA sudo — sudo di server meminta
 password):
