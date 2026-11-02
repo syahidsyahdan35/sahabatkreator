@@ -177,6 +177,8 @@ export const automationRuns = pgTable(
   },
   (t) => [
     index("automation_runs_tenant_id_idx").on(t.tenantId),
+    index("automation_runs_contact_id_idx").on(t.contactId),
+    index("automation_runs_conversation_id_idx").on(t.conversationId),
     index("automation_runs_automation_created_idx").on(
       t.automationId,
       t.createdAt,
@@ -263,6 +265,7 @@ export const sequenceEnrollments = pgTable(
   },
   (t) => [
     index("sequence_enrollments_tenant_id_idx").on(t.tenantId),
+    index("sequence_enrollments_contact_id_idx").on(t.contactId),
     index("sequence_enrollments_conversation_idx").on(
       t.tenantId,
       t.conversationId,

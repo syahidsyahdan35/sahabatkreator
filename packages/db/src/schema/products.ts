@@ -110,6 +110,8 @@ export const paymentLinks = pgTable(
     index("payment_links_tenant_id_idx").on(t.tenantId),
     index("payment_links_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("payment_links_product_idx").on(t.productId),
+    index("payment_links_contact_id_idx").on(t.contactId),
+    index("payment_links_conversation_id_idx").on(t.conversationId),
     uniqueIndex("payment_links_code_unique").on(t.code),
     check("payment_links_amount_idr_nonnegative", sql`${t.amountIdr} >= 0`),
   ],

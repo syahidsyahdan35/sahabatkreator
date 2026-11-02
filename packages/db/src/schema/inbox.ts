@@ -5,7 +5,6 @@ import {
   index,
   integer,
   jsonb,
-  numeric,
   pgEnum,
   pgTable,
   text,
@@ -83,7 +82,6 @@ export const contacts = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     email: varchar("email", { length: 320 }),
     phone: varchar("phone", { length: 32 }),
-    avatarUrl: text("avatar_url"),
     tags: text("tags").array().notNull().default([]),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** Tahap pipeline penjualan, mis. 'new' | 'engaged' | 'qualified' | 'customer'. */
@@ -217,8 +215,6 @@ export const messages = pgTable(
     /** Id pesan di provider; dipakai untuk dedup webhook & rekonsiliasi status. */
     providerMessageId: varchar("provider_message_id", { length: 255 }),
     status: messageStatusEnum("status").notNull().default("received"),
-    /** Biaya provider untuk pesan ini (mis. tarif per-pesan WhatsApp, §12.5). */
-    providerCost: numeric("provider_cost", { precision: 18, scale: 6 }),
     errorCode: varchar("error_code", { length: 128 }),
     /** User pengirim untuk pesan outbound manual dari inbox (sender_type='user'). */
     sentByUserId: uuid("sent_by_user_id").references(() => users.id, {

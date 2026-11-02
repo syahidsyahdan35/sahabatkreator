@@ -149,6 +149,7 @@ export const flowRuns = pgTable(
   (t) => [
     index("flow_runs_tenant_id_idx").on(t.tenantId),
     index("flow_runs_flow_id_idx").on(t.flowId),
+    index("flow_runs_contact_id_idx").on(t.contactId),
     index("flow_runs_conversation_id_idx").on(t.conversationId),
     index("flow_runs_tenant_status_idx").on(t.tenantId, t.status),
     uniqueIndex("flow_runs_flow_trigger_message_unique")

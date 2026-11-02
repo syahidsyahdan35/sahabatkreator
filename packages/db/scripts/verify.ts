@@ -2224,5 +2224,46 @@ function oneHotVector(index: number): string {
   );
 }
 
+// ---------- 34. Fase 11A: normalisasi skema (migrasi 0040) ----------
+{
+  // Dua kolom warisan yang dijatuhkan 0040 tidak boleh ada lagi.
+  const dropped = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND ((table_name = 'contacts' AND column_name = 'avatar_url')
+          OR (table_name = 'messages' AND column_name = 'provider_cost'))`,
+  );
+  assert.equal(dropped.rows[0].count, "0");
+
+  // 12 index FK baru dari 0040 semuanya terpasang.
+  const idx = await db.query<{ indexname: string }>(
+    `SELECT indexname FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname IN (
+        'agent_suggestions_agent_id_idx', 'agent_suggestions_contact_id_idx',
+        'automation_runs_contact_id_idx', 'automation_runs_conversation_id_idx',
+        'broadcast_recipients_contact_id_idx',
+        'broadcast_recipients_conversation_id_idx',
+        'comments_contact_id_idx', 'comments_conversation_id_idx',
+        'flow_runs_contact_id_idx',
+        'payment_links_contact_id_idx', 'payment_links_conversation_id_idx',
+        'sequence_enrollments_contact_id_idx')`,
+  );
+  assert.equal(idx.rows.length, 12);
+
+  // Jumlah tabel & policy tidak berubah oleh normalisasi (44 / 57).
+  const counts = await db.query<{ tables: string; policies: string }>(
+    `SELECT
+       (SELECT count(*)::text FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_type = 'BASE TABLE') AS tables,
+       (SELECT count(*)::text FROM pg_policies
+         WHERE schemaname = 'public') AS policies`,
+  );
+  assert.equal(counts.rows[0].tables, "44");
+  assert.equal(counts.rows[0].policies, "57");
+  console.log(
+    "[34] Fase 11A: migrasi 0040 — contacts.avatar_url & messages.provider_cost terjatuhkan, 12 index FK baru terpasang, tabel tetap 44 & policy tetap 57: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

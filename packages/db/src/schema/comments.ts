@@ -136,6 +136,8 @@ export const comments = pgTable(
       t.createdAt,
     ),
     index("comments_tenant_automation_idx").on(t.tenantId, t.matchedAutomationId),
+    index("comments_contact_id_idx").on(t.contactId),
+    index("comments_conversation_id_idx").on(t.conversationId),
     uniqueIndex("comments_account_provider_comment_unique").on(
       t.channelAccountId,
       t.providerCommentId,

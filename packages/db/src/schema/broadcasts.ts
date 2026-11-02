@@ -171,6 +171,8 @@ export const broadcastRecipients = pgTable(
       t.contactId,
     ),
     index("broadcast_recipients_tenant_id_idx").on(t.tenantId),
+    index("broadcast_recipients_contact_id_idx").on(t.contactId),
+    index("broadcast_recipients_conversation_id_idx").on(t.conversationId),
     index("broadcast_recipients_broadcast_status_idx").on(
       t.broadcastId,
       t.status,

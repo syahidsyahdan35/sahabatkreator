@@ -275,6 +275,8 @@ export const agentSuggestions = pgTable(
     index("agent_suggestions_tenant_id_idx").on(t.tenantId),
     index("agent_suggestions_tenant_status_idx").on(t.tenantId, t.status),
     index("agent_suggestions_conversation_idx").on(t.conversationId),
+    index("agent_suggestions_agent_id_idx").on(t.agentId),
+    index("agent_suggestions_contact_id_idx").on(t.contactId),
   ],
 );
 
