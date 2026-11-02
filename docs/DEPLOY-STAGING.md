@@ -3541,3 +3541,210 @@ dengan pola yang sama (rsync + restart API).
   flush terjadi saat pengunjung connect / nudge antrean, jadi
   nilainya waktu serah-terima socket — bukan receipt baca pengunjung
   (webchat memang tidak punya konsep itu di v1).
+
+## Update Fase 7D — Meta OAuth Connect: "Lanjutkan dengan Facebook" (2026-11-02)
+
+Penghubungan Messenger/Instagram/WhatsApp kini punya jalur utama OAuth
+(login Meta server-side, authorization code) di samping form tempel
+token yang tetap ada sebagai "Cara manual (lanjutan)". TANPA migrasi.
+
+### Konfigurasi platform (Panel Admin /admin, grup Meta)
+
+- Tiga kunci platform_settings baru: `meta_app_id`, `meta_ig_config_id`
+  (konfigurasi Unified Login IG), `meta_wa_config_id` (konfigurasi
+  Embedded Signup WA). Ketiganya IDENTIFIER PUBLIK — bukan rahasia:
+  nilai efektifnya (panel → env) DITAMPILKAN di panel agar bisa
+  diverifikasi pemilik, dan field-nya teks biasa. Perlakuan ini sengaja
+  berbeda dari kunci rahasia (`meta_app_secret` tetap pola 6C/7A.1:
+  nilai tak pernah dirender). Env fallback: `META_APP_ID`,
+  `META_IG_CONFIG_ID`, `META_WA_CONFIG_ID`.
+- Panel juga menampilkan Redirect URI OAuth read-only + tombol salin:
+  `https://botara.my.id/api/meta/oauth/callback` — SATU callback
+  tunggal untuk ketiga provider; daftarkan persis di konfigurasi
+  Facebook Login / Login for Business pada Meta App.
+- `GET /api/admin/settings` kini membawa blok `meta` (nilai publik +
+  redirect URI); endpoint tenant `GET /tenants/:tenantId/channels/
+  meta-oauth-info` (owner/admin) melaporkan ketersediaan OAuth per
+  provider (appId terisi? config terisi? appSecretConfigured) TANPA
+  membocorkan secret.
+
+### Mesin OAuth (modul API `meta-oauth`)
+
+Endpoint: `POST /tenants/:tenantId/meta-oauth/start` (sesi +
+owner/admin) → URL dialog; `GET /api/meta/oauth/callback` (publik,
+callback tunggal); `GET /tenants/:tenantId/meta-oauth/sessions/
+:sessionId` (aset, tanpa token); `POST .../sessions/:sessionId/
+complete` {assetId}.
+
+- **State** = payload bertanda HMAC-SHA256 (kunci `BETTER_AUTH_SECRET`)
+  berisi {tenantId, provider, userId, nonce, exp ≤10 menit}. Nonce
+  diklaim saat start dan DIKONSUMSI atomik saat callback (sekali
+  pakai — replay/kedaluwarsa/tanda tangan rusak →
+  `/channels?meta_oauth_error=META_OAUTH_STATE_INVALID`; parameter
+  `error` dari Meta → `META_OAUTH_CANCELLED`; kegagalan exchange →
+  `META_OAUTH_EXCHANGE_FAILED`; belum terkonfigurasi →
+  `META_OAUTH_NOT_CONFIGURED`).
+- **Penyimpanan nonce + sesi: Redis platform** (kunci
+  `meta-oauth:nonce:*` SET NX EX 600 + GETDEL; `meta-oauth:session:*`
+  EX 600) lewat `createRedisConnection` @sahabat-kreator/queue. Tanpa
+  `REDIS_URL` jatuh ke Map in-memory (sesi hilang saat API restart —
+  staging selalu punya Redis). Isi sesi DIENKRIPSI envelope
+  AES-256-GCM yang sama seperti kredensial channel
+  (`CHANNEL_TOKEN_SECRET`); token hasil exchange TIDAK PERNAH masuk
+  URL/browser/log — callback hanya me-redirect id sesi opak.
+- **Complete** mengalir ke jalur create/revive manual yang SAMA
+  (penjaga satu akun 409 `META_ACCOUNT_ALREADY_CONNECTED` — dan sesi
+  TIDAK dikonsumsi oleh 409 agar aset lain bisa dipilih; perilaku
+  trashed/revive sama; enkripsi sama) + audit baru
+  `channel.connected` meta {channelAccountId, provider, method:
+  'oauth'} (create fungsi lama tetap menulis `channel.created`).
+  Foto profil best-effort seperti jalur manual (pola 6D/7A/7B).
+
+### Alur per provider (persis seperti terimplementasi; Graph v26.0)
+
+- **Messenger — Facebook Login klasik (scope di URL).** Dialog:
+  `https://www.facebook.com/v26.0/dialog/oauth?client_id&redirect_uri
+  &response_type=code&state&scope=pages_show_list,pages_messaging,
+  pages_manage_metadata`. Exchange: code → user token (`GET
+  /oauth/access_token` DENGAN redirect_uri) → long-lived
+  (`grant_type=fb_exchange_token`) → `GET /me/accounts` (fields id,
+  name, username, access_token, instagram_business_account). Token
+  channel = Page Access Token turunan long-lived per Page;
+  external_id = Page ID; public_handle = username Page; IG terhubung
+  hanya info pemilih (TIDAK dibuatkan channel IG dari sini). Subscribe:
+  `POST /{page-id}/subscribed_apps?subscribed_fields=messages`.
+  ASIMETRI terdokumentasi: Messenger memakai scope klasik karena
+  terbukti untuk alur Page kita; IG/WA memakai config_id (Login for
+  Business). Pembangun URL terstruktur per provider agar Messenger
+  kelak bisa pindah ke config_id bila aplikasi user mewajibkannya.
+- **Instagram — Unified Login (config_id, redirect-based, BUKAN JS
+  SDK).** Dialog: `facebook.com/dialog/oauth?client_id&config_id=
+  <meta_ig_config_id>&redirect_uri&response_type=code&state`. Exchange
+  code → Business Integration System User Access Token (SUAT) —
+  mengikuti contoh dokumentasi Unified Login, exchange TANPA
+  redirect_uri. Penemuan: `GET /me/assigned_instagram_accounts?
+  fields=id,username` → external_id = ID akun IG, public_handle =
+  username. Konteks portfolio: `GET /me?fields=client_business_id`
+  disimpan sebagai **parent_external_id** (makna generik kolom itu per
+  provider: WhatsApp = WABA ID, Instagram = ID portfolio bisnis klien
+  pemilik SUAT — untuk manajemen token kelak). Subscribe: `POST
+  /{ig-id}/subscribed_apps?subscribed_fields=messages` (lihat asumsi
+  di Batas jujur).
+- **WhatsApp — Embedded Signup (config_id).** Dialog sama dengan
+  config_id WA. Exchange code → token bisnis. Penemuan aset DARI
+  TOKEN di server — KEPUTUSAN redirect-based: kami TIDAK memakai
+  JS SDK/FB.login + event WA_EMBEDDED_SIGNUP (yang mengharuskan SDK
+  di browser dan memecah alur mobile/redirect); alurnya identik
+  dengan dua provider lain: `GET /me/assigned_whatsapp_business_
+  accounts?fields=id,name` lalu per WABA `GET /{waba-id}/
+  phone_numbers?fields=id,display_phone_number,verified_name`.
+  external_id = phone_number_id; parent_external_id = WABA ID;
+  public_handle = nomor tampilan. Subscribe: `POST /{waba-id}/
+  subscribed_apps` (tanpa subscribed_fields — langganan webhook WABA
+  adalah level aplikasi; field diatur di dashboard aplikasi).
+- **Kegagalan auto-subscribe TIDAK menggagalkan koneksi** (token &
+  akun valid): channel tetap `connected`, respons complete membawa
+  `warnings: ["META_SUBSCRIBE_FAILED"]` yang ditampilkan UI
+  dwibahasa dengan arahan menghubungkan ulang / memeriksa webhook.
+- Semua panggilan Graph menghormati override `META_API_BASE`
+  (terbukti lewat mock rantai).
+
+### UI (modal Hubungkan Channel yang ada)
+
+- Langkah 2 untuk messenger/instagram/whatsapp: tombol primer biru
+  Facebook "Lanjutkan dengan Facebook" (POST start → redirect penuh
+  ke dialogUrl) bila provider tersedia; belum terkonfigurasi → tombol
+  nonaktif + petunjuk dwibahasa. Form token lama utuh di dalam lipatan
+  "Cara manual (lanjutan)" (tertutup secara default).
+- Langkah Instagram memuat blok prasyarat Unified Login (dwibahasa):
+  (1) akun IG harus Professional (Bisnis/Kreator); (2) akun harus di
+  dalam Portofolio Bisnis Meta — bila belum punya, buat gratis di
+  business.facebook.com (Pengaturan Bisnis), tambahkan akun IG ke
+  portofolio, lalu kembali; (3) login dialog bisa memakai akun IG itu
+  sendiri atau akun Facebook yang punya akses ke portofolio. Ringkasan
+  yang sama ada di teks bantuan Panel Admin untuk konfigurasi IG.
+- Pulang `?meta_oauth=<id>` → dialog pemilih aset (Page / akun IG /
+  nomor WA berkelompok per WABA; IG terhubung Page ditampilkan
+  sebagai info) → complete → dialog tertutup, daftar refresh, kartu
+  disorot (pola yang ada); peringatan subscribe tampil sebagai banner.
+  `?meta_oauth_error=<kode>` → banner error dwibahasa via kode kontrak.
+  Query param dibersihkan (history.replaceState) sesudah ditangani.
+
+### Deploy
+
+Build api+web+worker+realtime di VM → commit `9baefb7` → push →
+rsync repo (`.env.staging` dikecualikan & utuh) → 4 service
+direstart → health ok; bundle publik **`index-FRh5tUSD.js`** identik
+build lokal & memuat UI OAuth.
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+
+- Lokal: typecheck SEMUA paket hijau; build api/web/worker/realtime
+  hijau. Tanpa migrasi (tak ada perubahan skema).
+- **Rantai dari server terhadap staging publik: 67/67 PASS** (tenant
+  uji `fase7d-*@sk.test`; mock Graph OAuth lokal 8411 meniru exchange
+  code + fb_exchange_token, /me/accounts, assigned_instagram_accounts,
+  /me client_business_id, assigned WABA + phone_numbers,
+  subscribed_apps; jendela `META_API_BASE` + email admin uji di
+  `PLATFORM_ADMIN_EMAILS`; panel diisi dummy lewat API admin lalu
+  DIHAPUS kembali; `.env.staging` dipulihkan **byte-identik** —
+  sha256 diverifikasi driver; mock dimatikan sesudahnya):
+  - Konfigurasi: info sebelum konfigurasi semua provider tidak
+    tersedia; non-admin platform PUT panel → 404; panel menampilkan
+    nilai publik + redirect URI; app secret tidak pernah muncul di
+    respons panel/info mana pun.
+  - Messenger penuh: URL dialog benar (host, client_id, redirect_uri,
+    scope); callback → sesi; 2 aset Page (handle + IG terhubung);
+    complete 201; subscribed_apps terpanggil fields=messages;
+    exchange tercatat memakai redirect_uri + fb_exchange_token;
+    token tersimpan envelope `v1:` (bukan plaintext, dibuktikan via
+    DB); audit channel.connected method=oauth; sesi terkonsumsi.
+  - Instagram penuh: dialog config_id TANPA scope; exchange TANPA
+    redirect_uri (pola Unified Login); discovery assigned; complete
+    201 (nama akun dari profil Graph); parent_external_id =
+    client_business_id (DB); subscribe dicoba.
+  - WhatsApp penuh: dialog config_id WA; discovery WABA + 2 nomor;
+    complete 201; parent = WABA (DB); handle = nomor tampilan;
+    subscribe WABA dicoba.
+  - Negatif: state dipakai ulang / tanda tangan rusak / kedaluwarsa
+    (HMAC valid, exp lampau) → STATE_INVALID; error Meta →
+    CANCELLED; code buruk → EXCHANGE_FAILED; sesi tenant lain
+    dibaca/di-complete → 404; aset sudah terhubung → 409 dan sesi
+    TIDAK terkonsumsi (aset lain tetap bisa dipilih); subscribe
+    gagal di mock → tetap connected + warnings META_SUBSCRIBE_FAILED.
+  - Regresi & integritas: form manual messenger tetap 201; manual ke
+    aset hasil OAuth tenant lain → 409 (penjaga yang sama);
+    pembersihan panel mengembalikan info ke tidak tersedia; channel
+    asli user (@botaramyid_bot `8fb9b81c…`) tetap connected; TIDAK
+    ADA token OAuth (Page/SUAT/bisnis/long-lived) yang muncul di
+    respons/Location mana pun sepanjang rantai; health ok.
+  - Catatan proses: run pertama 64 PASS lalu crash di kueri
+    pemeriksaan terakhir rantai (uuid `LIKE` tanpa cast — bug skrip
+    uji, bukan produk); run kedua membuktikan penjaga 409 bekerja
+    terhadap sisa data run pertama; pra-bersih antar-run (hanya
+    tenant uji fase7d-*) ditambahkan, run ketiga bersih 67/67.
+
+### Batas jujur
+
+- Dialog Meta ASLI (halaman login Facebook, pemilih akun/portofolio,
+  persetujuan izin) berada di luar jangkauan mock — yang terbukti:
+  konstruksi URL dialog, kontrak callback, exchange, penemuan,
+  complete, subscribe, dan seluruh perilaku server/UI kami. Wiring
+  live menunggu user mengisi App ID + config ID asli di /admin dan
+  mendaftarkan Redirect URI di aplikasi Meta-nya.
+- ASUMSI yang harus dibuktikan saat live (dokumen advanced resmi
+  tidak terbaca penuh saat implementasi): (1) penemuan WABA lewat
+  `GET /me/assigned_whatsapp_business_accounts` — berpola simetris
+  dengan `assigned_instagram_accounts` yang terverifikasi dari
+  dokumen Unified Login; (2) bentuk subscribe akun IG `POST
+  /{ig-id}/subscribed_apps?subscribed_fields=messages` mengikuti pola
+  Messenger Platform (dokumen Unified Login hanya menyatakan akun
+  harus di-subscribe ke aplikasi). Keduanya terisolasi di satu metode
+  klien Graph sehingga koreksi live cukup satu titik.
+- Batas dev-mode Meta tetap berlaku: aplikasi yang belum lolos App
+  Review (Advanced Access untuk pages_messaging /
+  instagram_manage_messages / whatsapp_business_messaging) hanya
+  bisa menghubungkan aset milik akun berperan di aplikasi.
+- Bukti visual (tombol Facebook, dialog pemilih, banner) menunggu uji
+  user sesuai pembagian kerja — yang terbukti: kontrak API, perilaku
+  server, bundle tersaji, dan rantai end-to-end di atas.
