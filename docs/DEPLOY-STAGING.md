@@ -2954,3 +2954,195 @@ sama. Commit fitur `90ad600`.
 - Foto kontak WhatsApp tidak akan pernah tampil (API tidak
   menyediakannya) — inisial berwarna adalah keadaan permanen yang
   benar untuk provider ini.
+
+---
+
+## Update Fase 7B.1 — Webhook & Delivery Log / log integrasi (2026-11-02)
+
+Diminta user eksplisit sebagai alat debugging wiring Meta live: mulai
+fase ini SETIAP hit webhook dan SETIAP percobaan kirim keluar tercatat
+dan bisa ditelusuri dari dashboard (halaman "Logs", route `/logs`).
+Commit fitur `211dc63` (`feat(logs): phase 7B.1 webhook and delivery
+integration log`).
+
+### Model (migrasi 0028)
+
+- Tabel baru append-only **`integration_log`**: `direction` (enum
+  'in'|'out'), `provider` varchar (telegram/messenger/instagram/
+  whatsapp; hit Meta pra-rute memakai `'meta'`), `tenant_id` NULLABLE
+  (event tak ter-resolve tetap tercatat sebagai baris platform),
+  `channel_account_id` & `message_id` FK **ON DELETE SET NULL** (purge
+  6I tidak menghapus sejarah — tautan lepas, ringkasan tetap),
+  `signature_valid` boolean nullable (hanya arah 'in'; nilai
+  secret/tanda tangan TIDAK PERNAH ditulis), `outcome` teks terkendali,
+  `error_code`, `summary` ringkas buatan server, `payload` jsonb
+  nullable, `created_at`. Staging kini **34 tabel / 45 policy**.
+- **Relasi dengan `webhook_inbox`:** tidak berubah — `webhook_inbox`
+  tetap lapisan DEDUP provider (Fase 1A); `integration_log` adalah
+  lapisan OBSERVABILITAS terpisah di atasnya (satu baris per hit/
+  percobaan, termasuk yang ditolak sebelum sempat menyentuh dedup).
+- Payload dibatasi **±32KB** oleh penulis di core
+  (`capIntegrationLogPayload`): lebih besar dari itu disimpan sebagai
+  objek penanda `{ truncated: true, originalSize, preview }`. Payload
+  arah 'out' selalu NULL (isi pesan ada di `messages`; log menunjuk
+  `message_id`). Payload per baris event Meta/Telegram = SELURUH
+  payload hit itu (satu hit bisa memuat banyak event).
+- RLS berlapis (4 policy baru): `tenant_isolation` standar;
+  `integration_log_ingest` FOR INSERT di bawah flag transaction-local
+  `app.integration_log='ingest'` (satu-satunya jalan menulis — route
+  webhook & poller menulis lintas/tanpa tenant); baris tenant NULL
+  hanya terlihat lewat `platform_integration_log` (flag
+  `app.platform_settings='admin'`, pola 0022); prune di bawah
+  `integration_log_prune` — **FOR ALL disengaja**: DELETE dengan
+  WHERE/RETURNING di Postgres juga mensyaratkan baris lolos policy
+  SELECT, jadi policy FOR DELETE murni tidak akan pernah melihat baris
+  mana pun (terbukti di PGlite verify saat pembangunan).
+- Core baru `packages/core/src/integration-log.ts`:
+  `recordIntegrationLog` (best-effort, TIDAK PERNAH melempar — jalur
+  webhook tidak boleh berubah gara-gara log), list/detail tenant
+  (paginasi kursor keyset (created_at, id) menurun, kursor opaque
+  base64), list/detail unresolved (flag platform), `pruneIntegrationLogs`
+  (batch 5000). Fungsi record inbound telegram/meta/whatsapp kini
+  mengembalikan penanda `duplicate` agar outcome jujur (kembalian null
+  tetap = kembaran tenant lain → juga dicatat `duplicate`).
+
+### Pemetaan outcome per titik keluar
+
+Telegram (POST /telegram/webhook/:id): id non-UUID → `unresolved_account`
+(tenant NULL, tanpa payload); akun tak ditemukan → `unresolved_account`
+(payload best-effort); secret salah → 401 + `rejected_signature`
+(signature_valid=false); JSON rusak → `error`/`invalid_json`; status
+≠ connected → `ignored_disconnected`; my_chat_member → `recorded`
+(gagal core → `error`); channel_post non-teks → `ignored_status_only`;
+channel_post/pesan tercatat → `recorded`, kembaran → `duplicate`;
+update tanpa konten yang bisa dicatat → `ignored_status_only`; error
+core per event → `error`/`processing_error` lalu **rethrow** (respons
+webhook tidak berubah).
+
+Meta GET handshake: verify token belum dikonfigurasi →
+`rejected_unconfigured`; token salah → `rejected_signature`; sukses
+SENGAJA tidak dicatat (bukan event — menghindari derau pemeriksaan
+Meta). Meta POST: app secret kosong → 503 + `rejected_unconfigured`;
+tanda tangan salah → 401 + `rejected_signature` (provider 'meta',
+payload parse best-effort); JSON rusak → `error`/`invalid_json`.
+Per event DM (messenger/instagram): akun tak dikenal →
+`unresolved_account`; tak connected → `ignored_disconnected`; echo →
+`ignored_echo`; non-teks → `ignored_status_only`; tercatat →
+`recorded`/`duplicate`. Payload tanpa event messaging (receipt murni)
+→ satu baris agregat `ignored_status_only` provider 'meta'. WhatsApp:
+payload tanpa messages/statuses → `ignored_status_only`; per pesan:
+phone_number_id tak dikenal → `unresolved_account`; tak connected →
+`ignored_disconnected`; teks kosong → `ignored_status_only`; tercatat
+→ `recorded`/`duplicate`. Per status: tak dikenal →
+`unresolved_account`; tak connected → `ignored_disconnected`; status
+diterapkan → `recorded` (status failed membawa
+`error_code meta_graph_<kode>`); status basi/wamid asing →
+`ignored_status_only`.
+
+### Cakupan arah keluar (jujur)
+
+HANYA dua poller pengirim provider yang benar-benar ada: poller
+telegram & poller Meta (messenger/instagram/whatsapp) di proses API.
+Setiap titik markOutbound — termasuk gagal pra-kirim
+(`*_empty_text`, `*_missing_credentials`, `*_token_undecryptable`) —
+menulis baris out `sent`/`failed` + error_code yang sama persis dengan
+kolom pesan + message_id. **Flush webchat lewat gateway realtime DI
+LUAR cakupan secara eksplisit**: bukan percobaan API provider
+(serah-terima socket internal) dan sudah teraudit `message.sent`
+(actor `ws-connect-flush`) di audit_logs.
+
+### API + UI + retensi
+
+- API (modul `apps/api/src/modules/logs`): `GET
+  /tenants/:tenantId/logs` + `GET .../logs/:logId` — sesi + membership
+  (non-member 404) dan **owner/admin saja** (anggota biasa 403;
+  payload memuat isi pesan pelanggan). Filter provider/direction/
+  outcome/channelAccountId + paginasi kursor; daftar tanpa payload
+  (hanya `hasPayload`), detail membawa payload tersimpan. `GET
+  /logs/unresolved` + `GET /logs/unresolved/:logId` — hanya sesi
+  platform admin (allowlist env), non-admin 404 pola Panel Admin.
+- Web: item nav "Logs" (route `/logs`, ikon `list`, grup More bersama
+  Settings/Admin; order admin digeser), halaman `LogsPage`: filter
+  dwibahasa, chip outcome warna semantik, baris expandable (payload
+  JSON + meta signature/error/channel/message), toggle unresolved
+  khusus sesi platform admin, auto-refresh `usePolling` (pola shell),
+  load-more kursor. Semua string i18n en+id.
+- Retensi: worker prune baris >30 hari (poller boot + tiap jam, pola
+  purge 6I) + run-once `pnpm --filter @sahabat-kreator/worker
+  prune:logs` (skrip `apps/worker/scripts/prune-integration-logs.ts`).
+
+### Deploy
+
+Build semua di VM → commit `211dc63` → push → rsync repo
+(`.env.staging` dikecualikan & utuh) → migrasi 0028 via drizzle-kit
+di server (`MIGRATION_DATABASE_URL`; jurnal bersih 28 → 29 baris;
+34 tabel / 45 policy terverifikasi) → 4 service direstart (bunuh PID
+systemd milik ubuntu) → health ok; bundle publik
+**`index-DRoBSx7Q.js`** identik build lokal & memuat halaman Logs.
+
+### Verifikasi (TANPA Playwright, sesuai aturan user)
+
+- Lokal: typecheck SEMUA proyek (19 paket) hijau; build semua hijau;
+  PGlite verify lulus termasuk seksi baru **[21]**: tanpa konteks 0
+  baris; insert tanpa flag ingest ditolak, dengan flag diterima lintas
+  tenant; konteks tenant A hanya baris A; flag platform hanya baris
+  tenant NULL; prune ber-flag hanya membuang baris >30 hari.
+- **Rantai mock gabungan dari server: 56/56 PASS** (tenant uji
+  `fase7b1-*@sk.test`; mock Telegram 8410 + Graph 8411 lokal; jendela
+  `TELEGRAM_API_BASE`/`META_API_BASE` singkat): matriks telegram
+  (recorded + signature_valid true + payload detail persis; duplikat;
+  secret salah 401 + rejected_signature/false; disconnect → 204 dan
+  hit basi 401 karena disconnect menghapus webhook secret; akun acak
+  404) + keluar telegram (sent terhubung messageId; gagal mock →
+  failed `telegram_http_400`); messenger (recorded; echo →
+  ignored_echo; page tak dikenal tak masuk log tenant; tanda tangan
+  salah 401; handshake salah 403; sent; gagal Graph → failed
+  `meta_graph_100`; disconnect → DM berikutnya ignored_disconnected);
+  whatsapp (recorded; out sent + wamid majemuk; status delivered →
+  in/recorded; status wamid asing → ignored_status_only); API log
+  (isolasi tenant B kosong; filter direction/outcome/channel bekerja;
+  paginasi kursor dua halaman tanpa tumpang tindih; daftar tanpa
+  payload, detail ber-payload).
+- **Rantai akses & platform: 18/18 PASS** (member role 'agent' disemai
+  via DB → 403 daftar + detail, owner kontrol 200; sesi biasa →
+  unresolved 404; jendela W2 singkat — `META_APP_SECRET` dicabut dari
+  env & email admin uji ditambahkan ke allowlist, lalu keduanya
+  dipulihkan: POST webhook → 503 META_NOT_CONFIGURED; admin platform →
+  unresolved 200 memuat telegram/messenger `unresolved_account`,
+  'meta' `rejected_signature` & `rejected_unconfigured`, semua
+  tenantId NULL; detail unresolved ber-payload; baris platform tidak
+  terlihat via route tenant).
+- **Prune terbukti**: baris disemai backdate 31 hari + baris segar →
+  run-once sebagai role aplikasi menghapus TEPAT 1 baris (yang tua),
+  yang segar bertahan.
+- `.env.staging` dipulihkan **byte-identik** (cmp) sesudah kedua
+  jendela; mock dimatikan; 4 service active; health publik ok.
+  Channel asli user TIDAK tersentuh (telegram `8fb9b81c` tetap
+  connected, `10be58d5` tetap disconnected, trashed_at keduanya NULL)
+  dan tenant user memiliki **0 baris** integration_log — tidak ada
+  trafik asli yang terdampak jendela mock.
+
+### Batas jujur
+
+- Bukti visual halaman Logs menunggu uji user (aturan pembagian
+  kerja) — yang terbukti: API, kontrak, RLS, bundle tersaji.
+- Telegram pasca-disconnect tidak menghasilkan `ignored_disconnected`
+  melainkan `rejected_signature`: disconnect menghapus webhook secret
+  di server BY DESIGN (kredensial dibersihkan), jadi hit basi tertolak
+  di gerbang — outcome `ignored_disconnected` untuk telegram hanya
+  tercapai pada akun berstatus non-connected yang secretnya masih ada
+  (mis. status error). Untuk Meta outcome itu tercapai normal sesudah
+  disconnect (gerbangnya app secret platform).
+- Resolusi akun WhatsApp mengikuti phone_number_id tertua yang cocok
+  bila ada akun disconnected tenant lain dengan nomor sama (perilaku
+  7B yang sudah ada, bukan regresi fase ini) — rantai awal sempat
+  menabraknya dengan nomor uji warisan 7B; nomor uji diganti dan
+  seluruh matriks WA lulus.
+- Event Meta yang disaring parser sebelum route (receipt delivery/
+  read di payload campuran) tidak mendapat baris per event; payload
+  yang SELURUHNYA receipt mendapat satu baris agregat
+  `ignored_status_only`.
+- Log arah 'in' untuk satu hit multi-event menulis payload hit yang
+  sama di setiap baris event (dibatasi per baris) — sederhana dan
+  cukup untuk debugging; normalisasi per event menyusul bila volume
+  menuntut (retensi 30 hari membatasi pertumbuhan).
