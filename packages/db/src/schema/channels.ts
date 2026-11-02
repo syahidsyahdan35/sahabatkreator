@@ -53,6 +53,8 @@ export const channelAccounts = pgTable(
     accessTokenEncrypted: text("access_token_encrypted"),
     /** Secret untuk verifikasi signature webhook akun ini (bila provider mendukung). */
     webhookSecret: varchar("webhook_secret", { length: 255 }),
+    /** Username bot Telegram (tanpa '@', dari getMe — Fase 6A). Bukan rahasia; untuk tampilan. */
+    botUsername: varchar("bot_username", { length: 255 }),
     /** Versi Graph API yang ter-pin untuk akun Meta ini (mis. 'v26.0', RANCANGAN §12.1). */
     graphApiVersion: varchar("graph_api_version", { length: 16 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -30,6 +30,8 @@ import {
   createWebchatRoutes,
   createWebchatUpgradeHandler,
 } from "./modules/webchat/routes";
+import { createTelegramRoutes } from "./modules/telegram/routes";
+import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 
 const env = loadEnv();
 const startedAt = Date.now();
@@ -79,8 +81,19 @@ routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...
 routes.route("/", createContactsRoutes(authBundle));
 routes.route("/", createInboxRoutes(authBundle, webchatHub));
-// Modul channels (Fase 1F) — manajemen channel workspace /tenants/:tenantId/channels.
-routes.route("/", createChannelsRoutes(authBundle));
+// Modul channels (Fase 1F, telegram 6A) — manajemen channel workspace
+// /tenants/:tenantId/channels. Opsi telegram: kunci enkripsi kredensial +
+// base URL Bot API + URL publik untuk mendaftarkan webhook.
+routes.route(
+  "/",
+  createChannelsRoutes(authBundle, {
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    telegramApiBase: env.TELEGRAM_API_BASE,
+    publicBaseUrl: env.BETTER_AUTH_URL,
+  }),
+);
+// Modul telegram publik (Fase 6A) — webhook Bot API /telegram/webhook/:id.
+routes.route("/", createTelegramRoutes(authBundle));
 // Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
 routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
@@ -131,5 +144,12 @@ if (process.env.NODE_ENV !== "test") {
   // terhubung lewat hub. Jembatan lintas proses — lihat modules/webchat/poller.ts.
   if (authBundle) {
     startWebchatDeliveryPoller(authBundle, webchatHub);
+    // Poller pengiriman Telegram (Fase 6A): mengirim pesan outbound
+    // `queued` percakapan telegram via Bot API (token terdekripsi sesaat
+    // di memori dari CHANNEL_TOKEN_SECRET).
+    startTelegramDeliveryPoller(authBundle, {
+      channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+      telegramApiBase: env.TELEGRAM_API_BASE,
+    });
   }
 }

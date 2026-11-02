@@ -14,6 +14,7 @@ export const ErrorCodeSchema = z.enum([
   "TENANT_NOT_FOUND",
   "CHANNEL_NOT_CONNECTED",
   "CHANNEL_NOT_AVAILABLE_YET",
+  "TELEGRAM_TOKEN_INVALID",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -241,6 +242,12 @@ export type ChannelAccountStatus = z.infer<typeof ChannelAccountStatusSchema>;
 export const CreateChannelRequestSchema = z.object({
   provider: ChannelProviderSchema,
   displayName: z.string().trim().min(1).max(255).optional(),
+  /**
+   * Token bot Telegram (Fase 6A) — wajib hanya untuk provider 'telegram'.
+   * Token TIDAK PERNAH dikembalikan API: ia divalidasi ke Bot API, lalu
+   * disimpan terenkripsi di server.
+   */
+  botToken: z.string().trim().min(10).max(255).optional(),
 });
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequestSchema>;
 
@@ -250,6 +257,8 @@ export const ChannelAccountResponseSchema = z.object({
   /** Untuk webchat: siteKey publik (`wc_...`) yang dipasang di situs tenant. */
   externalId: z.string(),
   displayName: z.string().nullable(),
+  /** Untuk telegram: username bot (`@...` tanpa '@') dari getMe. Provider lain: null. */
+  botUsername: z.string().nullable(),
   status: ChannelAccountStatusSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

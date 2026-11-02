@@ -120,6 +120,20 @@
       "when": 1793579324000,
       "tag": "0016_rls_api_keys_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1793582333165,
+      "tag": "0017_telegram_bot_username",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793582334000,
+      "tag": "0018_rls_telegram",
+      "breakpoints": true
     }
   ]
 }

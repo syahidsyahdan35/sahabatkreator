@@ -1,0 +1,1 @@
+ALTER TABLE "channel_accounts" ADD COLUMN "bot_username" varchar(255);

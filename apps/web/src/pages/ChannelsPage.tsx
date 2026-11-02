@@ -22,7 +22,7 @@ interface ChannelsPageProps {
 }
 
 /** Provider yang belum bisa dihubungkan — ditampilkan jujur sebagai "segera". */
-const UPCOMING_PROVIDERS = ["whatsapp", "instagram", "messenger", "telegram"] as const;
+const UPCOMING_PROVIDERS = ["whatsapp", "instagram", "messenger"] as const;
 
 function providerLabel(t: Translate, provider: string): string {
   return t(`inbox.providers.${provider}` as TranslationKey);
@@ -58,6 +58,10 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [justCreated, setJustCreated] = useState<ChannelAccountResponse | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [tgName, setTgName] = useState("");
+  const [tgToken, setTgToken] = useState("");
+  const [tgCreating, setTgCreating] = useState(false);
+  const [tgError, setTgError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!tenantId) return;
@@ -97,6 +101,32 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
       );
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleConnectTelegram = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!tenantId) return;
+    setTgCreating(true);
+    setTgError(null);
+    try {
+      await api.channels.create(tenantId, {
+        provider: "telegram",
+        displayName: tgName.trim() || undefined,
+        botToken: tgToken.trim(),
+      });
+      // Token tidak disimpan di state lebih lama dari yang perlu.
+      setTgToken("");
+      setTgName("");
+      await load();
+    } catch (err) {
+      setTgError(
+        err instanceof ApiClientError
+          ? translateApiError(t, err)
+          : t("errors.generic"),
+      );
+    } finally {
+      setTgCreating(false);
     }
   };
 
@@ -162,6 +192,12 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
                   {statusLabel(t, channel.status)}
                 </span>
               </div>
+              {channel.provider === "telegram" && channel.botUsername ? (
+                <div className="mt-2 text-xs text-muted">
+                  {t("channels.botUsernameLabel")}:{" "}
+                  <span className="font-mono">@{channel.botUsername}</span>
+                </div>
+              ) : null}
               {channel.provider === "webchat" ? (
                 <div className="mt-3 space-y-2">
                   <div className="text-xs text-muted">
@@ -224,6 +260,50 @@ export function ChannelsPage({ t }: ChannelsPageProps) {
           className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
         >
           {creating ? t("channels.creating") : t("channels.createButton")}
+        </button>
+      </form>
+
+      <form
+        onSubmit={handleConnectTelegram}
+        className="mt-8 rounded-lg border border-line bg-surface p-4"
+      >
+        <h2 className="font-semibold">{t("channels.telegramTitle")}</h2>
+        <label className="mt-3 block text-sm font-medium" htmlFor="telegram-name">
+          {t("channels.telegramNameLabel")}
+        </label>
+        <input
+          id="telegram-name"
+          value={tgName}
+          onChange={(e) => setTgName(e.target.value)}
+          placeholder={t("channels.telegramNamePlaceholder")}
+          maxLength={255}
+          className={`${inputClassName} mt-1`}
+        />
+        <label className="mt-3 block text-sm font-medium" htmlFor="telegram-token">
+          {t("channels.tokenLabel")}
+        </label>
+        <input
+          id="telegram-token"
+          type="password"
+          autoComplete="off"
+          value={tgToken}
+          onChange={(e) => setTgToken(e.target.value)}
+          placeholder={t("channels.tokenPlaceholder")}
+          maxLength={255}
+          className={`${inputClassName} mt-1`}
+        />
+        <p className="mt-1 text-xs text-muted">{t("channels.tokenHint")}</p>
+        {tgError ? (
+          <div className="mt-2">
+            <FieldError message={tgError} />
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={tgCreating || !tgToken.trim()}
+          className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {tgCreating ? t("channels.telegramConnecting") : t("channels.telegramConnectButton")}
         </button>
       </form>
 

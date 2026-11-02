@@ -39,6 +39,7 @@ export {
   getConversationDeliveryTarget,
   markConversationRead,
   markOutboundMessageSent,
+  markOutboundMessageFailed,
   type ConversationWithSummary,
   type ConversationDeliveryTarget,
 } from "./conversations";
@@ -110,7 +111,25 @@ export {
   createWebchatChannelAccount,
   listChannelAccounts,
   generateWebchatSiteKey,
+  setChannelAccountStatus,
 } from "./channels";
+export {
+  encryptChannelSecret,
+  decryptChannelSecret,
+  generateChannelWebhookSecret,
+  hashChannelWebhookSecret,
+  verifyChannelWebhookSecret,
+} from "./channel-secrets";
+export {
+  createTelegramChannelAccount,
+  resolveTelegramAccountById,
+  recordTelegramInboundMessage,
+  listQueuedTelegramDeliveries,
+  type CreateTelegramChannelInput,
+  type TelegramAccountRef,
+  type RecordTelegramInboundInput,
+  type TelegramQueuedDelivery,
+} from "./telegram";
 export {
   resolveWebchatAccountBySiteKey,
   openWebchatSession,

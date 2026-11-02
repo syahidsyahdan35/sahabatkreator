@@ -116,8 +116,10 @@ const policies = await db.query<{ count: string }>(
 // + products & payment_links tenant_isolation + lengan publik
 // `public_code_lookup` pada payment_links (Fase 4A)
 // + automation_steps & sequence_enrollments tenant_isolation (Fase 2C)
-// + lengan publik `public_key_lookup` pada api_keys (Fase 5A) = 27.
-assert.equal(Number(policies.rows[0].count), 27);
+// + lengan publik `public_key_lookup` pada api_keys (Fase 5A)
+// + lengan webhook `telegram_webhook_lookup` pada channel_accounts dan
+//   4 policy `system_delivery_scan` (Fase 6A) = 32.
+assert.equal(Number(policies.rows[0].count), 32);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -528,6 +530,89 @@ assert.deepEqual(
 assert.deepEqual(keySeen.tenantB.rows.map((r) => r.key_hash), [KEY_HASH_B]);
 console.log(
   "[11] Fase 5A: lengan publik app.api_key_hash hanya membuka baris ber-hash yang disajikan; tanpa konteks api_keys tertutup; konteks tenant tetap terisolasi; enum audit 'api_key' terpakai: OK",
+);
+
+// ---------- 12. Fase 6A: lengan Telegram (webhook lookup + pindai pengiriman) ----------
+// Akun telegram tenant A & B + percakapan telegram A dengan pesan outbound
+// `queued`, plus identitas chat-nya. Uji sebagai app_user:
+//  - tanpa konteks: channel_accounts tertutup;
+//  - app.telegram_channel_account_id = id A → HANYA baris A yang terbuka;
+//  - kolom bot_username (migrasi 0017) terbaca;
+//  - app.system_delivery='telegram' → poller melihat akun/percakapan/
+//    identitas telegram lintas tenant, dan JOIN antrean hanya menghasilkan
+//    pesan queued milik percakapan telegram (bukan webchat).
+const TG_ACC_A = "88888888-8888-4888-8888-888888888888";
+const TG_ACC_B = "99999999-9999-4999-8999-999999999999";
+const TG_CONV_A = "12121212-1212-4212-8212-121212121212";
+await db.query(
+  `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, display_name, status, webhook_secret, bot_username)
+   VALUES ($1, $2, 'telegram', '555001', 'Bot Uji A', 'connected', 'hash-uji-a', 'bot_uji_a'),
+          ($3, $4, 'telegram', '555002', 'Bot Uji B', 'connected', 'hash-uji-b', 'bot_uji_b')`,
+  [TG_ACC_A, TENANT_A, TG_ACC_B, TENANT_B],
+);
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider)
+   VALUES ($1, $2, $3, $4, 'telegram')`,
+  [TG_CONV_A, TENANT_A, TG_ACC_A, CONTACT_A],
+);
+await db.query(
+  `INSERT INTO channel_identities (tenant_id, contact_id, channel_account_id, provider, external_user_id)
+   VALUES ($1, $2, $3, 'telegram', '424242')`,
+  [TENANT_A, CONTACT_A, TG_ACC_A],
+);
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+   VALUES ($1, $2, 'outbound', 'user', 'text', 'Balasan telegram uji', 'queued'),
+          ($1, $3, 'outbound', 'user', 'text', 'Balasan webchat uji', 'queued')`,
+  [TENANT_A, TG_CONV_A, CONV_A],
+);
+const tgSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  const noCtx = await tx.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM channel_accounts`,
+  );
+  await tx.query(`SELECT set_config('app.telegram_channel_account_id', $1, true)`, [TG_ACC_A]);
+  const byId = await tx.query<{ id: string; bot_username: string }>(
+    `SELECT id, bot_username FROM channel_accounts`,
+  );
+  await tx.query(`SELECT set_config('app.telegram_channel_account_id', '', true)`);
+  await tx.query(`SELECT set_config('app.system_delivery', 'telegram', true)`);
+  const scanAccounts = await tx.query<{ id: string }>(
+    `SELECT id FROM channel_accounts ORDER BY id`,
+  );
+  const scanConvs = await tx.query<{ id: string; provider: string }>(
+    `SELECT id, provider FROM conversations`,
+  );
+  const scanQueue = await tx.query<{ content_text: string; chat_id: string }>(
+    `SELECT m.content_text, ci.external_user_id AS chat_id
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.direction = 'outbound' AND m.status = 'queued'`,
+  );
+  return { noCtx, byId, scanAccounts, scanConvs, scanQueue };
+});
+assert.equal(tgSeen.noCtx.rows[0].n, "0");
+assert.deepEqual(
+  tgSeen.byId.rows.map((r) => `${r.id}:${r.bot_username}`),
+  [`${TG_ACC_A}:bot_uji_a`],
+);
+assert.deepEqual(
+  tgSeen.scanAccounts.rows.map((r) => r.id),
+  [TG_ACC_A, TG_ACC_B],
+);
+assert.deepEqual(
+  tgSeen.scanConvs.rows.map((r) => `${r.id}:${r.provider}`),
+  [`${TG_CONV_A}:telegram`],
+);
+assert.deepEqual(
+  tgSeen.scanQueue.rows.map((r) => `${r.content_text}:${r.chat_id}`),
+  ["Balasan telegram uji:424242"],
+);
+console.log(
+  "[12] Fase 6A: lengan app.telegram_channel_account_id hanya membuka baris akun itu; bot_username terbaca; pindai app.system_delivery='telegram' hanya menghasilkan antrean percakapan telegram lintas tenant: OK",
 );
 
 await db.close();

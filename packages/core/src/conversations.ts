@@ -385,3 +385,51 @@ export async function markOutboundMessageSent(
     return updated;
   });
 }
+
+/**
+ * Menandai satu pesan outbound `queued` sebagai `failed` setelah transport
+ * sungguhan gagal mengirimnya (Fase 6A: Bot API Telegram menolak/error) +
+ * audit `message.failed`. `errorCode` adalah kode aman yang diringkas
+ * pemanggil (mis. `telegram_http_400`) — TIDAK BOLEH memuat kredensial
+ * atau URL bertoken; disimpan juga ke kolom `messages.error_code`.
+ * Mengembalikan baris terbaru, atau null bila pesan tidak ada / tidak
+ * lagi berstatus queued.
+ */
+export async function markOutboundMessageFailed(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  messageId: string,
+  via: string,
+  errorCode: string,
+): Promise<Message | null> {
+  const safeCode = errorCode.slice(0, 128);
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [updated] = await tx
+      .update(messages)
+      .set({ status: "failed", errorCode: safeCode })
+      .where(
+        and(
+          eq(messages.tenantId, ctx.tenantId),
+          eq(messages.id, messageId),
+          eq(messages.status, "queued"),
+        ),
+      )
+      .returning();
+    if (!updated) return null;
+
+    await tx.insert(auditLogs).values({
+      tenantId: ctx.tenantId,
+      actorType: "system",
+      actorId: via,
+      action: "message.failed",
+      meta: {
+        conversationId: updated.conversationId,
+        messageId: updated.id,
+        via,
+        errorCode: safeCode,
+      },
+    });
+
+    return updated;
+  });
+}

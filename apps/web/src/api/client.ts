@@ -214,10 +214,10 @@ export const api = {
       );
       return body.channels;
     },
-    /** POST /api/tenants/:tenantId/channels {provider, displayName} (Fase 1F: webchat). */
+    /** POST /api/tenants/:tenantId/channels {provider, displayName, botToken?} (1F webchat, 6A telegram). */
     create(
       tenantId: string,
-      input: { provider: string; displayName?: string },
+      input: { provider: string; displayName?: string; botToken?: string },
     ): Promise<ChannelAccountResponse> {
       return request<ChannelAccountResponse>(
         `/api/tenants/${tenantId}/channels`,

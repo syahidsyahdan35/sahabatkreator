@@ -25,6 +25,17 @@ const EnvSchema = z.object({
   BETTER_AUTH_URL: z.string().url().optional(),
   /** Secret HMAC untuk token sesi pengunjung webchat (Fase 1F). */
   WEBCHAT_SECRET: z.string().min(16).optional(),
+  /**
+   * Kunci enkripsi kredensial channel (Fase 6A): base64 dari 32 byte acak,
+   * dipakai AES-256-GCM untuk token bot Telegram (dan kelak token Meta).
+   * Hanya di env server — tidak pernah masuk repo/log.
+   */
+  CHANNEL_TOKEN_SECRET: z.string().min(16).optional(),
+  /**
+   * Base URL Telegram Bot API (Fase 6A). Default https://api.telegram.org;
+   * override hanya untuk uji mock lokal di staging.
+   */
+  TELEGRAM_API_BASE: z.string().url().optional(),
   REDIS_URL: z.string().url().optional(),
   /**
    * Pemilihan provider LLM agent (Fase 3A): 'mock' (default, deterministik,

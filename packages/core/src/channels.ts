@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -51,6 +51,29 @@ export async function createWebchatChannelAccount(
     });
 
     return row;
+  });
+}
+
+/**
+ * Mengubah status akun channel (mis. 'error' bila pendaftaran webhook ke
+ * provider gagal sesudah akun dibuat — Fase 6A Telegram).
+ */
+export async function setChannelAccountStatus(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  channelAccountId: string,
+  status: ChannelAccount["status"],
+): Promise<void> {
+  await withTenantDb(db, ctx.tenantId, async (tx) => {
+    await tx
+      .update(channelAccounts)
+      .set({ status, updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      );
   });
 }
 

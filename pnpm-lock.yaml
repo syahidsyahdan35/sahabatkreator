@@ -15,6 +15,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.7
         version: 1.19.17(hono@4.13.16)
+      '@sahabat-kreator/channel-telegram':
+        specifier: workspace:*
+        version: link:../../packages/channels/channel-telegram
       '@sahabat-kreator/channel-webchat':
         specifier: workspace:*
         version: link:../../packages/channels/channel-webchat
@@ -196,7 +199,18 @@ importers:
 
   packages/channels/channel-messenger: {}
 
-  packages/channels/channel-telegram: {}
+  packages/channels/channel-telegram:
+    dependencies:
+      '@sahabat-kreator/channel-core':
+        specifier: workspace:*
+        version: link:../channel-core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.5
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/channels/channel-webchat:
     dependencies:
