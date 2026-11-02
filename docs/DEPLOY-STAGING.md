@@ -5380,3 +5380,144 @@ Hub agent LIVE di staging (commit feat `345f2ee` core/kontrak + verify, `0839e3f
 - **Pengecualian permukaan publik (eksplisit, per aturan sinkronisasi kontrak)**: playground, agen, dan KB tetap permukaan **dashboard-only** — fase ini TIDAK menambah endpoint API v1/SDK/MCP; skema kontrak yang ditambah hanya melayani dashboard. Keputusan eksposur menunggu matriks Fase 15A.
 - **Verifikasi**: typecheck 19 paket hijau; build semua dist hijau + grep bundle lokal & server (api `agent_playground`/`AGENT_PROVIDER_ERROR`, web `agentsHub.tabPlayground`/`tab=knowledge`; `route:"/knowledge"` = **0** kemunculan di bundle web → entri registry benar-benar hilang). PGlite: db verify **33/33**; skrip baru `verify:agent-playground` **SEMUA LULUS** (8 grup: hybrid + parafrase via vektor; niat persis 5 jenis termasuk unknown; nol penulisan + tag/stage kontak umpan utuh; metering terpisah + analytics/cap 0; agent suggest tanpa saran; isolasi dua arah; provider melempar → provider_error tanpa usage; tanpa embedding → FTS murni); regresi `verify:agent-tools` + `verify:kb-embeddings` hijau. **Rantai terisolasi di server** (DB chain sendiri + role app sendiri + Redis DB 7 + API :3191 + worker chain, mock semua provider): **45 PASS / 0 FAIL** — setup via API (tenant, channel webchat, agent, produk, 2 dokumen ter-embed job), playground harga (hybrid, niat tepat `[add_tag ai-lead]`, usage mock), playground beli (niat `create_payment_link` ber-productId tertanam), nol penulisan (5 hitungan = 0), metering (agent_playground=2, agent_response=0), analytics 0/0, validasi 400, agent asing 404 dua arah, agent suggest 200 tanpa saran, lalu **regresi respond sungguhan** via webchat+worker (pesan agent terkirim, tag tereksekusi, agent_response=1, analytics 1/1). **Smoke LIVE staging asli 9/9**: tenant uji `fase12e-*@sk.test`, provider asli menjawab (provider=openrouter, model=openai/gpt-4o-mini, retrieval=hybrid), usage `agent_playground` tercatat, cap tetap 0, nol percakapan. Cek publik: `/knowledge` → 200 HTML dengan aset bundle baru (redirect klien). `.env.staging` sha256 tetap `9c1ded2a…` byte-identik; channel asli user utuh (semua provider connected tetap ada); rantai dibersihkan total (proses chain dimatikan, DB + role chain di-drop, Redis DB 7 di-flush). Catatan insiden kecil: satu perintah `pkill -f` yang terlalu luas sempat mematikan proses staging bersama proses chain — systemd `Restart=always` menghidupkan ulang semuanya dalam hitungan detik, health publik tetap ok, tanpa kehilangan data; sesudahnya pembersihan memakai PID eksplisit.
 - **Batas jujur**: (1) UI hub + playground belum diuji klik (menunggu uji UI user seperti fase sebelumnya) — bundle terverifikasi memuat semua string/logika baru, typecheck hijau, dan seluruh jalur API terbukti di rantai + smoke live. (2) Redirect `/knowledge` bersifat sisi klien (bukan HTTP 301/302) karena SPA tidak punya router server — perilaku pengguna identik, hanya crawler yang melihat 200. (3) Riwayat playground hidup hanya di klien dan terpotong 20 giliran; menutup tab menghapusnya — disengaja (dry-run tanpa jejak), sejalan nol-penulisan. (4) Niat `create_payment_link` menampilkan produk hasil pencocokan baca-saja; bila model menyebut produk yang tak cocok, niat tetap tampil dengan `productId` kosong (UI menandainya "produk tidak ditemukan") — tidak ada tautan yang dibuat dalam keadaan apa pun.
+
+---
+
+## Update Fase 13A — Paket Perapian A: ganti password Settings, code-splitting web, customFields API v1 + prioritas error tim, replay log tenant-NULL (2026-11-03)
+
+Commit: `cd15ac6` (butir 3), `03a060f` (butir 4 backend), `9c6724e`
+(butir 1+4 web), `1f511e8` (butir 2). **Tanpa migrasi** (jurnal tetap
+40 entri). Deploy: build semua dist di VM → rsync → ketiga proses
+(api/worker/web) dihentikan per MainPID eksplisit → systemd
+`Restart=always` mengangkat dist baru.
+
+### Butir 1 — Form ganti password di Settings
+- Seksi **Akun → Ganti kata sandi** di SettingsPage (tingkat akun,
+  bukan workspace): kata sandi saat ini + baru + konfirmasi, memakai
+  `PasswordInput` yang ada. Mengirim ke endpoint Better Auth
+  `POST /api/auth/change-password` dengan `revokeOtherSessions: true`.
+- **Perilaku sesi (terbukti di rantai):** sesi perangkat LAIN tercabut
+  sesudah ganti; sesi perangkat sendiri diperbarui dan tetap masuk;
+  sign-in dengan password lama → 401, password baru → 200.
+- Error dwibahasa dari kode: `INVALID_PASSWORD` → "kata sandi saat ini
+  salah" (pemetaan baru di errorText), `PASSWORD_TOO_SHORT` (min 8,
+  sama seperti register), plus validasi lokal kosong/sama/konfirmasi
+  beda. Nilai password tidak pernah di-log; form dikosongkan sesudah
+  berhasil. Klien web menambah `api.auth.changePassword`.
+
+### Butir 2 — Code-splitting bundle web
+- 13 halaman berat menjadi `React.lazy` per rute (FlowBuilder,
+  Analytics, Channels, Broadcasts, AgentsHub, Automations, Contacts,
+  Products, Settings, Admin, Logs, Audit, Flows) dengan fallback
+  Suspense `common.loading`; halaman kritis (login/register/dashboard/
+  inbox/halaman publik) tetap eager. `manualChunks` memisahkan
+  `vendor-react` (react+react-dom) untuk cache lintas rilis.
+- **Angka (build Vite, JS):** SEBELUM satu chunk `index` **965,74 kB**
+  (gzip 258,68). SESUDAH: chunk utama **277,68 kB** (gzip 81,14) +
+  vendor-react 140,88 kB (gzip 45,26) — muatan awal ≈444 kB (gzip
+  ≈132 kB) vs 1.007 kB (gzip ≈267 kB). FlowBuilder+xyflow menjadi
+  chunk malas 225,91 kB (+CSS 15,87 kB) yang hanya diunduh di
+  `/flows/:id`. Total semua chunk ≈933 kB (tidak membengkak; hanya
+  terpisah). Catatan: chunk SettingsPage 100,65 kB masih relatif besar
+  untuk halamannya (modul bersama yang mayoritas hanya dipakai di
+  sana) — tetap malas, di luar muatan awal.
+
+### Butir 3 — customFields API v1 + SDK + MCP & prioritas error tim
+- Kontrak: `ContactCustomFieldsSchema` baru (peta string→string; kunci
+  1–64 char sesudah trim, nilai maks 1000 char, maks 50 entri; nilai
+  non-string ditolak) dipakai `CreateContactRequestSchema` &
+  `UpdateContactRequestSchema` — berlaku serentak untuk dashboard,
+  API v1, SDK, MCP (sumber kebenaran tunggal).
+- Core: `createContact` menyimpan customFields; `updateContact`
+  **menggabung per kunci** (kunci terkirim menimpa, lain dipertahankan
+  — konsisten dengan node flow `set_field`).
+- API v1: POST menerima customFields; endpoint BARU
+  `PATCH /v1/contacts/:id` (scope `contacts:write`; tanpa scope → 403
+  `API_KEY_SCOPE_DENIED`; tak ada → 404). SDK: `updateContact()` baru
+  (tipe request dari kontrak; method PATCH ditambahkan ke transport).
+  MCP: `create_contact` menerima `customFields` (tetap tier TULIS).
+  Skrip `verify-sdk` & `verify-mcp` diperluas untuk membuktikannya.
+- **Prioritas error tim (perbaikan sisa 9C):** di core `team.ts`,
+  cek-diri kini MENDAHULUI cek-owner pada `updateMemberRole` &
+  `removeMember`. Pemilik yang menarget diri → `TEAM_SELF_ACTION`
+  (dulu `TEAM_OWNER_PROTECTED`); owner yang ditarget admin/member lain
+  tetap `TEAM_OWNER_PROTECTED`; perlindungan owner tidak berubah.
+  Catatan gerbang: member biasa (agent/viewer) tetap menerima 403
+  FORBIDDEN dari gerbang manajer route sebelum core — TEAM_SELF_ACTION
+  berlaku bagi aktor yang memang berhak mengelola tim (owner/admin).
+
+### Butir 4 — Replay log tenant-NULL oleh admin platform
+- Endpoint BARU `POST /api/logs/unresolved/:logId/replay` (gerbang
+  platform admin yang sama seperti daftar unresolved; non-admin 404).
+  Kelayakan memakai penilai 7B.2 yang sama (arah masuk, signature
+  valid, payload lengkap, outcome error/ignored_disconnected).
+- Runner `runPlatformIntegrationLogReplay` (modul logs/replay):
+  TANPA konteks tenant — Telegram men-resolve akun dari
+  `channel_account_id` baris (tenant efektif = tenant akun); Meta
+  menjalankan prosesor webhook live TANPA `tenantScopeId` (tiap event
+  men-resolve akunnya sendiri). Audit: core baru
+  `recordPlatformIntegrationReplayAudit` menulis baris PLATFORM
+  `integration.replay` (tenant_id NULL, meta.platform=true +
+  resolvedTenantIds) lewat flag `app.platform_settings='admin'`
+  (pola 6C). Baris sumber tetap APPEND-ONLY seperti jalur tenant —
+  "resolved" dibuktikan baris-baris baru hasil replay yang kini
+  ber-tenant, bukan dengan mengubah baris sumber.
+- UI: seksi **Event integrasi tak ber-tenant** di Panel Admin —
+  daftar ringkas (provider, outcome dwibahasa, waktu, ringkasan) +
+  tombol Proses ulang untuk baris eligible + hasil outcome; klien
+  menambah `api.logs.replayUnresolved`.
+
+### Verifikasi Fase 13A (gerbang smoke penuh, tanpa Playwright)
+- Typecheck SEMUA paket hijau; build semua dist hijau; grep bundle:
+  API dist memuat `runPlatformIntegrationLogReplay` + `TEAM_SELF_ACTION`,
+  chunk AdminPage memuat kunci replay baru, chunk utama memuat
+  `change-password` + string password, chunk Settings merujuk kunci
+  `settings.passwordTitle/Submit`, MCP dist memuat `customFields`.
+- PGlite `verify` db: **SEMUA LULUS (33 seksi)** — tak ada perubahan
+  skema fase ini.
+- **Rantai Fase A dari server (39 PASS / 1 FAIL semu):** ganti password
+  (current salah 400 INVALID_PASSWORD; benar 200; sesi lain tercabut;
+  sesi sendiri bertahan; password lama 401; baru 200; pendek
+  PASSWORD_TOO_SHORT); API v1 customFields (POST echo utuh; GET
+  terbaca; PATCH gabung per kunci + field lama tetap jalan; non-string
+  400; tanpa scope 403 dua arah tanpa mengubah data; tak ada 404);
+  prioritas tim (owner→diri PATCH & DELETE = TEAM_SELF_ACTION;
+  admin→owner = TEAM_OWNER_PROTECTED dua arah; admin→diri =
+  TEAM_SELF_ACTION; member biasa→diri = 403 gerbang; regresi ganti
+  peran oleh owner 200; owner tetap owner); 16/16 rute utama 200;
+  chunk lazy FlowBuilder & vendor-react 200. Satu FAIL adalah artefak
+  skrip rantai (mencari teks literal terjemahan di chunk Settings —
+  resources i18n tinggal di chunk utama); bukti grep langsung: chunk
+  Settings merujuk `settings.passwordTitle/Submit` dan teks
+  "Ganti kata sandi" ada di chunk utama → substansi 40/40.
+- **verify-sdk: SEMUA LULUS (6 cek)** termasuk createContact +
+  updateContact customFields; **verify-mcp: SEMUA LULUS (19 cek)**
+  termasuk create_contact ditolak saat read-only dan customFields
+  tersimpan saat MCP_ALLOW_WRITES=1.
+- **Rantai Fase B (17 PASS / 0 FAIL)** dengan jendela mock Telegram
+  (±10 menit; mock bot 777555133 lokal, PLATFORM_ADMIN_EMAILS
+  ditambah email uji sementara): baris tenant-NULL eligible tertanam
+  via SQL → muncul di daftar admin platform (semua baris daftar
+  ber-tenantId null) → non-admin 404 di daftar & replay → replay 200
+  outcome `recorded` → pesan "halo dari replay platform 13a" tercatat
+  di percakapan tenant tujuan → baris log baru ber-tenant tujuan
+  dengan provenance `replay of log …` → audit platform
+  `integration.replay` tenant NULL (platform=true,
+  resolvedTenantIds=[tenant tujuan]) terbukti di DB → baris
+  non-eligible 422 LOG_REPLAY_NOT_ALLOWED → baris tak ada 404.
+- Pasca-rantai: `.env.staging` dipulihkan dari salinan pristine —
+  sha256 `9c1ded2a…` **byte-identik** dengan baseline; mock dimatikan
+  per PID eksplisit; health publik ok; channel asli user utuh
+  (Messenger "Sahabat Kreator Indonesia" + Telegram "Botara My Id"
+  tetap connected). Berkas rantai di server dihapus.
+- Batas jujur: (1) UI baru (form password, seksi admin, lazy routes)
+  belum diuji klik — menunggu uji UI user seperti fase sebelumnya;
+  seluruh jalur HTTP-nya terbukti di rantai. (2) Bukti rantai replay
+  platform memakai jalur Telegram; jalur Meta memakai prosesor yang
+  sama persis dengan webhook live (tanpa scope) tetapi baris Meta
+  tenant-NULL yang eligible jarang terbentuk alami sehingga tidak
+  ditanam terpisah. (3) Tenant uji `fase13a-*@sk.test` + beberapa
+  baris log tertanam tertinggal di staging (pola fase sebelumnya;
+  lenyap saat reset 11A). (4) Chunk SettingsPage 100,65 kB dicatat
+  sebagai pengamatan, bukan kegagalan: ia malas dan di luar muatan
+  awal.
