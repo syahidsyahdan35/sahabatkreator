@@ -3866,3 +3866,108 @@ Messenger: prompt tidak ada).
   pembagian kerja; yang terbukti di sini adalah typecheck, build,
   bundle tersaji identik, status HTTP publik, dan rantai URL di
   atas. Dialog Meta asli tetap di luar jangkauan (lihat batas 7D).
+
+## Update Fase 7B.4 — Viewer Audit Log (2026-11-02)
+
+Satu commit fitur: `cb5dd8b`. Fitur MURNI BACA: `audit_logs` yang
+selama ini ditulis di mana-mana kini bisa ditelusuri manusia dari
+dashboard. TANPA migrasi (skema `audit_logs` sejak 0001 + lengan
+platform 0022 sudah cukup) dan TANPA penulisan audit baru.
+
+### Taksonomi nyata (dipetakan dari kode, bukan ingatan)
+
+Seluruh 35 titik penulisan ada di `packages/core/src`. actor_type
+yang benar-benar dipakai hanya empat: `user`, `agent`, `system`,
+`api_key` (enum skema). Action nyata: `tenant.created`;
+`channel.created/connected/disconnected/trashed/restored/exported/
+purged`; `message.queued/sent/failed/status/retry`;
+`automation.fired`; `sequence.enrolled/step_sent/completed/
+cancelled_reply/cancelled_opt_out`; `agent.responded/capped/failed/
+handoff/payment_link/suggestion_approved/suggestion_rejected`;
+`contact.tagged/stage_changed`; `payment_link.created`;
+`payment.paid`; `api_key.created/revoked`; `telegram.my_chat_member`;
+`integration.replay`; dan khusus tenant-NULL
+`platform_settings.set/cleared/test`. Penulis audit secara eksplisit
+tidak menulis token/secret ke meta (pola yang dijaga semua fase);
+satu-satunya nilai bersyarat = teks error provider di `agent.failed`
+dan `code` tautan bayar publik di `payment_link.created` — keduanya
+sudah tampil di permukaan owner/admin lain.
+
+### API (pola modul logs)
+
+- `GET /api/tenants/:tenantId/audit` — sesi + membership;
+  **owner/admin saja** (member `agent`/`viewer` → 403, non-member →
+  404), konsisten dengan /logs karena metadata audit menyangkut
+  operasi workspace. Query: `actorType`, `category` (awalan action
+  sebelum titik: tenant/channel/message/automation/sequence/agent/
+  contact/payment_link/payment/api_key/telegram/integration/
+  platform_settings), `q` (substring action, ILIKE dengan wildcard
+  `%_\` di-escape), `from`/`to` (datetime), `cursor` + `limit`
+  (paginasi kursor base64url {createdAt,id}, urutan createdAt DESC,
+  id DESC).
+- `GET /api/audit/platform` — pandangan baris tenant-NULL untuk
+  sesi admin platform (allowlist yang ada); non-admin → 404.
+  Baris platform TIDAK PERNAH tercampur ke daftar tenant; sebaliknya
+  daftar tenant terkurung `tenant_id = :tenantId` (RLS) sehingga
+  baris platform tidak bisa bocor ke tenant mana pun.
+- Respons per baris (`packages/core/src/audit-log.ts`): id,
+  tenantId, createdAt, actorType, actorId, **actorLabel teresolusi**
+  (user → nama users, fallback email; api_key → `nama · prefix`;
+  agent → nama agent dari actorId `agent:<id>`; system → actorId
+  itu sendiri sebagai label jujur nama komponen; tak teresolusi →
+  null dan UI menampilkan actorId mentah), action, category,
+  **target ringkas** diturunkan dari kunci meta yang memang ditulis
+  penulis (prioritas: channelAccountId, paymentLinkId, apiKeyId,
+  suggestionId, enrollmentId, automationId, agentId, messageId,
+  conversationId, productId, contactId, sourceLogId, key), dan
+  **meta mentah** untuk panel detail — tidak ada endpoint detail
+  terpisah karena meta audit memang kecil (berbeda dari payload
+  log integrasi ±32KB).
+
+### UI — halaman `/audit`
+
+Item NAV_REGISTRY sesudah Logs (ikon clipboard-check baru di
+NavIcon; urutan desktop 14 / more 10; item admin bergeser ke
+15/11). `AuditPage` meniru LogsPage: filter actor/kategori/
+pencarian/tanggal (rentang lokal → ISO awal/akhir hari), daftar
+baris (waktu, chip actor semantik, actor teresolusi, **label aksi
+diterjemahkan untuk 35 action yang dikenal** — action tak dikenal
+tampil apa adanya dan tidak pernah gagal), baris dapat diperluas
+menampilkan actor id/target + metadata JSON terformat yang
+dirender React sebagai DATA (tanpa HTML mentah), tombol "Muat
+lagi" berkursor, auto-refresh 5 dtk mengikuti pola Logs, dan
+pengalih "Baris platform" untuk sesi admin platform di halaman
+yang sama. i18n en+id lengkap (seksi `audit.*` + `nav.audit`).
+
+### Verifikasi (tanpa Playwright)
+
+- Typecheck SELURUH workspace hijau; build api (tsup) + web
+  (Vite) hijau. Bundle publik `index-Bm29Y3Rz.js` identik dengan
+  build lokal dan memuat string halaman Audit kedua locale.
+- Publik: `GET /audit` → 200; 4 service systemd active (restart
+  via bunuh MainPID — `systemctl restart` non-sudo ditolak
+  polkit); `/api/health` ok.
+- Rantai API dari server terhadap URL publik (driver
+  `/tmp/sk7b4/driver.sh` + `chain.ts`, tenant uji saja; jendela
+  admin uji di `PLATFORM_ADMIN_EMAILS` dengan pemulihan
+  `.env.staging` byte-identik terverifikasi sha256 + email uji
+  tidak berstatus admin lagi sesudahnya): **54/54 PASS** —
+  tenant.created/channel.created/payment_link.created/
+  api_key.created+revoked/message.queued (user) muncul dengan
+  actor, label teresolusi, kategori, dan target yang benar;
+  message.queued via API publik tercatat sebagai actor `api_key`
+  dengan label nama kunci + prefix; filter actorType/kategori/
+  rentang tanggal bekerja dua arah (dalam rentang berisi, di luar
+  rentang kosong); q literal termasuk bukti escape wildcard
+  (`%` → kosong, `_` → hanya action ber-underscore); paginasi
+  kursor dua halaman disjoint dan terurut menurun; member role
+  agent → 403; non-member → 404; isolasi antar-tenant utuh;
+  pandangan platform: non-admin 404, admin 200 dengan semua baris
+  tenant-NULL (63 baris platform nyata saat uji, termasuk
+  platform_settings.*), filter kategori platform bekerja, dan
+  admin platform yang bukan member tetap 404 di daftar tenant.
+- Batas jujur: bukti visual halaman (rendering tabel, panel
+  detail, tema gelap/terang) menunggu uji user sesuai pembagian
+  kerja; yang terbukti di sini adalah kontrak API ujung-ke-ujung,
+  typecheck/build, dan bundle tersaji. File rantai tinggal di
+  server `/tmp/sk7b4/` (sementara).
