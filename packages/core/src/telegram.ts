@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -232,6 +232,16 @@ export async function recordTelegramInboundMessage(
               eq(conversations.tenantId, account.tenantId),
               eq(conversations.channelAccountId, account.id),
               eq(conversations.contactId, contactId),
+              // WAJIB (6A.1): batasi ke percakapan PRIVAT kontak ini.
+              // Kontak yang sama bisa menjadi jangkar percakapan GRUP
+              // (pengirim pertama) — tanpa syarat alamat chat ini, pesan
+              // privat anggota akan nyasar masuk utas grup. Baris lama
+              // pra-0019 bisa masih NULL provider_chat_id-nya dan pasti
+              // privat (grup belum ada di era 6A), jadi NULL diterima.
+              or(
+                eq(conversations.providerChatId, input.chatExternalId),
+                isNull(conversations.providerChatId),
+              ),
             ),
           )
           .orderBy(desc(conversations.createdAt))
