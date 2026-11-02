@@ -266,6 +266,26 @@ export const api = {
         body: JSON.stringify({}),
       });
     },
+    /**
+     * POST /api/auth/change-password (Better Auth) — verifikasi kata
+     * sandi saat ini di server; `revokeOtherSessions: true` mencabut
+     * sesi perangkat lain, sesi perangkat ini diperbarui & tetap masuk.
+     * Error Better Auth: INVALID_PASSWORD (saat ini salah) /
+     * PASSWORD_TOO_SHORT — diterjemahkan errorText dari kodenya.
+     */
+    changePassword(
+      currentPassword: string,
+      newPassword: string,
+    ): Promise<unknown> {
+      return request("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          currentPassword,
+          newPassword,
+          revokeOtherSessions: true,
+        }),
+      });
+    },
   },
   tenants: {
     async list(): Promise<TenantResponse[]> {
@@ -1063,6 +1083,18 @@ export const api = {
     ): Promise<IntegrationLogReplayResponse> {
       return request<IntegrationLogReplayResponse>(
         `/api/tenants/${tenantId}/logs/${logId}/replay`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+    /**
+     * POST /api/logs/unresolved/:logId/replay — proses ulang baris
+     * tenant-NULL yang eligible (Fase 13A; sesi platform admin saja,
+     * non-admin menerima 404). Respons membawa outcome baris-baris baru
+     * hasil replay.
+     */
+    replayUnresolved(logId: string): Promise<IntegrationLogReplayResponse> {
+      return request<IntegrationLogReplayResponse>(
+        `/api/logs/unresolved/${logId}/replay`,
         { method: "POST", body: JSON.stringify({}) },
       );
     },

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  IntegrationLogResponse,
   PlatformMetaInfo,
   PlatformSettingKey,
   PlatformSettingStatus,
@@ -349,7 +350,185 @@ export function AdminPage({ t, locale }: AdminPageProps) {
           />
         </div>
       </section>
+
+      <UnresolvedLogsSection t={t} locale={locale} />
     </div>
+  );
+}
+
+/** Label outcome log integrasi — kunci yang sama seperti halaman Logs. */
+const LOG_OUTCOME_LABEL_KEYS: Record<string, TranslationKey> = {
+  recorded: "logs.outcomeRecorded",
+  duplicate: "logs.outcomeDuplicate",
+  ignored_disconnected: "logs.outcomeIgnoredDisconnected",
+  ignored_echo: "logs.outcomeIgnoredEcho",
+  ignored_status_only: "logs.outcomeIgnoredStatusOnly",
+  rejected_signature: "logs.outcomeRejectedSignature",
+  rejected_unconfigured: "logs.outcomeRejectedUnconfigured",
+  unresolved_account: "logs.outcomeUnresolvedAccount",
+  error: "logs.outcomeError",
+  sent: "logs.outcomeSent",
+  failed: "logs.outcomeFailed",
+};
+
+/**
+ * Kelayakan replay platform di sisi UI (cermin aturan server — server
+ * tetap penegak akhirnya): arah masuk, tanda tangan valid saat intake,
+ * payload tersimpan, outcome belum final (`error` /
+ * `ignored_disconnected`).
+ */
+function isPlatformReplayEligible(row: IntegrationLogResponse): boolean {
+  return (
+    row.direction === "in" &&
+    row.signatureValid === true &&
+    row.hasPayload &&
+    (row.outcome === "error" || row.outcome === "ignored_disconnected")
+  );
+}
+
+/**
+ * Seksi event integrasi tak ber-tenant (Fase 13A — menutup sisa 7B.2):
+ * baris `integration_log` tenant-NULL tidak terjangkau replay tenant,
+ * jadi admin platform memproses ulangnya dari sini. Daftar ringkas
+ * (provider, outcome, waktu, ringkasan) + tombol proses ulang untuk
+ * baris yang eligible; hasil replay tampil sebagai outcome baris-baris
+ * baru, dan daftar dimuat ulang sesudahnya.
+ */
+function UnresolvedLogsSection({
+  t,
+  locale,
+}: {
+  t: Translate;
+  locale: Locale;
+}) {
+  const [rows, setRows] = useState<IntegrationLogResponse[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [replayingId, setReplayingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const requestSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    try {
+      const page = await api.logs.listUnresolved({ limit: 20 });
+      if (requestSeq.current !== seq) return;
+      setRows(page.logs);
+      setError(null);
+    } catch {
+      if (requestSeq.current !== seq) return;
+      setError(t("admin.unresolvedLoadError"));
+      setRows([]);
+    } finally {
+      if (requestSeq.current === seq) setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const outcomeLabel = (outcome: string): string => {
+    const key = LOG_OUTCOME_LABEL_KEYS[outcome];
+    return key ? t(key) : outcome;
+  };
+
+  const replay = async (row: IntegrationLogResponse) => {
+    setReplayingId(row.id);
+    setNotice(null);
+    setActionError(null);
+    try {
+      const result = await api.logs.replayUnresolved(row.id);
+      setNotice(
+        t("admin.unresolvedReplayDone", {
+          outcomes: result.outcomes.map(outcomeLabel).join(", "),
+        }),
+      );
+      await load();
+    } catch (err) {
+      setActionError(translateApiError(t, err));
+    } finally {
+      setReplayingId(null);
+    }
+  };
+
+  return (
+    <section className="mt-8">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-base font-semibold text-ink">
+          {t("admin.unresolvedTitle")}
+        </h2>
+        <button
+          type="button"
+          onClick={() => void load()}
+          disabled={loading}
+          className="rounded-md bg-elevated px-2.5 py-1 text-xs font-medium text-ink disabled:opacity-50"
+        >
+          {t("admin.unresolvedRefreshButton")}
+        </button>
+      </div>
+      <p className="mt-1 max-w-2xl text-sm text-muted">
+        {t("admin.unresolvedBody")}
+      </p>
+      {error ? (
+        <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-red-600">
+          {error}
+        </p>
+      ) : null}
+      {actionError ? (
+        <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-red-600">
+          {actionError}
+        </p>
+      ) : null}
+      {notice ? (
+        <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-ink">
+          {notice}
+        </p>
+      ) : null}
+      {loading && rows.length === 0 ? (
+        <p className="mt-4 text-sm text-muted">{t("common.loading")}</p>
+      ) : rows.length === 0 && !error ? (
+        <p className="mt-4 text-sm text-muted">{t("admin.unresolvedEmpty")}</p>
+      ) : (
+        <ul className="mt-4 space-y-2">
+          {rows.map((row) => (
+            <li
+              key={row.id}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-surface p-3 text-sm"
+            >
+              <span className="rounded-md bg-elevated px-2 py-0.5 font-mono text-xs text-ink">
+                {row.provider}
+              </span>
+              <span className="font-medium text-ink">
+                {outcomeLabel(row.outcome)}
+              </span>
+              <span className="text-xs text-muted">
+                {formatDateTime(row.createdAt, locale)}
+              </span>
+              {row.summary ? (
+                <span className="min-w-0 flex-1 truncate text-xs text-muted">
+                  {row.summary}
+                </span>
+              ) : null}
+              {isPlatformReplayEligible(row) ? (
+                <button
+                  type="button"
+                  onClick={() => void replay(row)}
+                  disabled={replayingId !== null}
+                  className="rounded-md bg-accent px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  {replayingId === row.id
+                    ? t("admin.unresolvedReplaying")
+                    : t("admin.unresolvedReplayButton")}
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

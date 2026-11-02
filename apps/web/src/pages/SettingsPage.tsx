@@ -19,6 +19,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { PasswordInput } from "../components/PasswordInput";
 import { formatDateTime } from "../utils/format";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
@@ -50,8 +51,8 @@ const DEFAULT_SCOPES: ApiKeyScope[] = [
 ];
 
 /**
- * Halaman Settings (Fase 5A) — untuk sekarang berisi bagian API Keys
- * (bagian pengaturan lain menyusul; disampaikan apa adanya di intro):
+ * Halaman Settings — berisi seksi Akun (ganti password, Fase 13A), API
+ * Keys (Fase 5A), dan Tim (Fase 9C):
  * daftar kunci workspace aktif (nama, awalan, chip scope, status,
  * terakhir dipakai), form buat (nama + centang scope), modal hasil
  * pembuatan yang menampilkan kunci UTUH satu kali dengan tombol salin
@@ -98,7 +99,9 @@ export function SettingsPage({ t, locale }: SettingsPageProps) {
       <h1 className="text-xl font-bold text-ink">{t("nav.settings")}</h1>
       <p className="mt-1 max-w-2xl text-sm text-muted">{t("settings.intro")}</p>
 
-      <section className="mt-6">
+      <ChangePasswordSection t={t} />
+
+      <section className="mt-10">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-ink">
@@ -239,6 +242,134 @@ export function SettingsPage({ t, locale }: SettingsPageProps) {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Seksi ganti password (Fase 13A — menutup temuan 9A bahwa Settings
+ * tidak punya form ini). Tingkat AKUN, bukan workspace: memakai
+ * endpoint Better Auth `change-password` yang memverifikasi kata sandi
+ * saat ini di server; klien tidak pernah membandingkan hash sendiri.
+ * Validasi lokal hanya untuk umpan balik cepat (kosong / <8 karakter /
+ * sama dengan saat ini / konfirmasi beda) — penegak akhirnya server
+ * (INVALID_PASSWORD / PASSWORD_TOO_SHORT diterjemahkan dari kodenya).
+ * Nilai kata sandi tidak pernah di-log atau disimpan di state selain
+ * field form, dan form dikosongkan sesudah berhasil.
+ */
+function ChangePasswordSection({ t }: { t: Translate }) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setSuccess(false);
+    if (!current || !next || !confirm) {
+      setError(t("settings.passwordRequired"));
+      return;
+    }
+    if (next.length < 8) {
+      setError(t("errors.passwordTooShort"));
+      return;
+    }
+    if (next === current) {
+      setError(t("settings.passwordSameAsCurrent"));
+      return;
+    }
+    if (next !== confirm) {
+      setError(t("settings.passwordMismatch"));
+      return;
+    }
+    setError(null);
+    setSubmitting(true);
+    try {
+      await api.auth.changePassword(current, next);
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+      setSuccess(true);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="mt-6">
+      <h2 className="text-base font-semibold text-ink">
+        {t("settings.passwordTitle")}
+      </h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted">
+        {t("settings.passwordBody")}
+      </p>
+      <form onSubmit={submit} className="mt-4 max-w-md space-y-3">
+        <div>
+          <label
+            htmlFor="settings-current-password"
+            className="mb-1 block text-sm font-medium text-ink"
+          >
+            {t("settings.passwordCurrentLabel")}
+          </label>
+          <PasswordInput
+            t={t}
+            id="settings-current-password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            className={inputClassName}
+            autoComplete="current-password"
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="settings-new-password"
+            className="mb-1 block text-sm font-medium text-ink"
+          >
+            {t("settings.passwordNewLabel")}
+          </label>
+          <PasswordInput
+            t={t}
+            id="settings-new-password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            className={inputClassName}
+            autoComplete="new-password"
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="settings-confirm-password"
+            className="mb-1 block text-sm font-medium text-ink"
+          >
+            {t("settings.passwordConfirmLabel")}
+          </label>
+          <PasswordInput
+            t={t}
+            id="settings-confirm-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            className={inputClassName}
+            autoComplete="new-password"
+          />
+        </div>
+        <FieldError message={error} />
+        {success ? (
+          <p className="rounded-lg bg-elevated px-3 py-2 text-sm text-ink">
+            {t("settings.passwordSuccess")}
+          </p>
+        ) : null}
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+        >
+          {submitting ? t("settings.passwordSaving") : t("settings.passwordSubmit")}
+        </button>
+      </form>
+    </section>
   );
 }
 

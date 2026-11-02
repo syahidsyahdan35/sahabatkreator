@@ -23,6 +23,9 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.userAlreadyExists");
     case "PASSWORD_TOO_SHORT":
       return t("errors.passwordTooShort");
+    // Better Auth change-password: kata sandi saat ini salah.
+    case "INVALID_PASSWORD":
+      return t("settings.passwordCurrentWrong");
     case "INVALID_EMAIL":
       return t("auth.emailInvalid");
     case "NETWORK_ERROR":
