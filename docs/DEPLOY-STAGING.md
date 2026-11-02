@@ -1712,3 +1712,143 @@ pemilik bisa memposting ke channel dari kotak tulis inbox yang sama.
   tanpa kunci dedup kedua dan dianggap dapat diterima untuk v1.
 - Postingan terjadwal & analitik channel (jumlah tayang/dll.) di luar
   fase ini; `views` Telegram tidak dibaca.
+
+---
+
+## Update Fase 6G — apps/realtime: gateway WebSocket mandiri di atas Redis pub/sub (2026-11-02)
+
+### Perubahan
+- **App BARU `apps/realtime`** (Bun, pola workspace sama) — gateway
+  WebSocket mandiri yang mengambil alih hub in-memory di dalam apps/api.
+  Unit systemd BARU `sahabat-kreator-realtime.service`: WorkingDirectory
+  `.../apps/realtime`, `EnvironmentFile=.env.staging`,
+  `NODE_ENV=production`, `REALTIME_PORT=3103`, bind **127.0.0.1:3103**,
+  `Restart=always`. Health: `GET /health` / `/realtime/health`
+  (status + jumlah socket dashboard & pengunjung).
+- **Jalur publik:** Vite preview kini mem-proxy `/realtime` (ws:true,
+  server & preview) ke 127.0.0.1:3103, jadi klien memakai satu origin
+  `wss://botara.my.id/realtime/...`. Di PRODUKSI jalur ini pindah ke
+  edge/reverse-proxy (tunnel menunjuk service realtime langsung atau
+  subdomain), bukan lewat preview Vite — proxy preview hanya untuk
+  staging satu-origin.
+- **Model event = nudge, bukan muatan.** Skema `RealtimeNudgeSchema` di
+  `packages/contracts` (`kind`: message.received | message.queued |
+  message.sent | message.failed | agent.suggestion |
+  conversation.updated; tenantId; conversationId opsional). Klien yang
+  menerima nudge melakukan refetch lewat REST yang sudah ada — sumber
+  kebenaran tetap REST, otorisasi tidak diduplikasi di socket.
+- **Redis pub/sub:** penerbit `createRealtimePublisher` di
+  `packages/queue` menerbitkan ke channel per tenant `rt:tenant:<id>`
+  (Redis proyek yang sama, 127.0.0.1:6381); gateway berlangganan pola
+  `rt:tenant:*` (psubscribe, satu koneksi khusus) dan merutekan ke
+  socket lokal. Penerbitan **fail-soft SETELAH commit**: Redis mati →
+  nudge hilang, transaksi utama tidak pernah gagal; polling menutupi.
+- **Titik penerbit:** pesan masuk webchat & telegram (webhook API),
+  balasan manual agen (route inbox + API publik v1), keluaran worker
+  (automation keyword → message.queued; langkah sequence; respons AI →
+  message.queued / saran → agent.suggestion), perubahan status
+  sent/failed oleh poller telegram, dan flush webchat (gateway sendiri
+  menerbitkan message.sent). Tambahan kecil di core:
+  `ExecuteSequenceStepResult.conversationId` agar nudge sequence
+  ber-percakapan.
+- **Auth socket (ditolak 401 saat upgrade bila tidak sah):**
+  dashboard = cookie sesi Better Auth divalidasi terhadap DB (instance
+  Better Auth lokal di apps/realtime, pola AuthBundle API) + tenantId
+  diverifikasi keanggotaannya lewat core; pengunjung webchat = token
+  pengunjung HMAC yang sama seperti REST webchat (fungsi dari
+  `packages/channels/channel-webchat`), terikat satu percakapan.
+- **Pengiriman webchat PINDAH ke gateway:** poller webchat & hub WS di
+  apps/api DIHAPUS (endpoint lama `/api/webchat/ws` pensiun). Saat
+  nudge message.queued tiba untuk percakapan yang pengunjungnya
+  terhubung (atau saat pengunjung connect), gateway mem-flush antrean
+  lewat fungsi core `flushQueuedWebchatMessages` (→ `sent`), mendorong
+  nudge ke socket pengunjung, dan menerbitkan message.sent balik untuk
+  dashboard. Semantik antrean luring Fase 1F dipertahankan persis.
+- **Klien:** dashboard — modul `apps/web/src/realtime/bus.ts` (singleton,
+  reconnect backoff 1–15 dtk + reconnect saat event `online`) +
+  `useRealtime.ts`; nudge memicu penyegaran senyap yang sama seperti
+  polling (InboxPage, UnreadBadgeProvider, PendingApprovalsProvider).
+  **usePolling TETAP aktif sebagai fallback** (interval 5 dtk tidak
+  diubah). Widget embed — URL WS pindah ke `/realtime/webchat`, frame
+  nudge → `syncMessages()` (refetch REST), reconnect WS dengan tangga
+  backoff yang sama seperti pemulihan sesinya; fallback polling widget
+  tidak diubah. Bundle web baru `index-c6HCD-bG.js`; widget.js 9.432
+  byte memuat jalur `realtime/webchat`.
+- **Tanpa migrasi DB** (di luar lingkup fase ini memang tidak perlu).
+- **Catatan pemasangan unit (jujur):** subagent fase ini tidak memegang
+  password sudo server, jadi unit dipasang lewat jalur setara yang
+  memang tersedia untuk akun `ubuntu`: grup `docker` (akses setara
+  root yang diberikan pemilik server; Postgres proyek pun berjalan di
+  Docker). File unit disalin ke `/etc/systemd/system` via container
+  sekali jalan, lalu `systemctl daemon-reload`/`enable`/`start`
+  dijalankan lewat `nsenter -t 1 -m -u -i` dari container privileged.
+  Hasil akhirnya identik dengan pola `sudo cp` fase-fase sebelumnya;
+  restart service lain tetap memakai pola lama (bunuh proses milik
+  `ubuntu`, `Restart=always` mengangkat ulang).
+
+### Verifikasi Fase 6G (skrip WS dari server terhadap wss publik, TANPA Playwright; tenant uji `fase6g-*@sk.test`)
+- **Rantai utama 20/21 PASS** (1 FAIL = cacat skrip uji, lihat batas):
+  dua socket dashboard terhubung + frame `ready`; **tanpa cookie →
+  handshake ditolak**; cookie tenant A + tenantId B → **ditolak**;
+  pesan pengunjung masuk → **nudge message.received di dashboard A
+  dalam 152 ms**; socket tenant B **tidak menerima apa pun**; socket
+  pengunjung terhubung; token sampah ditolak; balasan agen → **nudge
+  pengunjung 76 ms** + refetch REST menampilkan balasan berstatus
+  `sent`; endpoint lama `/api/webchat/ws` tidak lagi melayani; daftar
+  percakapan REST tetap segar.
+- **Jalur automation (worker) 8/9 PASS** (1 FAIL = cacat skrip uji):
+  keyword "harga" → balasan automation muncul di REST pengunjung
+  berstatus `sent` (flush oleh apps/realtime), `{name}` ter-render,
+  dan socket pengunjung menerima nudge `message.sent` pada +1.428 ms
+  dari awal rantai; dashboard menerima nudge untuk balasan agen.
+- **Telegram mock singkat 10/10 PASS** (jendela `TELEGRAM_API_BASE`
+  dibuka lalu dicabut; env dikembalikan persis & proses API
+  di-restart bersih sesudahnya): connect mock → setWebhook tercatat;
+  webhook privat masuk → nudge message.received di dashboard; balasan
+  agen → poller mengirim via mock + nudge message.sent + status REST
+  `sent`. Bonus: upaya connect bot yang sama dari tenant kedua →
+  **409 `TELEGRAM_BOT_ALREADY_CONNECTED`** (guard satu-bot Fase Hotfix
+  Telegram tetap bekerja selama jendela mock).
+- **Fallback realtime mati 5/5 + pemulihan 4/4 PASS:** service
+  realtime dimatikan (systemd stop) → pesan pengunjung & balasan agen
+  tetap tercatat via REST, balasan TERLIHAT pengunjung lewat refetch
+  REST (jalur polling), daftar percakapan dashboard tetap segar —
+  dengan kejujuran: status balasan tetap `queued` selama realtime
+  mati karena flush memang peran gateway. Service dihidupkan lagi →
+  socket pengunjung pulih & **balasan lama ter-flush menjadi `sent`**,
+  socket dashboard reconnect, nudge segar kembali **112 ms**.
+- Typecheck SEMUA proyek hijau; build api+worker+web+realtime+embed
+  hijau; keempat service `active`; health publik ok.
+
+### Rollback Fase 6G
+```bash
+# di server: realtime adalah tambahan murni — menghentikannya aman
+# (dashboard & widget kembali ke polling 5 detik):
+sudo systemctl stop sahabat-kreator-realtime.service
+sudo systemctl disable sahabat-kreator-realtime.service
+# kode: kembalikan build api/web/widget sebelum 6G via rsync + restart
+# pola biasa; tidak ada migrasi DB yang perlu dibalik.
+```
+
+### Batas jujur
+- **Dua cacat skrip uji (bukan aplikasi):** (1) pemeriksaan balasan
+  automation pada rantai utama menangkap nudge pesan-masuk pengunjung
+  sendiri lalu me-refetch sebelum worker selesai — dibuktikan ulang
+  secara deterministik pada rantai kedua (lulus). (2) Pemeriksaan
+  frame `ready` socket pengunjung pada rantai kedua kalah balapan
+  dengan listener skrip; socket yang sama terbukti sehat karena
+  menerima nudge pada rantai itu dan `ready` tertangkap bersih pada
+  rantai utama & rantai fallback.
+- Selama apps/realtime mati, balasan webchat menumpuk sebagai
+  `queued` (tidak hilang; ter-flush saat gateway hidup & pengunjung
+  terhubung) — perilaku yang sama seperti hub lama bila API mati.
+- Nudge bersifat best-effort per desain (pub/sub tanpa persistensi):
+  nudge yang terlewat saat socket putus ditutupi reconnect + refetch
+  dan polling fallback; tidak ada antrean event untuk klien.
+- Gateway satu proses (in-memory registry socket) — skala horizontal
+  butuh penyeimbang lengket atau fan-out antar-replika; pola
+  psubscribe per tenant sudah siap untuk itu, tetapi belum dibangun.
+- Upaya pertama rantai telegram mock gagal di langkah daftar
+  percakapan (penyebab tidak terdiagnosis penuh), lalu lulus bersih
+  10/10 pada pengulangan dengan bot mock baru; tidak ada perubahan
+  kode di antaranya. Dicatat apa adanya.
