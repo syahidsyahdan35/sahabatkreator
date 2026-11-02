@@ -286,6 +286,27 @@ export const MessageReplyToSchema = z.object({
 });
 export type MessageReplyTo = z.infer<typeof MessageReplyToSchema>;
 
+/**
+ * Snapshot kutipan cadangan (Hotfix 7B.6): isi pesan yang dikutip
+ * sebagaimana dikirim provider di payload webhook (Telegram menyertakan
+ * teks + penulis pesan asal pada `reply_to_message`), disimpan di
+ * `messages.reply_to_snapshot` saat ingest. Berbeda dari `replyTo` di
+ * atas: ini BUKAN tautan ke baris kita — tidak ada `id`, tidak bisa
+ * dilompati — hanya cadangan tampil untuk kutipan yang targetnya tidak
+ * tertaut (mis. pesan pra-stamping provider-id) atau sudah terhapus.
+ * Klien mendahulukan `replyTo` bila tidak null dan hanya memakai ini
+ * bila `replyTo` null. Selalu null untuk WhatsApp & Meta (payload
+ * kutipan mereka hanya membawa id, tanpa teks) dan untuk pesan yang
+ * tidak mengutip.
+ */
+export const MessageReplyToSnapshotSchema = z.object({
+  authorLabel: z.string().nullable(),
+  contentPreview: z.string().nullable(),
+});
+export type MessageReplyToSnapshot = z.infer<
+  typeof MessageReplyToSnapshotSchema
+>;
+
 export const MessageResponseSchema = z.object({
   id: z.string().uuid(),
   conversationId: z.string().uuid(),
@@ -304,6 +325,14 @@ export const MessageResponseSchema = z.object({
    * targetnya sudah terhapus (FK SET NULL) — kutipan lepas dengan anggun.
    */
   replyTo: MessageReplyToSchema.nullable(),
+  /**
+   * Snapshot kutipan cadangan (Hotfix 7B.6), terpisah dari `replyTo`
+   * agar klien membedakan "tertaut" vs "cadangan": isi bila pesan ini
+   * mengutip dan provider mengirim isi pesan asalnya (Telegram), apa
+   * pun status tautannya; klien hanya menampilkannya bila `replyTo`
+   * null.
+   */
+  replyToSnapshot: MessageReplyToSnapshotSchema.nullable(),
   createdAt: z.string().datetime(),
 });
 export type MessageResponse = z.infer<typeof MessageResponseSchema>;

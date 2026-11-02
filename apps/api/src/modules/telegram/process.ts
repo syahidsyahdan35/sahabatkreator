@@ -144,6 +144,8 @@ export async function processTelegramUpdate(
         replyToProviderMessageId: post.replyToProviderMessageId
           ? `telegram:${account.externalId}:${post.replyToProviderMessageId}`
           : null,
+        // Hotfix 7B.6: snapshot isi postingan yang dikutip.
+        replyToSnapshot: post.replyToSnapshot,
         text: post.text,
       });
     } catch (err) {
@@ -216,6 +218,8 @@ export async function processTelegramUpdate(
           replyToProviderMessageId: event.message.replyToProviderMessageId
             ? `telegram:${account.externalId}:${event.message.replyToProviderMessageId}`
             : null,
+          // Hotfix 7B.6: snapshot isi pesan yang dikutip.
+          replyToSnapshot: event.message.replyToSnapshot ?? null,
           text: event.message.text,
         });
       } catch (err) {

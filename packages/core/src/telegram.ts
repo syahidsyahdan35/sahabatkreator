@@ -177,6 +177,27 @@ export interface RecordTelegramInboundResult {
   duplicate: boolean;
 }
 
+/**
+ * Normalisasi snapshot kutipan sebelum disimpan (Hotfix 7B.6):
+ * snapshot yang KEDUA bidangnya kosong (payload provider hanya
+ * membawa id kutipan tanpa penulis/teks — hanya terjadi pada payload
+ * minimal) disetara dengan tidak ada snapshot: blok kutipan berisi
+ * label cadangan umum akan menyesatkan untuk kutipan yang isinya
+ * memang tidak kita ketahui sama sekali.
+ */
+function normalizeReplyToSnapshot(
+  snapshot:
+    | { authorLabel: string | null; contentPreview: string | null }
+    | null
+    | undefined,
+): { authorLabel: string | null; contentPreview: string | null } | null {
+  if (!snapshot) return null;
+  if (snapshot.authorLabel === null && snapshot.contentPreview === null) {
+    return null;
+  }
+  return snapshot;
+}
+
 export interface RecordTelegramInboundInput {
   /** Id user Telegram pengirim (`from.id`) — identitas kontak (atribusi). */
   senderExternalId: string;
@@ -197,6 +218,16 @@ export interface RecordTelegramInboundInput {
    * pesan tetap tercatat tanpa tautan.
    */
   replyToProviderMessageId?: string | null;
+  /**
+   * Snapshot isi pesan yang dikutip (Hotfix 7B.6) sebagaimana dikirim
+   * Telegram di `reply_to_message` — disimpan SELALU saat ada (bukan
+   * hanya saat tautan gagal) agar kutipan tetap terlihat bila baris
+   * target kelak terhapus; serializer/UI tetap mendahulukan tautan.
+   */
+  replyToSnapshot?: {
+    authorLabel: string | null;
+    contentPreview: string | null;
+  } | null;
   text: string;
 }
 
@@ -381,6 +412,7 @@ export async function recordTelegramInboundMessage(
         contentText: input.text,
         providerMessageId: input.providerMessageId,
         replyToMessageId,
+        replyToSnapshot: normalizeReplyToSnapshot(input.replyToSnapshot),
         status: "received",
       })
       .onConflictDoNothing()
@@ -531,6 +563,11 @@ export interface RecordTelegramChannelPostInput {
   providerMessageId: string;
   /** Id majemuk postingan yang dikutip postingan ini (Fase 7B.5), bila ada. */
   replyToProviderMessageId?: string | null;
+  /** Snapshot isi postingan yang dikutip (Hotfix 7B.6), bila payload membawanya. */
+  replyToSnapshot?: {
+    authorLabel: string | null;
+    contentPreview: string | null;
+  } | null;
   text: string;
 }
 
@@ -608,6 +645,7 @@ export async function recordTelegramChannelPost(
         contentText: input.text,
         providerMessageId: input.providerMessageId,
         replyToMessageId,
+        replyToSnapshot: normalizeReplyToSnapshot(input.replyToSnapshot),
         status: "received",
       })
       .onConflictDoNothing()

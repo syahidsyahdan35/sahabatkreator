@@ -1580,5 +1580,50 @@ const FLOW_MSG_ID = "84848484-8484-4484-8484-848484848484";
   );
 }
 
+// ---------- 25. Hotfix 7B.6: messages.reply_to_snapshot ----------
+// Kolom snapshot kutipan cadangan (migrasi 0032): (a) kolom ada di
+// messages; (b) nilai jsonb {authorLabel, contentPreview} tersimpan &
+// terbaca utuh dalam konteks tenant pemilik lewat policy
+// tenant_isolation yang SUDAH ada (tidak ada policy baru — kolom
+// otomatis ternaungi policy baris tabelnya); (c) konteks tenant LAIN
+// tidak melihat baris itu sama sekali; (d) baris tanpa snapshot tetap
+// terbaca NULL (pesan lama & provider tanpa teks kutipan tidak berubah).
+const SNAPSHOT_MSG_ID = "62626262-6262-4262-8262-626262626262";
+{
+  const colCheck = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_name = 'messages' AND column_name = 'reply_to_snapshot'`,
+  );
+  assert.equal(colCheck.rows[0].n, "1");
+  await db.query(
+    `INSERT INTO messages (id, tenant_id, conversation_id, direction, sender_type, type, content_text, status, reply_to_snapshot)
+     VALUES ($1, $2, $3, 'inbound', 'contact', 'text', 'Test balas quota', 'received',
+             '{"authorLabel":"@botaramyid_bot","contentPreview":"Pagi juga gaes"}'::jsonb)`,
+    [SNAPSHOT_MSG_ID, TENANT_A, CONV_A],
+  );
+  const snapshotViews = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const own = await tx.query<{ snap: unknown }>(
+      `SELECT reply_to_snapshot AS snap FROM messages WHERE id = $1`,
+      [SNAPSHOT_MSG_ID],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM messages WHERE id = $1`,
+      [SNAPSHOT_MSG_ID],
+    );
+    return { own, other };
+  });
+  assert.deepEqual(snapshotViews.own.rows[0].snap, {
+    authorLabel: "@botaramyid_bot",
+    contentPreview: "Pagi juga gaes",
+  });
+  assert.equal(snapshotViews.other.rows[0].n, "0");
+  console.log(
+    "[25] Hotfix 7B.6: kolom messages.reply_to_snapshot ada; snapshot jsonb tersimpan & terbaca utuh dalam konteks tenant pemilik lewat policy yang ada; tenant lain melihat 0 baris: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

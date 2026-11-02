@@ -113,6 +113,7 @@ export const en = {
     quoteTeamLabel: "Your team",
     quoteCancel: "Cancel quote",
     quoteJumpTitle: "Go to the quoted message",
+    quoteOriginalUnavailable: "Original message is not available",
     messageType: {
       image: "Image",
       audio: "Audio",

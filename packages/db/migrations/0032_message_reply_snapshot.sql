@@ -1,0 +1,22 @@
+-- Snapshot kutipan cadangan (Hotfix 7B.6).
+--
+-- `messages.reply_to_snapshot`: salinan ringkas isi pesan yang dikutip
+-- SEBAGAIMANA dikirim provider di payload webhook — {authorLabel,
+-- contentPreview}. Latar: tautan `reply_to_message_id` (0029) hanya
+-- terbentuk bila baris target ditemukan di percakapan yang sama; uji
+-- live 2026-11-02 menunjukkan kutipan ke pesan bot pra-6A.2 (yang
+-- `provider_message_id`-nya kosong) gugur tanpa jejak, padahal Telegram
+-- sudah mengirim teks pesan asal di dalam `reply_to_message`.
+--
+-- Diisi saat ingest Telegram setiap kali payload membawa pesan yang
+-- dikutip — bukan hanya saat tautan gagal — supaya kutipan tetap
+-- terlihat bila baris target kelak terhapus (FK tautan menjadi NULL
+-- oleh ON DELETE SET NULL; snapshot ini bertahan). Serializer & UI
+-- selalu mendahulukan tautan yang teresolusi; snapshot murni cadangan.
+-- WhatsApp & Meta tidak mengisi kolom ini: payload kutipan mereka
+-- hanya membawa id (context.id / reply_to.mid), tanpa teks.
+--
+-- Tidak ada policy RLS baru: kolom berada di tabel `messages` yang
+-- sudah dilindungi policy `tenant_isolation` (0005) — kolom baru
+-- otomatis ternaungi policy baris yang sama (dibuktikan di verify [25]).
+ALTER TABLE "messages" ADD COLUMN "reply_to_snapshot" jsonb;

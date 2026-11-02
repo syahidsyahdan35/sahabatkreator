@@ -1,10 +1,14 @@
 import type {
   ChannelAdapter,
+  ReplyToSnapshot,
   SendMessageInput,
   SendMessageResult,
   StandardEvent,
   VerifyWebhookInput,
 } from "@sahabat-kreator/channel-core";
+
+/** Bentuk snapshot kutipan (kanonis di channel-core; diekspor ulang di sini untuk pemakai paket ini). */
+export type { ReplyToSnapshot } from "@sahabat-kreator/channel-core";
 
 /**
  * @sahabat-kreator/channel-telegram — adapter Telegram Bot API (Fase 6A).
@@ -81,10 +85,19 @@ export interface TelegramMessage {
   date?: number;
   text?: string;
   /**
-   * Pesan yang dibalas pesan ini (Fase 7B.5): hanya `message_id`-nya
-   * yang kita pakai — isi target diambil dari baris kita sendiri.
+   * Pesan yang dibalas pesan ini (Fase 7B.5): `message_id`-nya dipakai
+   * untuk menautkan ke baris kita sendiri. Hotfix 7B.6: Telegram juga
+   * mengirim ISI pesan asal di sini (`from`/`sender_chat` + `text`/
+   * `caption`) — dipakai membangun snapshot kutipan cadangan untuk
+   * kutipan yang targetnya tidak tertaut ke baris kita.
    */
-  reply_to_message?: { message_id: number };
+  reply_to_message?: {
+    message_id: number;
+    from?: TelegramUser;
+    sender_chat?: TelegramChat;
+    text?: string;
+    caption?: string;
+  };
 }
 
 export interface TelegramUpdate {
@@ -259,6 +272,61 @@ export class TelegramBotApiClient {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot kutipan cadangan (Hotfix 7B.6)
+// ---------------------------------------------------------------------------
+
+/** Batas cuplikan teks pesan asal pada snapshot kutipan. */
+export const TELEGRAM_REPLY_SNAPSHOT_PREVIEW_CHARS = 200;
+
+/** Nama tampil user Telegram: nama lengkap, jatuh ke @username, lalu null. */
+function telegramUserDisplayName(user: TelegramUser): string | null {
+  const name = [user.first_name, user.last_name]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join(" ")
+    .trim();
+  if (name) return name;
+  return user.username ? `@${user.username}` : null;
+}
+
+/**
+ * Membangun snapshot kutipan dari `reply_to_message` mentah Telegram.
+ * Dipakai parser pesan & channel_post saat ingest, dan script backfill
+ * 7B.6 atas payload lama di log integrasi — SATU sumber semantik label
+ * penulis & cuplikan. Aturan label: pengirim bot → `@username` bila ada
+ * (identitas publik bot), selain itu nama tampilnya; pengirim manusia →
+ * nama tampil (nama lengkap, jatuh ke @username); tanpa `from` →
+ * `sender_chat` (postingan channel/admin anonim): judul chat, jatuh ke
+ * @username. Cuplikan: `text`, jatuh ke `caption` (media berketerangan),
+ * terpotong 200 karakter; media tanpa caption → null.
+ */
+export function buildTelegramReplyToSnapshot(
+  replyTo: NonNullable<TelegramMessage["reply_to_message"]>,
+): ReplyToSnapshot {
+  let authorLabel: string | null = null;
+  if (replyTo.from) {
+    authorLabel =
+      replyTo.from.is_bot && replyTo.from.username
+        ? `@${replyTo.from.username}`
+        : telegramUserDisplayName(replyTo.from);
+  }
+  if (!authorLabel && replyTo.sender_chat) {
+    authorLabel =
+      replyTo.sender_chat.title ??
+      (replyTo.sender_chat.username
+        ? `@${replyTo.sender_chat.username}`
+        : null);
+  }
+  const rawText = replyTo.text ?? replyTo.caption;
+  return {
+    authorLabel,
+    contentPreview:
+      rawText && rawText.trim()
+        ? rawText.slice(0, TELEGRAM_REPLY_SNAPSHOT_PREVIEW_CHARS)
+        : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Normalisasi update → StandardEvent (fungsi murni, bisa dites)
 // ---------------------------------------------------------------------------
 
@@ -278,6 +346,8 @@ export interface TelegramChannelPost {
   chatTitle: string | null;
   /** message_id postingan yang dikutip postingan ini (Fase 7B.5); null bila tidak mengutip. */
   replyToProviderMessageId: string | null;
+  /** Snapshot isi postingan yang dikutip (Hotfix 7B.6); null bila tidak mengutip. */
+  replyToSnapshot: ReplyToSnapshot | null;
   text: string;
   sentAt: string;
 }
@@ -300,6 +370,20 @@ export function parseTelegramChannelPost(
   if (!post.chat || typeof post.chat.id !== "number") return null;
   if (post.chat.type !== "channel") return null;
   if (typeof post.message_id !== "number") return null;
+  // Hotfix 7B.6: snapshot kutipan antar-postingan. Penulis postingan
+  // yang dikutip adalah channel itu sendiri — bila payload tidak
+  // membawa label penulis (from/sender_chat kosong), jatuh ke judul
+  // channel dari chat postingan ini.
+  let replyToSnapshot: ReplyToSnapshot | null = null;
+  if (typeof post.reply_to_message?.message_id === "number") {
+    replyToSnapshot = buildTelegramReplyToSnapshot(post.reply_to_message);
+    if (!replyToSnapshot.authorLabel) {
+      replyToSnapshot = {
+        ...replyToSnapshot,
+        authorLabel: post.chat.title ?? null,
+      };
+    }
+  }
   return {
     providerMessageId: String(post.message_id),
     chatExternalId: String(post.chat.id),
@@ -308,6 +392,7 @@ export function parseTelegramChannelPost(
       typeof post.reply_to_message?.message_id === "number"
         ? String(post.reply_to_message.message_id)
         : null,
+    replyToSnapshot,
     text: post.text,
     sentAt:
       typeof post.date === "number"
@@ -363,6 +448,12 @@ export function parseTelegramUpdate(payload: unknown): StandardEvent[] {
         replyToProviderMessageId:
           typeof message.reply_to_message?.message_id === "number"
             ? String(message.reply_to_message.message_id)
+            : undefined,
+        // Hotfix 7B.6: snapshot isi pesan yang dikutip (cadangan bila
+        // targetnya tidak tertaut ke baris kita di core).
+        replyToSnapshot:
+          typeof message.reply_to_message?.message_id === "number"
+            ? buildTelegramReplyToSnapshot(message.reply_to_message)
             : undefined,
         sentAt,
       },

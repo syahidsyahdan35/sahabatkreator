@@ -35,6 +35,21 @@ export type StandardMessageType =
  */
 export type StandardConversationKind = "private" | "group" | "channel";
 
+/**
+ * Snapshot kutipan cadangan (Hotfix 7B.6): isi pesan yang dikutip
+ * sebagaimana dikirim provider di payload webhook-nya. Hanya provider
+ * yang payload kutipannya memuat isi pesan asal yang bisa mengisinya
+ * (Telegram lewat `reply_to_message`); WhatsApp & Meta hanya membawa id
+ * kutipan, jadi bidang ini tidak pernah terisi dari mereka. Bentuknya
+ * sama persis dengan kontrak API `MessageReplyToSnapshot`.
+ */
+export interface ReplyToSnapshot {
+  /** Nama penulis pesan asal bila provider mengirimnya; null bila tidak ada. */
+  authorLabel: string | null;
+  /** Cuplikan teks/caption pesan asal (terpotong wajar); null untuk media tanpa caption. */
+  contentPreview: string | null;
+}
+
 /** Pesan yang sudah dinormalisasi dari format provider apa pun. */
 export interface StandardMessage {
   providerMessageId?: string;
@@ -59,6 +74,13 @@ export interface StandardMessage {
    * bentuk majemuknya dan menautkan ke baris target bila ditemukan.
    */
   replyToProviderMessageId?: string;
+  /**
+   * Snapshot isi pesan yang dikutip (Hotfix 7B.6), bila provider
+   * mengirim isinya di payload (Telegram). Cadangan tampil untuk
+   * kutipan yang targetnya tidak tertaut ke baris kita; tautan tetap
+   * prioritas di lapisan core/serializer.
+   */
+  replyToSnapshot?: ReplyToSnapshot | null;
   /** Kunci objek media di R2 setelah diunduh (URL media provider kedaluwarsa). */
   mediaObjectKey?: string;
   sentAt: string;

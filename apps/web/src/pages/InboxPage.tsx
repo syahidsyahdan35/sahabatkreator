@@ -396,6 +396,17 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
     (replyTo.type === "text"
       ? t("inbox.mediaMessage")
       : t(`inbox.messageType.${replyTo.type}` as TranslationKey));
+  // Hotfix 7B.6: label & cuplikan blok snapshot kutipan cadangan —
+  // label penulis dari payload provider; kosong → cadangan per arah
+  // yang sama seperti blok tertaut. Cuplikan kosong (media tanpa
+  // caption) → label media umum.
+  const quoteAuthorOfSnapshot = (msg: MessageResponse): string =>
+    msg.replyToSnapshot?.authorLabel ??
+    (msg.direction === "outbound"
+      ? t("inbox.quoteTeamLabel")
+      : contactDisplayName);
+  const quotePreviewOfSnapshot = (msg: MessageResponse): string =>
+    msg.replyToSnapshot?.contentPreview ?? t("inbox.mediaMessage");
   const quoteAuthorOfMessage = (msg: MessageResponse): string =>
     msg.senderName ??
     (msg.direction === "outbound"
@@ -603,6 +614,35 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                                   {quotePreviewOfReplyTo(msg.replyTo)}
                                 </span>
                               </button>
+                            ) : msg.replyToSnapshot ? (
+                              // Hotfix 7B.6: blok snapshot cadangan —
+                              // BUKAN tombol (tidak ada pesan asal yang
+                              // bisa dilompati); penanda halusnya title/
+                              // aria bahwa pesan asal tidak tersedia.
+                              <div
+                                title={t("inbox.quoteOriginalUnavailable")}
+                                aria-label={t("inbox.quoteOriginalUnavailable")}
+                                className={`mb-1.5 block w-full rounded-lg border-l-2 px-2 py-1 text-left ${
+                                  outbound
+                                    ? "border-white/70 bg-white/15"
+                                    : "border-accent bg-elevated"
+                                }`}
+                              >
+                                <span
+                                  className={`block truncate text-[11px] font-semibold ${
+                                    outbound ? "text-white" : "text-accent"
+                                  }`}
+                                >
+                                  {quoteAuthorOfSnapshot(msg)}
+                                </span>
+                                <span
+                                  className={`block truncate text-xs ${
+                                    outbound ? "text-white/85" : "text-muted"
+                                  }`}
+                                >
+                                  {quotePreviewOfSnapshot(msg)}
+                                </span>
+                              </div>
                             ) : null}
                             {!outbound && msg.senderName ? (
                               <p className="mb-0.5 text-[11px] font-semibold text-accent">

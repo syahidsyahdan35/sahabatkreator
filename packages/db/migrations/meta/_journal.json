@@ -225,6 +225,13 @@
       "when": 1793598014817,
       "tag": "0031_flows",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1793598114817,
+      "tag": "0032_message_reply_snapshot",
+      "breakpoints": true
     }
   ]
 }

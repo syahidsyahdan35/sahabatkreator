@@ -112,6 +112,7 @@ export const id: Resources = {
     quoteTeamLabel: "Tim Anda",
     quoteCancel: "Batalkan kutipan",
     quoteJumpTitle: "Ke pesan yang dikutip",
+    quoteOriginalUnavailable: "Pesan asal tidak tersedia",
     messageType: {
       image: "Gambar",
       audio: "Audio",

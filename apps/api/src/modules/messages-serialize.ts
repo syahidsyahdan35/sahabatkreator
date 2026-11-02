@@ -9,6 +9,9 @@ import type { Message } from "@sahabat-kreator/db";
  * Baris pesan yang bisa diserialkan: baris DB polos, atau baris yang
  * sudah ditempeli ringkasan kutipan teresolusi oleh core (Fase 7B.5 —
  * `MessageWithReplyTo`). Tanpa lampiran, `replyTo` dilaporkan null.
+ * `replyToSnapshot` (Hotfix 7B.6) adalah kolom DB biasa — ikut terbawa
+ * baris pesan apa adanya, terpisah dari `replyTo` agar klien bisa
+ * membedakan kutipan tertaut vs snapshot cadangan.
  */
 export type SerializableMessage = Message & {
   replyTo?: MessageReplyTo | null;
@@ -29,6 +32,7 @@ export function serializeMessage(row: SerializableMessage): MessageResponse {
     status: row.status,
     sentByUserId: row.sentByUserId,
     replyTo: row.replyTo ?? null,
+    replyToSnapshot: row.replyToSnapshot ?? null,
     createdAt: row.createdAt.toISOString(),
   });
 }

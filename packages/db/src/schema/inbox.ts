@@ -236,6 +236,23 @@ export const messages = pgTable(
       (): AnyPgColumn => messages.id,
       { onDelete: "set null" },
     ),
+    /**
+     * Snapshot kutipan cadangan (Hotfix 7B.6): salinan ringkas isi pesan
+     * yang dikutip SEBAGAIMANA dikirim provider di dalam payload webhook
+     * (Telegram menyertakan teks + penulis pesan asal pada
+     * `reply_to_message`). Diisi saat ingest Telegram SETIAP kali payload
+     * membawa pesan yang dikutip — bukan hanya saat tautan gagal — agar
+     * kutipan tetap terlihat bila baris target kelak terhapus (tautan di
+     * atas menjadi NULL oleh SET NULL, snapshot ini bertahan). Serializer
+     * & UI SELALU mendahulukan tautan `replyToMessageId` yang teresolusi;
+     * snapshot hanya cadangan tampil. NULL untuk pesan yang tidak
+     * mengutip, dan untuk provider yang payload kutipannya hanya membawa
+     * id tanpa teks (WhatsApp & Meta — memang tidak bisa di-snapshot).
+     */
+    replyToSnapshot: jsonb("reply_to_snapshot").$type<{
+      authorLabel: string | null;
+      contentPreview: string | null;
+    }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
