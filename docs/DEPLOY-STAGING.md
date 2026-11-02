@@ -873,3 +873,87 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   production, putuskan dengan sadar: percayai header IP dari tunnel /
   naikkan batas / nonaktifkan untuk jalur tertentu — jangan biarkan
   default ini mengunci banyak pengguna NAT di belakang satu bucket.
+
+---
+
+## Update Fase 5A — API keys per tenant + API publik /v1 (2026-11-02)
+
+### Perubahan
+- **DB:** migrasi `0015_api_keys_foundation` (generate) — tabel `api_keys`
+  Fase 1A DIPERLUAS aditif, bukan dibuat ulang: kolom `key_prefix`
+  (awalan tampil `sk_live_ab12`) + nilai enum audit baru `api_key` pada
+  `audit_actor_type`. Migrasi `0016_rls_api_keys_lookup` (custom) —
+  policy kedua `public_key_lookup` (FOR SELECT) pada `api_keys`: baris
+  terlihat bila `key_hash` sama dengan setting transaksi
+  `app.api_key_hash` — pola lengan sempit yang sama dengan siteKey
+  webchat (0006) & code bayar (0012). Total staging: 31 tabel, 27 policy.
+- **Format & penyimpanan kunci:** `sk_live_` + 43 char base64url dari
+  32 byte acak kriptografis. Server HANYA menyimpan hash SHA-256 +
+  awalan tampil. Kunci utuh muncul SATU KALI di respons pembuatan
+  (API & modal UI) dan tidak pernah bisa dibaca lagi.
+- **Manajemen (sesi + membership):** `POST/GET /api/tenants/:tenantId/api-keys`,
+  `DELETE .../api-keys/:id` (soft revoke via `revoked_at`). Membuat &
+  mencabut dibatasi role **owner/admin** (agent/viewer → 403 FORBIDDEN);
+  membaca daftar boleh semua member. Audit `api_key.created`/`api_key.revoked`.
+- **API publik /v1 (auth API key, BUKAN sesi):** header
+  `Authorization: Bearer sk_live_...` atau `X-API-Key`. Tenant selalu
+  diturunkan dari baris kunci — tidak ada tenantId di URL — dan semua
+  query berikutnya berjalan dalam konteks RLS tenant pemilik (service
+  core yang sama dengan dashboard; tidak ada logika duplikat).
+  Endpoint: `GET /v1/me`; `GET|POST /v1/contacts`; `GET /v1/conversations`;
+  `GET|POST /v1/conversations/:id/messages`; `GET /v1/products`.
+  Scope v1: `contacts:read`, `contacts:write`, `conversations:read`,
+  `messages:write`, `products:read` — default pembuatan hanya scope
+  read; write wajib dipilih eksplisit. Penolakan: 401 `API_KEY_INVALID`
+  (tidak ada/tidak dikenal), 401 `API_KEY_REVOKED`, 403
+  `API_KEY_SCOPE_DENIED`. `last_used_at` diperbarui best-effort.
+  Pesan keluar via API key tercatat di audit dengan actor_type
+  `api_key` (actor_id = id baris kunci, meta source `public_api`) dan
+  dikirim lewat jalur yang sama dengan balasan dashboard (hub webchat
+  langsung bila pengunjung terhubung, selain itu antrean poller).
+  Membaca riwayat pesan via /v1 TIDAK menandai percakapan terbaca
+  (semantik itu khusus inbox manusia — perbaikan QA-1).
+- **Web:** halaman **Settings** kini nyata berisi bagian API Keys —
+  daftar (nama, awalan, chip scope, status, terakhir dipakai), form
+  buat (nama + centang scope per-scope dengan penjelasan), modal kunci
+  baru (kunci utuh sekali + tombol salin + peringatan dwibahasa bahwa
+  kunci tidak akan ditampilkan lagi), cabut dengan konfirmasi. Bagian
+  pengaturan lain dinyatakan apa adanya sebagai menyusul. i18n en+id.
+- Deploy: build api+web di VM → commit `952d3c7` → rsync repo
+  (`.env.staging` dikecualikan & utuh) → migrasi via SSH port-forward
+  (role migrasi) → proses API & web milik `ubuntu` dihentikan → systemd
+  `Restart=always` mengangkat bundle `index-CwSxATSN.js`. Objek DB
+  terverifikasi langsung di staging: kolom `key_prefix` ada, policy
+  `public_key_lookup` ada, enum audit memuat `api_key`.
+
+### Verifikasi Fase 5A (publik, dari server terhadap https://botara.my.id)
+- Skrip E2E Bun di server (akun uji BARU `fase5a-*@sk.test`): **33/33 PASS** —
+  buat kunci read-only → daftar manajemen hanya menampilkan awalan
+  (tidak ada nilai utuh) → `GET /v1/me` benar via Bearer & via X-API-Key
+  → `GET /v1/contacts` 200 → `POST /v1/contacts` → 403
+  `API_KEY_SCOPE_DENIED` → kunci kedua full-scope → `POST /v1/contacts`
+  201 → `GET /v1/conversations` & `/:id/messages` memuat percakapan
+  webchat uji → `POST /v1/conversations/:id/messages` → pengunjung
+  menerima realtime via WS dan status pesan menjadi `sent` di dashboard
+  → negatif: tanpa header 401 `API_KEY_INVALID`, kunci acak 401,
+  manajemen tanpa sesi 401 → isolasi: kunci tenant A tidak melihat
+  kontak tenant B (pencarian & daftar penuh) → member berperan `agent`
+  (ditanam via SQL) membuat kunci → 403 FORBIDDEN tetapi tetap boleh
+  membaca daftar → `last_used_at` terisi sesudah pemakaian → cabut
+  kunci full (204) → request berikutnya 401 `API_KEY_REVOKED` →
+  `/api/health` ok. Baris audit `api_key`/`message.queued` dengan meta
+  source `public_api` terkonfirmasi di DB staging. Nilai kunci uji
+  tidak ditampilkan di catatan ini (awalan saja: `sk_live_T46v…`,
+  `sk_live_Oe_6…`).
+- **Regresi Playwright (resep QA-1, dari server):** run gabungan
+  `auth.spec.ts` + `shell-ux.spec.ts` (6 tes): **5 lulus, 1 timeout**
+  (tes overflow-horizontal desktop, 240 dtk). Tes yang sama dijalankan
+  ulang SENDIRIAN sesudahnya: **LULUS dalam 12 detik**. Kesimpulan:
+  stall lingkungan — bucket rate limit auth bersama di balik tunnel
+  (lihat catatan QA-1 di atas) sesudah skrip verifikasi + suite
+  mendaftarkan banyak akun berurutan; bukan regresi perubahan Settings
+  (halaman yang diuji tes itu tidak diubah fase ini selain perutean
+  shell). Assertion tidak dilemahkan.
+- `packages/db` verify (PGlite): 17 migrasi bersih, 31 tabel, 27 policy,
+  termasuk seksi baru yang membuktikan lengan `app.api_key_hash` hanya
+  membuka baris ber-hash yang disajikan.
