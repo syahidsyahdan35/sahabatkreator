@@ -1677,5 +1677,68 @@ const SAVED_REPLY_ID = "93939393-9393-4393-8393-939393939393";
   );
 }
 
+// ---------- 27. Fase 9B: usage_ledger.meta ----------
+// Kolom rincian metering (migrasi 0034): (a) kolom ada dengan default
+// '{}' untuk baris yang tidak menyebutnya; (b) meta jsonb ai_token
+// (agentId/provider/model/tokensIn/tokensOut/costUsd) tersimpan & bisa
+// diagregasi per tenant lewat policy usage_ledger yang ada; (c) tenant
+// lain tidak melihat barisnya.
+{
+  const USAGE_ID = "94949494-9494-4494-8494-949494949494";
+  await db.query(
+    `INSERT INTO usage_ledger (tenant_id, type, qty)
+     VALUES ($1, 'ai_token', 10)`,
+    [TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO usage_ledger (id, tenant_id, type, qty, ref_type, ref_id, meta)
+     VALUES ($1, $2, 'ai_token', 42, 'agent_response', 'msg-9b', $3::jsonb)`,
+    [
+      USAGE_ID,
+      TENANT_A,
+      JSON.stringify({
+        agentId: "95959595-9595-4595-8595-959595959595",
+        provider: "mock",
+        model: "mock-model",
+        tokensIn: 30,
+        tokensOut: 12,
+      }),
+    ],
+  );
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const agg = await tx.query<{
+      responses: string;
+      tokens_in: string;
+      tokens_out: string;
+      plain_meta: unknown;
+    }>(
+      `SELECT count(*)::text AS responses,
+              coalesce(sum((meta->>'tokensIn')::numeric), 0)::text AS tokens_in,
+              coalesce(sum((meta->>'tokensOut')::numeric), 0)::text AS tokens_out,
+              (SELECT meta FROM usage_ledger
+                WHERE tenant_id = $1 AND ref_id IS NULL LIMIT 1) AS plain_meta
+         FROM usage_ledger
+        WHERE tenant_id = $1 AND type = 'ai_token' AND ref_type = 'agent_response'`,
+      [TENANT_A],
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM usage_ledger WHERE id = $1`,
+      [USAGE_ID],
+    );
+    return { agg, other };
+  });
+  assert.equal(views.agg.rows[0].responses, "1");
+  assert.equal(views.agg.rows[0].tokens_in, "30");
+  assert.equal(views.agg.rows[0].tokens_out, "12");
+  assert.deepEqual(views.agg.rows[0].plain_meta, {});
+  assert.equal(views.other.rows[0].n, "0");
+  console.log(
+    "[27] Fase 9B: usage_ledger.meta — default '{}' untuk baris lama; rincian ai_token teragregasi dalam konteks tenant pemilik; tenant lain 0 baris: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

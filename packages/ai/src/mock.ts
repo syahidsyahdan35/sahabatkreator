@@ -29,7 +29,9 @@ import type {
  *    sungguhan; model asli memutuskan sendiri kapan memanggil tool ini.
  * 4. Usage token adalah estimasi deterministik (panjang karakter / 4),
  *    BUKAN angka dari provider — dicatat apa adanya sebagai provider
- *    'mock' dengan biaya model 0.
+ *    'mock'. Mock TIDAK melaporkan biaya (`costUsd` dibiarkan undefined):
+ *    dasbor pemakaian membedakan "biaya terlapor provider" dari
+ *    "tidak dilaporkan" dan tidak pernah mengarang angka.
  *
  * Deterministik murni: input yang sama → output yang sama, tanpa jam/RNG.
  */

@@ -39,6 +39,7 @@ import { createAuditRoutes } from "./modules/audit/routes";
 import { createBroadcastsRoutes } from "./modules/broadcasts/routes";
 import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
+import { createAnalyticsRoutes } from "./modules/analytics/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -153,6 +154,8 @@ routes.route("/", createBroadcastsRoutes(authBundle));
 routes.route("/", createFlowsRoutes(authBundle));
 // Modul saved-replies (Fase 9A) — macro balasan /tenants/:tenantId/saved-replies.
 routes.route("/", createSavedRepliesRoutes(authBundle));
+// Modul analitik (Fase 9B) — pemakaian AI /tenants/:tenantId/analytics/ai-usage.
+routes.route("/", createAnalyticsRoutes(authBundle));
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...

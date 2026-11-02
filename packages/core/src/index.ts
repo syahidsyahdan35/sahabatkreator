@@ -25,10 +25,21 @@ export {
   listContacts,
   getContact,
   updateContact,
+  findDuplicateContacts,
+  mergeContacts,
   type CreateContactInput,
   type UpdateContactInput,
   type ListContactsInput,
+  type DuplicateReason,
+  type DuplicateContactGroup,
+  type MergeContactsResult,
 } from "./contacts";
+export {
+  getAiUsageReport,
+  type AiUsageReport,
+  type AiUsageDayPoint,
+  type AiUsageAgentPoint,
+} from "./ai-usage";
 export {
   listConversations,
   getConversation,

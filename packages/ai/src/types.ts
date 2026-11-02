@@ -61,6 +61,15 @@ export interface LlmChatRequest {
 export interface LlmUsage {
   tokensIn: number;
   tokensOut: number;
+  /**
+   * Biaya aktual dalam USD — HANYA diisi bila provider benar-benar
+   * melaporkannya pada respons yang sama (OpenRouter dengan
+   * `usage: { include: true }`). Tidak pernah diestimasi/dikarang di
+   * lapisan mana pun: provider yang tidak melaporkan biaya (mock)
+   * membiarkan field ini undefined, dan dasbor pemakaian menampilkannya
+   * sebagai "tidak dilaporkan", bukan nol karangan.
+   */
+  costUsd?: number;
 }
 
 export interface LlmChatResult {

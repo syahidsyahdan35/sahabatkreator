@@ -1,5 +1,6 @@
 import type {
   AgentListResponse,
+  AiUsageReportResponse,
   ApiKeyListResponse,
   AuditLogListResponse,
   ApiKeyResponse,
@@ -21,6 +22,7 @@ import type {
   UpdateBroadcastRequest,
   ChannelAccountListResponse,
   ChannelAccountResponse,
+  ContactDuplicatesResponse,
   ContactListResponse,
   ContactResponse,
   ConversationListResponse,
@@ -251,6 +253,24 @@ export const api = {
       return request<ContactResponse>(
         `/api/tenants/${tenantId}/contacts/${contactId}`,
         { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** GET /api/tenants/:tenantId/contacts/duplicates → kelompok kandidat duplikat (Fase 9B). */
+    duplicates(tenantId: string): Promise<ContactDuplicatesResponse> {
+      return request<ContactDuplicatesResponse>(
+        `/api/tenants/${tenantId}/contacts/duplicates`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/contacts/:survivorId/merge { mergedId } → survivor hasil gabungan (owner/admin). */
+    merge(
+      tenantId: string,
+      survivorId: string,
+      mergedId: string,
+    ): Promise<ContactResponse> {
+      return request<ContactResponse>(
+        `/api/tenants/${tenantId}/contacts/${survivorId}/merge`,
+        { method: "POST", body: JSON.stringify({ mergedId }) },
       );
     },
   },
@@ -1179,6 +1199,19 @@ export const api = {
       return request<FailedMessageRetryResponse>(
         `/api/tenants/${tenantId}/failed-messages/${messageId}/retry`,
         { method: "POST", body: JSON.stringify({}) },
+      );
+    },
+  },
+  analytics: {
+    /** GET /api/tenants/:tenantId/analytics/ai-usage?days= → laporan pemakaian AI (Fase 9B). */
+    aiUsage(
+      tenantId: string,
+      days?: number,
+    ): Promise<AiUsageReportResponse> {
+      const qs = days !== undefined ? `?days=${days}` : "";
+      return request<AiUsageReportResponse>(
+        `/api/tenants/${tenantId}/analytics/ai-usage${qs}`,
+        { method: "GET" },
       );
     },
   },

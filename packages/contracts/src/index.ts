@@ -49,6 +49,8 @@ export const ErrorCodeSchema = z.enum([
   // (edit flow aktif, aktifkan yang sudah aktif, dst.) → 409.
   "FLOW_GRAPH_INVALID",
   "FLOW_INVALID_STATE",
+  // Fase 9B: merge kontak ke dirinya sendiri → 422.
+  "CONTACT_MERGE_SAME",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -168,6 +170,36 @@ export const ContactListResponseSchema = z.object({
   total: z.number().int().nonnegative(),
 });
 export type ContactListResponse = z.infer<typeof ContactListResponseSchema>;
+
+// --- Dedup & merge kontak (Fase 9B) ---
+
+/** Alasan dua kontak dinilai kandidat duplikat (sinyal yang cocok). */
+export const DuplicateReasonSchema = z.object({
+  type: z.enum(["phone", "email", "channel_identity"]),
+  /** Nilai ternormalisasi yang sama: telepon digit, email lowercase, atau "provider:externalUserId". */
+  value: z.string(),
+  contactIds: z.array(z.string().uuid()).min(2),
+});
+export type DuplicateReason = z.infer<typeof DuplicateReasonSchema>;
+
+export const ContactDuplicateGroupSchema = z.object({
+  contacts: z.array(ContactResponseSchema).min(2),
+  reasons: z.array(DuplicateReasonSchema).min(1),
+});
+export type ContactDuplicateGroup = z.infer<typeof ContactDuplicateGroupSchema>;
+
+export const ContactDuplicatesResponseSchema = z.object({
+  groups: z.array(ContactDuplicateGroupSchema),
+});
+export type ContactDuplicatesResponse = z.infer<
+  typeof ContactDuplicatesResponseSchema
+>;
+
+/** Body POST /contacts/:survivorId/merge — kontak yang dilebur ke survivor. */
+export const MergeContactRequestSchema = z.object({
+  mergedId: z.string().uuid(),
+});
+export type MergeContactRequest = z.infer<typeof MergeContactRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // Conversations & messages / inbox (Fase 1D)
@@ -1661,6 +1693,63 @@ export const AuditLogListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 export type AuditLogListQuery = z.infer<typeof AuditLogListQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Fase 9B — Analitik pemakaian AI (dasbor /analytics)
+// ---------------------------------------------------------------------------
+
+/**
+ * Laporan pemakaian AI satu tenant dari usage_ledger (type='ai_token').
+ * Kejujuran angka adalah bagian kontrak:
+ * - `tokensIn`/`tokensOut` hanya menjumlah baris BER-RINCIAN (meta Fase
+ *   9B); baris warisan tanpa rincian dihitung di `undetailedResponses`
+ *   dan hanya menyumbang `responses` + `tokensTotal` (dari kolom qty).
+ * - `costUsd` adalah biaya AKTUAL yang dilaporkan provider (OpenRouter);
+ *   null bila tak satu pun respons pada periode melaporkan biaya.
+ *   `costReportedResponses` menunjukkan cakupan biayanya. Tidak ada
+ *   estimasi harga karangan di mana pun pada kontrak ini.
+ */
+export const AiUsageDayPointSchema = z.object({
+  /** Tanggal UTC (YYYY-MM-DD). */
+  date: z.string(),
+  responses: z.number().int().nonnegative(),
+  tokensIn: z.number().nonnegative(),
+  tokensOut: z.number().nonnegative(),
+  costUsd: z.number().nonnegative().nullable(),
+});
+export type AiUsageDayPoint = z.infer<typeof AiUsageDayPointSchema>;
+
+export const AiUsageAgentPointSchema = z.object({
+  /** Null untuk keranjang baris warisan tanpa rincian agent. */
+  agentId: z.string().uuid().nullable(),
+  agentName: z.string().nullable(),
+  responses: z.number().int().nonnegative(),
+  tokensIn: z.number().nonnegative(),
+  tokensOut: z.number().nonnegative(),
+  costUsd: z.number().nonnegative().nullable(),
+  models: z.array(z.string()),
+});
+export type AiUsageAgentPoint = z.infer<typeof AiUsageAgentPointSchema>;
+
+export const AiUsageReportResponseSchema = z.object({
+  days: z.number().int().positive(),
+  responses: z.number().int().nonnegative(),
+  tokensTotal: z.number().nonnegative(),
+  tokensIn: z.number().nonnegative(),
+  tokensOut: z.number().nonnegative(),
+  detailedResponses: z.number().int().nonnegative(),
+  undetailedResponses: z.number().int().nonnegative(),
+  costUsd: z.number().nonnegative().nullable(),
+  costReportedResponses: z.number().int().nonnegative(),
+  daily: z.array(AiUsageDayPointSchema),
+  perAgent: z.array(AiUsageAgentPointSchema),
+  cap: z.object({
+    dailyLimit: z.number().int().positive(),
+    usedToday: z.number().int().nonnegative(),
+    remainingToday: z.number().int().nonnegative(),
+  }),
+});
+export type AiUsageReportResponse = z.infer<typeof AiUsageReportResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Fase 7C — Broadcasts v1

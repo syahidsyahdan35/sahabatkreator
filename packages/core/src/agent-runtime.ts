@@ -48,10 +48,10 @@ import {
  *    retrieval KB (full-text, top 5) untuk teks pesan pemicu.
  * 5. Panggil provider LLM (@sahabat-kreator/ai). Error/timeout provider →
  *    audit `agent.failed`, TIDAK ada pesan keluar, job tidak crash.
- * 6. Catat metering: usage_ledger type='ai_token' (qty = total token,
- *    biaya model dicatat dari provider — mock selalu 0; rincian
- *    provider/model/token ada di audit `agent.responded` karena
- *    usage_ledger memang tidak punya kolom metadata) + audit.
+ * 6. Catat metering: usage_ledger type='ai_token' (qty = total token;
+ *    rincian agent/provider/model/token in-out + biaya aktual provider
+ *    bila dilaporkan ada di kolom `meta` sejak Fase 9B) + audit
+ *    `agent.responded` dengan rincian yang sama.
  * 7. Mode 'auto': tool dieksekusi, lalu teks balasan menjadi pesan
  *    outbound sender_type='agent' berstatus 'queued' + event outbox
  *    `message.queued` (pengiriman sungguhan oleh poller API seperti
@@ -380,12 +380,35 @@ async function recordUsageAndAudit(
     triggerMessageId: string;
     tokensIn: number;
     tokensOut: number;
+    /** Provider & model hasil panggilan (dari LlmChatResult). */
+    provider: string;
+    model: string;
+    /** Biaya aktual USD dari provider — undefined bila tidak dilaporkan. */
+    costUsd?: number;
     auditMeta: Record<string, unknown>;
     extra?: (tx: DbTx) => Promise<void>;
   },
 ): Promise<void> {
   await withTenantDb(db, tenantId, async (tx) => {
     if (input.extra) await input.extra(tx);
+    // Rincian metering (Fase 9B, kolom usage_ledger.meta — migrasi 0034):
+    // agent/provider/model + token masuk/keluar per respons, agar dasbor
+    // /analytics bisa mengagregasi per agent & per hari. `qty` tetap total
+    // token (sumber hitung cap harian). Biaya HANYA bila provider
+    // melaporkannya (costUsd dari LlmChatResult) — disimpan sebagai
+    // meta.costUsd + costCurrency 'USD', TIDAK memakai kolom cost_model
+    // yang berdenominasi IDR.
+    const usageMeta: Record<string, unknown> = {
+      agentId: input.agentId,
+      provider: input.provider,
+      model: input.model,
+      tokensIn: input.tokensIn,
+      tokensOut: input.tokensOut,
+    };
+    if (input.costUsd !== undefined) {
+      usageMeta.costUsd = input.costUsd;
+      usageMeta.costCurrency = "USD";
+    }
     await tx.insert(usageLedger).values({
       tenantId,
       type: "ai_token",
@@ -395,11 +418,13 @@ async function recordUsageAndAudit(
       currency: "IDR",
       refType: AGENT_USAGE_REF_TYPE,
       refId: input.triggerMessageId,
+      meta: usageMeta,
     });
     await insertAgentAudit(tx, tenantId, input.agentId, "agent.responded", {
       triggerMessageId: input.triggerMessageId,
       tokensIn: input.tokensIn,
       tokensOut: input.tokensOut,
+      ...(input.costUsd !== undefined ? { costUsd: input.costUsd } : {}),
       ...input.auditMeta,
     });
   });
@@ -605,6 +630,9 @@ export async function respondToInboundMessage(
       triggerMessageId: messageId,
       tokensIn: result.usage.tokensIn,
       tokensOut: result.usage.tokensOut,
+      provider: result.provider,
+      model: result.model,
+      costUsd: result.usage.costUsd,
       auditMeta: { ...auditMeta, mode: agent.mode, emptyResponse: true },
     });
     return { responded: false, reason: "empty_response", mode: agent.mode };
@@ -618,6 +646,9 @@ export async function respondToInboundMessage(
       triggerMessageId: messageId,
       tokensIn: result.usage.tokensIn,
       tokensOut: result.usage.tokensOut,
+      provider: result.provider,
+      model: result.model,
+      costUsd: result.usage.costUsd,
       auditMeta: {
         ...auditMeta,
         mode: "suggest",
@@ -670,6 +701,9 @@ export async function respondToInboundMessage(
     triggerMessageId: messageId,
     tokensIn: result.usage.tokensIn,
     tokensOut: result.usage.tokensOut,
+    provider: result.provider,
+    model: result.model,
+    costUsd: result.usage.costUsd,
     auditMeta: {
       ...auditMeta,
       mode: "auto",

@@ -1,0 +1,15 @@
+-- AI usage detail (Fase 9B).
+--
+-- Kolom `meta` jsonb pada `usage_ledger`: rincian per baris metering.
+-- Untuk type='ai_token' penulisnya (core `recordUsageAndAudit`) mengisi
+-- { agentId, provider, model, tokensIn, tokensOut } dan — hanya bila
+-- provider BENAR-BENAR melaporkannya (OpenRouter) — { costUsd,
+-- costCurrency: 'USD' }. Biaya tidak memakai kolom cost_model karena
+-- mata uang baris ledger adalah IDR sedangkan biaya OpenRouter USD;
+-- keduanya tidak boleh tercampur.
+--
+-- Baris lama (pra-9B) mendapat default '{}' — rincian mereka diisi
+-- belakangan oleh backfill run-once `backfill:usage-meta` dari meta
+-- audit `agent.responded` (sumber yang sama-sama tercatat saat respons
+-- terjadi). Kolom `qty` tetap sumber total token untuk semua era.
+ALTER TABLE "usage_ledger" ADD COLUMN "meta" jsonb DEFAULT '{}'::jsonb NOT NULL;

@@ -132,6 +132,17 @@ export const usageLedger = pgTable(
     /** Referensi sumber, mis. refType='message', refId=<message uuid>. */
     refType: varchar("ref_type", { length: 64 }),
     refId: varchar("ref_id", { length: 255 }),
+    /**
+     * Rincian baris (Fase 9B): untuk type='ai_token' berisi
+     * { agentId, provider, model, tokensIn, tokensOut, costUsd?,
+     * costCurrency? }. Kolom `qty` tetap SUMBER total token (baris lama
+     * pra-9B punya meta '{}' — rincian in/out, model, dan agent-nya
+     * di-backfill dari meta audit `agent.responded`, lihat skrip
+     * backfill:usage-meta). Biaya TIDAK memakai kolom cost_model
+     * (mata uang baris = IDR): biaya aktual provider (OpenRouter)
+     * berdenominasi USD dan hidup di meta.costUsd agar tidak tercampur.
+     */
+    meta: jsonb("meta").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     // APPEND-ONLY: sengaja TIDAK ada updated_at.
   },

@@ -41,7 +41,12 @@ interface OpenRouterResponse {
       tool_calls?: OpenRouterToolCall[];
     };
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** Biaya aktual USD — hanya hadir bila request meminta `usage.include`. */
+    cost?: number;
+  };
 }
 
 export class OpenRouterProvider implements LlmProvider {
@@ -90,6 +95,10 @@ export class OpenRouterProvider implements LlmProvider {
           },
         })),
         tool_choice: "auto",
+        // Fase 9B: minta rincian usage LENGKAP termasuk biaya aktual
+        // (usage.cost, USD) agar metering mencatat biaya yang benar-benar
+        // dilaporkan provider — bukan estimasi tabel harga.
+        usage: { include: true },
       }),
     });
 
@@ -125,6 +134,13 @@ export class OpenRouterProvider implements LlmProvider {
       usage: {
         tokensIn: data.usage?.prompt_tokens ?? 0,
         tokensOut: data.usage?.completion_tokens ?? 0,
+        // Biaya hanya dicatat bila provider melaporkannya sebagai angka
+        // sah pada respons ini; selain itu undefined (tidak dikarang).
+        ...(typeof data.usage?.cost === "number" &&
+        Number.isFinite(data.usage.cost) &&
+        data.usage.cost >= 0
+          ? { costUsd: data.usage.cost }
+          : {}),
       },
       model: data.model ?? model,
       provider: this.name,

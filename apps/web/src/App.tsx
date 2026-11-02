@@ -42,6 +42,7 @@ import { AdminPage } from "./pages/AdminPage";
 import { LogsPage } from "./pages/LogsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { BroadcastsPage } from "./pages/BroadcastsPage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { FlowsPage } from "./pages/FlowsPage";
 import { FlowBuilderPage } from "./pages/FlowBuilderPage";
 import { PayPage } from "./pages/PayPage";
@@ -271,6 +272,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           <LogsPage t={t} locale={locale} isPlatformAdmin={isPlatformAdmin} />
         ) : activeId === "audit" ? (
           <AuditPage t={t} locale={locale} isPlatformAdmin={isPlatformAdmin} />
+        ) : activeId === "analytics" ? (
+          <AnalyticsPage t={t} locale={locale} />
         ) : activeId === "admin" && isPlatformAdmin ? (
           <AdminPage t={t} locale={locale} />
         ) : (
