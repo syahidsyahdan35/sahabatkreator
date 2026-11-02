@@ -319,12 +319,13 @@ export default function App() {
   // useTheme — logika tema tidak berubah, hanya presentasinya). Ikon
   // mencerminkan mode aktif; nama mode aktif ada di title + aria-label.
   // Ukuran tombol disamakan dengan tombol bahasa (28px) agar sejajar.
+  // Fase 7A (permintaan user): label teks terlihat "Language"/"Theme"
+  // DIHAPUS — pengguna sudah paham kedua kontrol ini; yang tersisa hanya
+  // tombol EN/ID + tombol ikon tema (aria-label/title tak terlihat tetap
+  // dipertahankan demi aksesibilitas).
   const controls = (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted">
-          {t("common.language")}
-        </span>
         <div className="flex gap-1">
           {(["en", "id"] as Locale[]).map((l) => (
             <button
@@ -343,9 +344,6 @@ export default function App() {
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted">
-          {t("common.theme")}
-        </span>
         <button
           type="button"
           onClick={cycleThemeMode}
