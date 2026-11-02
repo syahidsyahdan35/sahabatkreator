@@ -30,6 +30,7 @@ import * as schema from "@sahabat-kreator/db/schema";
 import type { Database } from "@sahabat-kreator/db";
 import {
   approveSuggestion,
+  evaluateInboundMessageForAutomations,
   executeAgentToolCall,
   listSuggestions,
   rejectSuggestion,
@@ -383,6 +384,47 @@ async function auditActions(action: string): Promise<number> {
   assert.equal(link2.rows[0].product_id, p1.rows[0].id);
   console.log(
     "[7] Fase 4A send_payment_link: tautan snapshot harga + pesan URL terkirim + audit; nama tak cocok → fallback produk aktif tertua tercatat: OK",
+  );
+}
+
+// ---------- 8. Fase 6A.2: penjaga channel di jalur evaluasi ----------
+// Postingan channel (kind='channel') TIDAK boleh memicu automation
+// maupun agent walau teksnya cocok dengan keyword automation aktif —
+// dibuktikan langsung pada dua fungsi core jalur evaluasi.
+{
+  const { conversationId } = await seedConversation("Kanal");
+  await client.query(
+    `UPDATE conversations SET kind = 'channel' WHERE id = $1`,
+    [conversationId],
+  );
+  const auto = await client.query<{ id: string }>(
+    `INSERT INTO automations (tenant_id, name, trigger_type, trigger_config, action_config, kind, is_active)
+     VALUES ($1, 'Promo Kanal', 'keyword', '{"keywords":["promo"],"match":"contains"}', '{"text":"Balasan promo {name}"}', 'keyword', true)
+     RETURNING id`,
+    [TENANT],
+  );
+  const msgId = await seedInbound(conversationId, "promo perdana di channel");
+  const ev = await evaluateInboundMessageForAutomations(db, {
+    tenantId: TENANT,
+    conversationId,
+    messageId: msgId,
+  });
+  assert.equal(ev.evaluated, false);
+  assert.equal(ev.fired.length, 0);
+  const runs = await client.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM automation_runs WHERE automation_id = $1`,
+    [auto.rows[0].id],
+  );
+  assert.equal(runs.rows[0].n, "0");
+  const res = await respondToInboundMessage(db, new MockProvider(), {
+    tenantId: TENANT,
+    conversationId,
+    messageId: msgId,
+  });
+  assert.equal(res.responded, false);
+  assert.equal(res.reason, "channel_conversation");
+  console.log(
+    "[8] Fase 6A.2 penjaga channel: automation tidak dievaluasi (evaluated=false, 0 runs) & agent menolak dengan 'channel_conversation' untuk postingan channel berkunci kata cocok: OK",
   );
 }
 

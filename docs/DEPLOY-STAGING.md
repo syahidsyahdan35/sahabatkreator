@@ -1585,3 +1585,130 @@ workspace user; webhook hidup menunjuk akun terbaru `10be58d5`
   di staging; yang terbukti di sini: kode polling ada di bundle yang
   tersaji publik dan seluruh sumber data yang dikonsumsinya segar
   seketika di URL publik asli.
+
+---
+
+## Update Fase 6A.2 — Dukungan CHANNEL Telegram (linimasa siaran) (2026-11-02)
+
+Melengkapi keluarga Telegram (privat 6A, grup 6A.1): channel tempat bot
+menjadi ADMIN kini tampil di dashboard sebagai linimasa postingan, dan
+pemilik bisa memposting ke channel dari kotak tulis inbox yang sama.
+
+### Model data (migrasi 0021, generate + backfill tulis tangan)
+- `conversations.kind` varchar(16) NOT NULL DEFAULT 'private' + CHECK
+  `conversations_kind_valid` IN ('private','group','channel') — penanda
+  jenis EKSPILIT; sampai 6A.1 jenis disimpulkan dari kehadiran `title`,
+  yang tidak lagi cukup karena channel juga berjudul. Backfill memakai
+  heuristik warisan itu persis: `title IS NOT NULL → 'group'`, sisanya
+  tetap 'private' (benar untuk privat Telegram & semua webchat; channel
+  belum ada sebelum fase ini). Staging terkonfirmasi sesudah migrasi:
+  **3 group / 63 private / 0 channel**. `when` jurnal 0021 dinaikkan
+  manual ke 1793591000000 (hasil generate lebih kecil dari 0020 —
+  jebakan lama). Kontrak: `ConversationResponse.isChannel` ditambah,
+  `isGroup` dipertahankan — keduanya kini diturunkan dari `kind` di
+  core `listConversations` (bukan lagi `title !== null`).
+- **Kontak jangkar channel = channel itu sendiri** (keputusan disengaja,
+  meniru semantik `sender_chat` Telegram): satu kontak per channel
+  bernama judul channel, identitas `external_user_id` = id chat channel.
+  Bukan orang — entitas siaran; pola ini membuat resolusi alamat poller
+  (coalesce provider_chat_id → identitas) bekerja tanpa jalur khusus,
+  dan nama kontak mengikuti pergantian judul channel.
+
+### Alur
+- **Adapter:** parser khusus `parseTelegramChannelPost` (channel_post
+  tidak punya `from` pengguna — tidak lewat jalur pesan biasa);
+  `setWebhook` kini meminta `allowed_updates: ["message",
+  "my_chat_member", "channel_post"]` untuk connect/reconnect/rotasi
+  berikutnya.
+- **Webhook:** `channel_post` teks → core `recordTelegramChannelPost`:
+  find-or-create percakapan channel + catat postingan (sender_name =
+  judul channel). `my_chat_member` chat bertipe channel dengan status
+  aktif (administrator/member/creator) → percakapan channel langsung
+  dibuat/ditemukan + audit `telegram.my_chat_member` (meta kini memuat
+  chatType + channelConversationId); bot dikeluarkan → audit saja,
+  riwayat tetap. channel_post non-teks → 200 diabaikan.
+- **Semantik linimasa (disengaja, berbeda dari percakapan):** postingan
+  channel TIDAK menaikkan unread (API bahkan menegakkan unreadCount=0
+  untuk kind channel di `listConversations`), TIDAK menulis event
+  outbox `message.received`, dan jalur evaluasi punya **penjaga `kind`
+  eksplisit**: `evaluateInboundMessageForAutomations` berhenti sebelum
+  efek samping apa pun untuk percakapan channel (reason tak dievaluasi),
+  `respondToInboundMessage` menolak dengan reason baru
+  `channel_conversation`. Event liar yang mengarah ke pesan channel
+  tetap tidak menembakkan automation/agent (dibuktikan di bawah).
+- **Dedup pantulan:** poller Telegram kini MENYIMPAN provider_message_id
+  majemuk `telegram:<botId>:<message_id>` hasil sendMessage pada pesan
+  outbound saat menandai `sent` (`markOutboundMessageSent` dapat
+  parameter opsional; pemanggil webchat tak berubah). Postingan kita
+  memantul sebagai channel_post dengan message_id yang sama →
+  ter-dedup di core dan linimasa menampilkannya SATU kali sebagai
+  kiriman kita. Bila pantulan balapan tiba lebih dulu (id menabrak
+  index unik), poller menandai sent ulang TANPA id agar status tidak
+  ikut gagal.
+- **UI Inbox:** chip "Channel"/"Kanal" (i18n `inbox.channelLabel`,
+  pola chip Grup) di daftar & header; utas channel memakai kotak tulis
+  yang sama dengan label konteks siaran — tombol "Post to channel"/
+  "Posting ke channel", placeholder & catatan pengiriman khusus
+  channel (kunci i18n baru en+id). Pengiriman = endpoint balasan yang
+  sudah ada → queued → poller → sendMessage ke provider_chat_id
+  channel. Bundle baru `index-C-Ee54kQ.js`. Halaman Channels tidak
+  diubah (Inbox sudah cukup jelas). **Penjadwalan postingan TIDAK
+  termasuk fase ini** — lanjutan broadcast.
+
+### Verifikasi (mock Bot API lokal di server, pola 6A/6A.1 — TANPA Playwright)
+- Mock diperluas pola lama (id bot dari awalan numerik token;
+  sendMessage mengembalikan message_id menaik dari 9001 agar pantulan
+  bisa dipalsukan persis). Jendela `TELEGRAM_API_BASE` dibuka lalu
+  DICABUT; keadaan akhir `.env.staging` terverifikasi kembali 9
+  variabel (600), mock dimatikan, skrip /tmp dihapus, ketiga service
+  active, health publik ok, bundle publik = build lokal.
+- Rantai publik dari server (skrip Bun, tenant uji BARU
+  `fase6a2-*@sk.test`): **53/53 PASS** — connect mock + setWebhook
+  tercatat dengan allowed_updates memuat `channel_post`; secret salah
+  401; my_chat_member channel (bot jadi admin) → percakapan muncul via
+  API dengan isChannel + title benar + unread 0; channel_post teks dari
+  admin lain → 1 pesan masuk ber-senderName judul channel, duplikat
+  update tetap 1, unread tetap 0, preview daftar cocok; automation
+  keyword "promo" AKTIF → postingan channel berkunci "promo" TIDAK
+  menghasilkan run & mock tidak menerima balasan; **event outbox
+  `message.received` liar disuntikkan langsung ke DB untuk pesan
+  channel itu → runs tetap 0, tetap tidak ada sendMessage** (penjaga
+  kind terbukti, bukan sekadar ketiadaan event); posting dari dashboard
+  → mock menerima sendMessage dengan chat_id = id channel, status
+  `sent`; pantulan channel_post dengan message_id yang sama → linimasa
+  tetap 1 baris untuk postingan itu; channel_post non-teks → 200 tak
+  tercatat; regresi privat: automation tetap menembak & membalas ke
+  chat privat, unread privat naik; regresi grup: percakapan isGroup &
+  balasan manual terkirim ke id grup; tenant lain 404; tanpa sesi 401.
+  Audit DB: tepat 1 baris `telegram.my_chat_member` ber-chatType
+  'channel' dengan channelConversationId. Token mock: **0 kemunculan**
+  di journal API+worker.
+- Lokal: typecheck SEMUA proyek hijau; `packages/db` verify (PGlite)
+  lulus termasuk seksi baru **[15]** (kolom kind + default + CHECK;
+  pernyataan backfill title→'group' tepat pada data bergaya pra-0021;
+  alamat posting percakapan channel teresolusi ke id channel lewat
+  query poller); uji integrasi worker `verify:agent-tools` ditambah
+  seksi **[8]** — postingan channel berkunci cocok: evaluasi automation
+  `evaluated=false` + 0 runs, agent menolak `channel_conversation` —
+  SEMUA LULUS; `verify:sequences` tetap lulus.
+
+### Batas jujur
+- **Bot harus ADMIN channel** agar Telegram mengirim `channel_post`
+  (dan agar sendMessage ke channel diterima) — itu wewenang pemilik
+  channel di aplikasi Telegram, di luar kendali kode.
+- **Webhook lama belum memuat `channel_post`:** akun yang terhubung
+  SEBELUM fase ini (termasuk bot asli user, yang webhook-nya terakhir
+  didaftarkan saat remediasi hotfix dengan allowed_updates lama
+  ["message","my_chat_member"]) TIDAK akan menerima channel_post
+  sampai webhook-nya didaftarkan ulang — jalur alaminya: disconnect →
+  connect lagi dari halaman Channels (atau rotasi secret berikutnya).
+  Connect baru mulai hari ini sudah memakai allowed_updates lengkap.
+  Fase ini SENGAJA tidak mendaftarkan ulang webhook akun yang sudah
+  terhubung.
+- Balapan pantulan: bila channel_post pantulan tiba dalam jendela
+  milidetik sebelum poller selesai menandai `sent`, postingan bisa
+  tercatat ganda (pantulan sebagai masuk + kiriman kita) — poller
+  sudah menutup sisi penandaannya; jendela ingest tidak bisa ditutup
+  tanpa kunci dedup kedua dan dianggap dapat diterima untuk v1.
+- Postingan terjadwal & analitik channel (jumlah tayang/dll.) di luar
+  fase ini; `views` Telegram tidak dibaca.
