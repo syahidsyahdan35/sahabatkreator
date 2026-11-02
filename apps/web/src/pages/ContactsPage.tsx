@@ -17,6 +17,7 @@ import {
 import { api } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { Avatar } from "../components/Avatar";
 import { useWorkspace } from "../workspace/WorkspaceProvider";
 
 type Translate = (
@@ -235,9 +236,7 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
                   onClick={() => setSelected(contact)}
                   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-elevated"
                 >
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-sm font-bold text-accent">
-                    {contact.name.trim().charAt(0).toUpperCase() || "?"}
-                  </span>
+                  <Avatar name={contact.name} imageUrl={contact.avatarUrl} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-semibold text-ink">
                       {contact.name}
@@ -473,11 +472,14 @@ function ContactDetailModal({
     >
       <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-bold text-ink">{t("contacts.detailTitle")}</h2>
-            <p className="mt-0.5 text-sm text-muted">
-              {[contact.phone, contact.email].filter(Boolean).join(" · ") || "—"}
-            </p>
+          <div className="flex min-w-0 items-center gap-3">
+            <Avatar name={contact.name} imageUrl={contact.avatarUrl} />
+            <div className="min-w-0">
+              <h2 className="text-lg font-bold text-ink">{t("contacts.detailTitle")}</h2>
+              <p className="mt-0.5 text-sm text-muted">
+                {[contact.phone, contact.email].filter(Boolean).join(" · ") || "—"}
+              </p>
+            </div>
           </div>
           <button
             type="button"

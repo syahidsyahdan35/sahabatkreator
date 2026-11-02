@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  decryptChannelSecret,
+  fetchAndStoreTelegramProfilePhoto,
   recordTelegramChannelPost,
   recordTelegramInboundMessage,
   recordTelegramMyChatMember,
   resolveTelegramAccountById,
   verifyChannelWebhookSecret,
+  type TelegramAccountRef,
 } from "@sahabat-kreator/core";
 import {
   parseTelegramChannelPost,
@@ -36,11 +39,47 @@ import { apiError, type AppVariables } from "../../http";
  * Update `channel_post` (Fase 6A.2) punya jalur sendiri ke linimasa
  * channel dan SENGAJA tidak menghasilkan event outbox itu.
  */
+export interface TelegramModuleOptions {
+  /** Material kunci enkripsi kredensial channel (env CHANNEL_TOKEN_SECRET). */
+  channelTokenSecret?: string;
+  /** Base URL Bot API (env TELEGRAM_API_BASE; default api.telegram.org). */
+  telegramApiBase?: string;
+}
+
 export function createTelegramRoutes(
   bundle: AuthBundle | null,
   publisher?: RealtimePublisher | null,
+  opts: TelegramModuleOptions = {},
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
+
+  /**
+   * Fase 6D: identitas Telegram yang BARU pertama kali terlihat memicu
+   * pengambilan foto profil kontaknya — best-effort & fire-and-forget
+   * (webhook tetap menjawab seketika; helper core tidak pernah melempar),
+   * dan TIDAK diulang pada pesan berikutnya dari kontak yang sama.
+   */
+  const triggerContactPhoto = (
+    db: AuthBundle["db"],
+    account: TelegramAccountRef,
+    contactId: string,
+    senderExternalId: string,
+  ): void => {
+    if (!account.accessTokenEncrypted || !opts.channelTokenSecret) return;
+    const botToken = decryptChannelSecret(
+      opts.channelTokenSecret,
+      account.accessTokenEncrypted,
+    );
+    if (!botToken) return;
+    void fetchAndStoreTelegramProfilePhoto(db, {
+      tenantId: account.tenantId,
+      botToken,
+      telegramApiBase: opts.telegramApiBase,
+      telegramUserId: senderExternalId,
+      ownerType: "contact",
+      ownerId: contactId,
+    });
+  };
 
   app.post("/telegram/webhook/:channelAccountId", async (c) => {
     if (!bundle) {
@@ -154,14 +193,26 @@ export function createTelegramRoutes(
           providerMessageId: `telegram:${account.externalId}:${event.message.providerMessageId ?? event.providerEventId ?? ""}`,
           text: event.message.text,
         });
-        // Fase 6G: nudge dashboard setelah commit (null = kembaran milik
-        // tenant lain / duplikat webhook — tidak ada perubahan lokal).
-        if (recorded && publisher) {
-          await publisher.publishNudge({
-            kind: "message.received",
-            tenantId: account.tenantId,
-            conversationId: recorded.conversationId,
-          });
+        if (recorded) {
+          // Fase 6D: pengirim pertama kali terlihat → ambil foto profil
+          // kontaknya (best-effort, tidak menahan jawaban webhook).
+          if (recorded.identityCreated) {
+            triggerContactPhoto(
+              bundle.db,
+              account,
+              recorded.contactId,
+              event.message.senderExternalId,
+            );
+          }
+          // Fase 6G: nudge dashboard setelah commit (null = kembaran milik
+          // tenant lain / duplikat webhook — tidak ada perubahan lokal).
+          if (publisher) {
+            await publisher.publishNudge({
+              kind: "message.received",
+              tenantId: account.tenantId,
+              conversationId: recorded.message.conversationId,
+            });
+          }
         }
       }
     }

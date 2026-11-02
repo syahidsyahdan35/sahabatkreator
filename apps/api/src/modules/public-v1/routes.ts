@@ -140,7 +140,7 @@ export function createPublicV1Routes(
     const auth = c.get("apiKeyAuth");
     const result = await listContacts(bundle.db, { tenantId: auth.tenantId }, query.data);
     const body = ContactListResponseSchema.parse({
-      contacts: result.contacts.map(serializeContact),
+      contacts: result.contacts.map((row) => serializeContact(row)),
       total: result.total,
     });
     return c.json(body);
@@ -174,7 +174,7 @@ export function createPublicV1Routes(
     const auth = c.get("apiKeyAuth");
     const rows = await listConversations(bundle.db, { tenantId: auth.tenantId }, query.data);
     const body = ConversationListResponseSchema.parse({
-      conversations: rows.map(serializeConversation),
+      conversations: rows.map((row) => serializeConversation(row)),
     });
     return c.json(body);
   });

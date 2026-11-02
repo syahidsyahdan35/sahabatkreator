@@ -169,6 +169,20 @@
       "when": 1793593999240,
       "tag": "0023_channel_trash",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793595038734,
+      "tag": "0024_profile_photos_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793595138734,
+      "tag": "0025_rls_profile_photos",
+      "breakpoints": true
     }
   ]
 }

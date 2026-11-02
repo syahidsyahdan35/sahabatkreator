@@ -462,6 +462,7 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                       channel.botUsername ||
                       providerLabel(t, channel.provider)
                     }
+                    imageUrl={channel.avatarUrl ?? undefined}
                   />
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-semibold">
@@ -734,6 +735,7 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                     channel.botUsername ||
                     providerLabel(t, channel.provider)
                   }
+                  imageUrl={channel.avatarUrl ?? undefined}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">

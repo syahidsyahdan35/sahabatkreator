@@ -13,6 +13,7 @@ import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
 import { translateApiError } from "../api/errorText";
 import { FieldError, inputClassName } from "../components/AuthLayout";
+import { Avatar } from "../components/Avatar";
 import {
   LIVE_REFRESH_INTERVAL_MS,
   usePolling,
@@ -393,9 +394,7 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                         isActive ? "bg-accent/10" : "hover:bg-elevated"
                       }`}
                     >
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-sm font-bold text-accent">
-                        {displayName.trim().charAt(0).toUpperCase() || "?"}
-                      </span>
+                      <Avatar name={displayName} imageUrl={conv.contactAvatarUrl} />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline justify-between gap-2">
                           <span className="truncate text-sm font-semibold text-ink">
@@ -457,6 +456,10 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
                   >
                     ← {t("common.back")}
                   </button>
+                  <Avatar
+                    name={selected.title ?? selected.contactName}
+                    imageUrl={selected.contactAvatarUrl}
+                  />
                   <div className="min-w-0">
                     <div className="truncate text-sm font-bold text-ink">
                       {selected.title ?? selected.contactName}

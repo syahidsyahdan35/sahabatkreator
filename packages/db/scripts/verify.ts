@@ -54,7 +54,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 2 tabel Fase 4A (products, payment_links)
 // + 2 tabel Fase 2C (automation_steps, sequence_enrollments)
 // + 1 tabel Fase 6C (platform_settings)
-assert.equal(Number(tablesRes.rows[0].count), 32);
+// + 1 tabel Fase 6D (profile_photos)
+assert.equal(Number(tablesRes.rows[0].count), 33);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -125,8 +126,9 @@ const policies = await db.query<{ count: string }>(
 // + policy `platform_settings_admin` pada platform_settings dan
 //   `platform_audit` pada audit_logs (Fase 6C, migrasi 0022)
 // + lengan pindai `system_purge_scan` pada channel_accounts
-//   (Fase 6I, migrasi 0023) = 36.
-assert.equal(Number(policies.rows[0].count), 36);
+//   (Fase 6I, migrasi 0023)
+// + `tenant_isolation` pada profile_photos (Fase 6D, migrasi 0025) = 37.
+assert.equal(Number(policies.rows[0].count), 37);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -140,7 +142,7 @@ await db.exec(`
     agents, kb_documents, kb_chunks, agent_suggestions,
     products, payment_links,
     automation_steps, sequence_enrollments,
-    platform_settings
+    platform_settings, profile_photos
   TO app_user;
 `);
 
@@ -921,6 +923,60 @@ assert.ok(tenantAExternalIds.includes("wc_verify_trashed_a"));
 assert.ok(!tenantAExternalIds.includes("777123"));
 console.log(
   "[17] Fase 6I: channel_accounts.trashed_at ada; tanpa flag pindai purge buta (0 baris), dengan app.system_relay='channel_purge' hanya baris trashed lintas tenant yang terlihat; konteks tenant tetap melihat semua barisnya sendiri: OK",
+);
+
+// ---------- 18. Fase 6D: profile_photos — RLS tenant + bytea + unik per pemilik ----------
+// Foto profil disimpan sebagai bytea di DB dan hanya boleh terlihat dari
+// konteks tenant pemiliknya. Ditanam untuk tenant A & B (superuser), lalu
+// dibaca sebagai app_user: konteks A hanya melihat baris A (byte kembali
+// utuh), konteks B hanya baris B, insert lintas tenant ditolak WITH CHECK,
+// dan index unik (tenant_id, owner_type, owner_id) menolak foto kedua
+// untuk pemilik yang sama (jalur simpan harus upsert).
+const PHOTO_OWNER_A = "66666666-6666-4666-8666-666666666666";
+const PHOTO_OWNER_B = "77777777-7777-4777-8777-777777777777";
+await db.query(
+  `INSERT INTO profile_photos (tenant_id, owner_type, owner_id, content_type, data, etag)
+   VALUES ($1, 'contact', $3, 'image/png', '\\x89504e47'::bytea, 'etag-a'),
+          ($2, 'channel_account', $4, 'image/jpeg', '\\xffd8ffe0'::bytea, 'etag-b')`,
+  [TENANT_A, TENANT_B, PHOTO_OWNER_A, PHOTO_OWNER_B],
+);
+const photoViewA = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+  const rows = await tx.query<{ owner_id: string; len: number }>(
+    `SELECT owner_id, octet_length(data) AS len FROM profile_photos`,
+  );
+  let crossInsertBlocked = false;
+  await tx.query(`SAVEPOINT sp_photo`);
+  try {
+    await tx.query(
+      `INSERT INTO profile_photos (tenant_id, owner_type, owner_id, content_type, data, etag)
+       VALUES ($1, 'contact', $2, 'image/png', '\\x00'::bytea, 'etag-x')`,
+      [TENANT_B, PHOTO_OWNER_B],
+    );
+  } catch (err) {
+    crossInsertBlocked = /row-level security/i.test(String(err));
+  }
+  await tx.query(`ROLLBACK TO SAVEPOINT sp_photo`);
+  return { rows: rows.rows, crossInsertBlocked };
+});
+assert.equal(photoViewA.rows.length, 1);
+assert.equal(photoViewA.rows[0].owner_id, PHOTO_OWNER_A);
+assert.equal(photoViewA.rows[0].len, 4);
+assert.equal(photoViewA.crossInsertBlocked, true);
+let photoDupeBlocked = false;
+try {
+  await db.query(
+    `INSERT INTO profile_photos (tenant_id, owner_type, owner_id, content_type, data, etag)
+     VALUES ($1, 'contact', $2, 'image/png', '\\x01'::bytea, 'etag-dupe')`,
+    [TENANT_A, PHOTO_OWNER_A],
+  );
+} catch (err) {
+  photoDupeBlocked = /profile_photos_tenant_owner_unique/i.test(String(err));
+}
+assert.equal(photoDupeBlocked, true);
+console.log(
+  "[18] Fase 6D: profile_photos terisolasi per tenant (konteks A hanya baris A, bytea utuh 4 byte, insert lintas ditolak), unik satu foto per (tenant, jenis pemilik, pemilik): OK",
 );
 
 await db.close();

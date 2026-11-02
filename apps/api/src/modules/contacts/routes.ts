@@ -11,21 +11,34 @@ import {
   createContact,
   getContact,
   listContacts,
+  listProfilePhotoOwnerIds,
   updateContact,
 } from "@sahabat-kreator/core";
 import type { Contact } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
+import { contactAvatarUrl } from "../avatars/routes";
 import { resolveTenantForUser } from "../tenants/guard";
 
-export function serializeContact(row: Contact): ContactResponse {
+/**
+ * Serialisasi kontak. `avatarUrl` (Fase 6D) TIDAK lagi dari kolom warisan
+ * `contacts.avatar_url` (tidak pernah terisi): nilainya adalah endpoint
+ * avatar kita sendiri bila foto profil kontak tersimpan di
+ * `profile_photos` (saat ini hanya kontak Telegram), selain itu null.
+ * Pemanggil daftar menghitung himpunan pemilik berfoto lebih dulu
+ * (listProfilePhotoOwnerIds) lalu meneruskannya ke sini.
+ */
+export function serializeContact(
+  row: Contact,
+  avatarUrl: string | null = null,
+): ContactResponse {
   return ContactResponseSchema.parse({
     id: row.id,
     name: row.name,
     email: row.email,
     phone: row.phone,
-    avatarUrl: row.avatarUrl,
+    avatarUrl,
     tags: row.tags,
     customFields: row.customFields,
     pipelineStage: row.pipelineStage,
@@ -35,6 +48,21 @@ export function serializeContact(row: Contact): ContactResponse {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   });
+}
+
+/** avatarUrl satu kontak: endpoint avatar bila fotonya tersimpan, else null. */
+async function singleContactAvatarUrl(
+  bundle: AuthBundle,
+  tenantId: string,
+  contactId: string,
+): Promise<string | null> {
+  const withPhoto = await listProfilePhotoOwnerIds(
+    bundle.db,
+    { tenantId },
+    "contact",
+    [contactId],
+  );
+  return withPhoto.has(contactId) ? contactAvatarUrl(tenantId, contactId) : null;
 }
 
 const ListContactsQuerySchema = z.object({
@@ -92,8 +120,19 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
     }
     const result = await listContacts(bundle.db, { tenantId: tenant.id }, query.data);
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: tenant.id },
+      "contact",
+      result.contacts.map((row) => row.id),
+    );
     const body = ContactListResponseSchema.parse({
-      contacts: result.contacts.map(serializeContact),
+      contacts: result.contacts.map((row) =>
+        serializeContact(
+          row,
+          withPhoto.has(row.id) ? contactAvatarUrl(tenant.id, row.id) : null,
+        ),
+      ),
       total: result.total,
     });
     return c.json(body);
@@ -108,7 +147,9 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     }
     const contact = await getContact(bundle.db, { tenantId: tenant.id }, id);
     if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
-    return c.json(serializeContact(contact));
+    return c.json(
+      serializeContact(contact, await singleContactAvatarUrl(bundle, tenant.id, id)),
+    );
   });
 
   app.patch(`${base}/:id`, async (c) => {
@@ -130,7 +171,9 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     }
     const contact = await updateContact(bundle.db, { tenantId: tenant.id }, id, parsed.data);
     if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
-    return c.json(serializeContact(contact));
+    return c.json(
+      serializeContact(contact, await singleContactAvatarUrl(bundle, tenant.id, id)),
+    );
   });
 
   return app;

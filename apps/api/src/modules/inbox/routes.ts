@@ -11,6 +11,7 @@ import {
 import {
   listConversations,
   listMessages,
+  listProfilePhotoOwnerIds,
   markConversationRead,
   queueOutboundMessage,
   type ConversationWithSummary,
@@ -19,15 +20,20 @@ import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
+import { contactAvatarUrl } from "../avatars/routes";
 import { serializeMessage } from "../messages-serialize";
 import { resolveTenantForUser } from "../tenants/guard";
 
-export function serializeConversation(row: ConversationWithSummary): ConversationResponse {
+export function serializeConversation(
+  row: ConversationWithSummary,
+  contactAvatarUrlValue: string | null = null,
+): ConversationResponse {
   return ConversationResponseSchema.parse({
     id: row.id,
     channelAccountId: row.channelAccountId,
     contactId: row.contactId,
     contactName: row.contactName,
+    contactAvatarUrl: contactAvatarUrlValue,
     title: row.title,
     isGroup: row.isGroup,
     isChannel: row.isChannel,
@@ -90,8 +96,23 @@ export function createInboxRoutes(
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
     }
     const rows = await listConversations(bundle.db, { tenantId: tenant.id }, query.data);
+    // Fase 6D: foto kontak jangkar tiap percakapan (endpoint avatar kita
+    // sendiri) — himpunan pemilik berfoto dihitung sekali per daftar.
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: tenant.id },
+      "contact",
+      rows.map((row) => row.contactId),
+    );
     const body = ConversationListResponseSchema.parse({
-      conversations: rows.map(serializeConversation),
+      conversations: rows.map((row) =>
+        serializeConversation(
+          row,
+          withPhoto.has(row.contactId)
+            ? contactAvatarUrl(tenant.id, row.contactId)
+            : null,
+        ),
+      ),
     });
     return c.json(body);
   });

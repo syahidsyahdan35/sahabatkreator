@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 /**
  * Avatar channel + badge provider (Fase 6H — kartu Channels mengikuti
@@ -110,12 +110,19 @@ interface ChannelAvatarProps {
 export function ChannelAvatar({ provider, name, imageUrl }: ChannelAvatarProps) {
   const meta = providerMeta(provider);
   const initial = (name.trim().charAt(0) || "?").toUpperCase();
+  // Fase 6D: foto yang gagal dimuat jatuh kembali ke inisial provider —
+  // tidak ada ikon gambar rusak di kartu.
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => {
+    setImgFailed(false);
+  }, [imageUrl]);
   return (
     <div className="relative shrink-0">
-      {imageUrl ? (
+      {imageUrl && !imgFailed ? (
         <img
           src={imageUrl}
           alt=""
+          onError={() => setImgFailed(true)}
           className="h-12 w-12 rounded-xl border border-line object-cover"
         />
       ) : (

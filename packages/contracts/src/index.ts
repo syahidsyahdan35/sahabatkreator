@@ -115,6 +115,13 @@ export const ContactResponseSchema = z.object({
   name: z.string(),
   email: z.string().nullable(),
   phone: z.string().nullable(),
+  /**
+   * URL foto profil kontak (Fase 6D): endpoint avatar kita sendiri
+   * (`/api/tenants/:tenantId/avatars/contacts/:id`) bila foto tersimpan
+   * (saat ini hanya kontak Telegram), selain itu null dan UI menampilkan
+   * inisial berwarna — untuk kontak webchat null adalah BY DESIGN
+   * (pengunjung anonim tidak punya foto). Bukan URL provider.
+   */
   avatarUrl: z.string().nullable(),
   tags: z.array(z.string()),
   customFields: z.record(z.unknown()),
@@ -187,6 +194,13 @@ export const ConversationResponseSchema = z.object({
   channelAccountId: z.string().uuid(),
   contactId: z.string().uuid(),
   contactName: z.string(),
+  /**
+   * URL foto profil kontak percakapan ini (Fase 6D) — endpoint avatar
+   * kita sendiri, null bila kontak belum punya foto tersimpan (UI jatuh
+   * ke inisial berwarna). Untuk percakapan grup/channel ini foto kontak
+   * jangkarnya; atribusi per pesan tetap lewat senderName.
+   */
+  contactAvatarUrl: z.string().nullable(),
   /**
    * Judul percakapan di provider (Fase 6A.1) — judul grup Telegram;
    * null untuk percakapan privat (tampilkan contactName).
@@ -281,6 +295,14 @@ export const ChannelAccountResponseSchema = z.object({
   displayName: z.string().nullable(),
   /** Untuk telegram: username bot (`@...` tanpa '@') dari getMe. Provider lain: null. */
   botUsername: z.string().nullable(),
+  /**
+   * URL foto profil akun (Fase 6D): endpoint avatar kita sendiri
+   * (`/api/tenants/:tenantId/avatars/channels/:id`) bila foto tersimpan
+   * (saat ini foto bot Telegram), selain itu null dan kartu Channels
+   * menampilkan inisial/glyph provider. TIDAK PERNAH URL file provider
+   * (URL file Telegram menyematkan token bot).
+   */
+  avatarUrl: z.string().nullable(),
   status: ChannelAccountStatusSchema,
   /**
    * Nama yang harus diketik PERSIS untuk mengonfirmasi pembuangan ke

@@ -9,6 +9,7 @@ import {
   media,
   messages,
   outboxEvents,
+  profilePhotos,
   sequenceEnrollments,
   type Database,
 } from "@sahabat-kreator/db";
@@ -45,6 +46,11 @@ import { withTenantDb } from "./tx";
  *                         catatan sejarah, sama seperti audit.
  * - audit_logs          → TIDAK PERNAH dihapus (append-only); purge
  *                         justru MENULIS `channel.purged` dengan hitungan.
+ * - profile_photos      → foto milik AKUN channel ini (Fase 6D,
+ *                         owner_type='channel_account') DIHAPUS —
+ *                         owner_id polimorfik tanpa FK, jadi dibersihkan
+ *                         eksplisit di sini. Foto KONTAK tidak disentuh:
+ *                         kontaknya sendiri dipertahankan (lihat bawah).
  * - contacts            → TIDAK dihapus: kontak adalah data CRM tenant
  *                         lintas channel.
  * - usage_ledger        → TIDAK dihapus (append-only, dasar billing);
@@ -111,6 +117,8 @@ export interface ChannelPurgeCounts {
   sequenceEnrollments: number;
   agentSuggestions: number;
   outboxEventsRemoved: number;
+  /** Foto profil milik akun channel (Fase 6D); foto kontak tidak dihitung. */
+  profilePhotos: number;
 }
 
 /**
@@ -160,6 +168,7 @@ export async function purgeTrashedChannelAccount(
       sequenceEnrollments: 0,
       agentSuggestions: 0,
       outboxEventsRemoved: 0,
+      profilePhotos: 0,
     };
 
     if (convIds.length > 0) {
@@ -265,6 +274,20 @@ export async function purgeTrashedChannelAccount(
       )
       .returning({ id: channelIdentities.id });
     counts.channelIdentities = removedIdentities.length;
+
+    // Foto profil akun channel (Fase 6D): owner_id polimorfik tanpa FK —
+    // tanpa penghapusan eksplisit ini baris fotonya yatim selamanya.
+    const removedPhotos = await tx
+      .delete(profilePhotos)
+      .where(
+        and(
+          eq(profilePhotos.tenantId, ref.tenantId),
+          eq(profilePhotos.ownerType, "channel_account"),
+          eq(profilePhotos.ownerId, account.id),
+        ),
+      )
+      .returning({ id: profilePhotos.id });
+    counts.profilePhotos = removedPhotos.length;
 
     await tx
       .delete(channelAccounts)

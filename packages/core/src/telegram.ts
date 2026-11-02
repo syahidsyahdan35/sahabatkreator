@@ -117,6 +117,7 @@ export type TelegramAccountRef = Pick<
   | "status"
   | "webhookSecret"
   | "botUsername"
+  | "accessTokenEncrypted"
 >;
 
 /**
@@ -143,6 +144,7 @@ export async function resolveTelegramAccountById(
         status: channelAccounts.status,
         webhookSecret: channelAccounts.webhookSecret,
         botUsername: channelAccounts.botUsername,
+        accessTokenEncrypted: channelAccounts.accessTokenEncrypted,
       })
       .from(channelAccounts)
       .where(
@@ -154,6 +156,18 @@ export async function resolveTelegramAccountById(
       .limit(1);
     return row ?? null;
   });
+}
+
+/**
+ * Hasil pencatatan pesan masuk (Fase 6D memperluas kembalian Fase 6A):
+ * selain pesan, pemanggil menerima kontak pengirim dan apakah identitas
+ * Telegram-nya BARU saja dibuat oleh panggilan ini — pemicu satu-satunya
+ * pengambilan foto profil kontak (best-effort, tidak diulang per pesan).
+ */
+export interface RecordTelegramInboundResult {
+  message: Message;
+  contactId: string;
+  identityCreated: boolean;
 }
 
 export interface RecordTelegramInboundInput {
@@ -195,7 +209,7 @@ export async function recordTelegramInboundMessage(
   db: Database,
   account: Pick<TelegramAccountRef, "id" | "tenantId">,
   input: RecordTelegramInboundInput,
-): Promise<Message | null> {
+): Promise<RecordTelegramInboundResult | null> {
   return withTenantDb(db, account.tenantId, async (tx) => {
     const [identity] = await tx
       .select()
@@ -209,6 +223,7 @@ export async function recordTelegramInboundMessage(
       .limit(1);
 
     let contactId: string;
+    let identityCreated = false;
     if (identity) {
       contactId = identity.contactId;
     } else {
@@ -220,6 +235,7 @@ export async function recordTelegramInboundMessage(
         })
         .returning();
       contactId = contact.id;
+      identityCreated = true;
       await tx.insert(channelIdentities).values({
         tenantId: account.tenantId,
         contactId,
@@ -308,13 +324,15 @@ export async function recordTelegramInboundMessage(
     }
 
     // Dedup retry webhook: pesan yang sama tidak boleh ganda (index unik
-    // global provider_message_id adalah penjaga terakhir).
+    // global provider_message_id adalah penjaga terakhir). Identitas
+    // untuk pesan kembaran ini PASTI sudah ada dari upaya pertama, jadi
+    // identityCreated dilaporkan false — foto kontak tidak diambil ulang.
     const [dupe] = await tx
       .select()
       .from(messages)
       .where(eq(messages.providerMessageId, input.providerMessageId))
       .limit(1);
-    if (dupe) return dupe;
+    if (dupe) return { message: dupe, contactId, identityCreated: false };
 
     // ON CONFLICT DO NOTHING (tanpa target = semua index unik; satu-
     // satunya index unik di messages adalah provider_message_id):
@@ -370,7 +388,7 @@ export async function recordTelegramInboundMessage(
       },
     });
 
-    return message;
+    return { message, contactId, identityCreated };
   });
 }
 

@@ -157,10 +157,22 @@ export {
   type CreateTelegramChannelInput,
   type TelegramAccountRef,
   type RecordTelegramInboundInput,
+  type RecordTelegramInboundResult,
   type RecordTelegramChannelPostInput,
   type TelegramQueuedDelivery,
   type TelegramMyChatMemberInput,
 } from "./telegram";
+export {
+  PROFILE_PHOTO_MAX_EDGE,
+  deleteChannelAccountProfilePhoto,
+  fetchAndStoreTelegramProfilePhoto,
+  getProfilePhoto,
+  listProfilePhotoOwnerIds,
+  pickTelegramPhotoSize,
+  storeProfilePhoto,
+  type FetchTelegramProfilePhotoInput,
+  type ProfilePhotoOwnerType,
+} from "./avatars";
 export {
   resolveWebchatAccountBySiteKey,
   getWebchatChannelAccountStatus,

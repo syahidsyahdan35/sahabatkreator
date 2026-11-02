@@ -16,10 +16,12 @@ import {
   disconnectChannelAccount,
   encryptChannelSecret,
   exportChannelAccount,
+  fetchAndStoreTelegramProfilePhoto,
   generateChannelWebhookSecret,
   getChannelAccount,
   hashChannelWebhookSecret,
   listChannelAccounts,
+  listProfilePhotoOwnerIds,
   listTrashedChannelAccounts,
   lookupChannelAccountsByProviderExternalId,
   markChannelAccountTrashed,
@@ -35,9 +37,13 @@ import type { ChannelAccount } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
+import { channelAvatarUrl } from "../avatars/routes";
 import { resolveTenantForUser } from "../tenants/guard";
 
-function serializeChannel(row: ChannelAccount): ChannelAccountResponse {
+function serializeChannel(
+  row: ChannelAccount,
+  avatarUrl: string | null = null,
+): ChannelAccountResponse {
   const purgeAt = channelPurgeAt(row);
   return ChannelAccountResponseSchema.parse({
     id: row.id,
@@ -45,6 +51,7 @@ function serializeChannel(row: ChannelAccount): ChannelAccountResponse {
     externalId: row.externalId,
     displayName: row.displayName,
     botUsername: row.botUsername,
+    avatarUrl,
     status: row.status,
     confirmationName: channelConfirmationName(row),
     trashedAt: row.trashedAt?.toISOString() ?? null,
@@ -52,6 +59,78 @@ function serializeChannel(row: ChannelAccount): ChannelAccountResponse {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   });
+}
+
+/** Serialisasi satu akun lengkap dengan avatarUrl hasil cek foto tersimpan. */
+async function serializeChannelWithAvatar(
+  bundle: AuthBundle,
+  row: ChannelAccount,
+): Promise<ChannelAccountResponse> {
+  const withPhoto = await listProfilePhotoOwnerIds(
+    bundle.db,
+    { tenantId: row.tenantId },
+    "channel_account",
+    [row.id],
+  );
+  return serializeChannel(
+    row,
+    withPhoto.has(row.id) ? channelAvatarUrl(row.tenantId, row.id) : null,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Backfill malas foto bot (Fase 6D)
+// ---------------------------------------------------------------------------
+// Bot yang terhubung SEBELUM Fase 6D belum punya foto tersimpan. Saat
+// daftar channel dibaca, akun telegram 'connected' tanpa foto memicu
+// pengambilan async fire-and-forget — foto muncul sendiri di pembacaan
+// berikutnya, tanpa reconnect. Dua penjaga per proses API agar Bot API
+// tidak dipanggil berulang: dedup in-flight per akun, dan cache negatif
+// (bot memang tidak punya foto / pengambilan gagal) selama 15 menit.
+const botPhotoBackfillInFlight = new Set<string>();
+const botPhotoBackfillNegative = new Map<string, number>();
+const BOT_PHOTO_BACKFILL_NEGATIVE_TTL_MS = 15 * 60 * 1000;
+
+function scheduleBotPhotoBackfill(
+  bundle: AuthBundle,
+  opts: ChannelsModuleOptions,
+  row: ChannelAccount,
+): void {
+  if (row.provider !== "telegram" || row.status !== "connected") return;
+  if (!row.accessTokenEncrypted || !opts.channelTokenSecret) return;
+  if (botPhotoBackfillInFlight.has(row.id)) return;
+  const lastNegative = botPhotoBackfillNegative.get(row.id);
+  if (
+    lastNegative !== undefined &&
+    Date.now() - lastNegative < BOT_PHOTO_BACKFILL_NEGATIVE_TTL_MS
+  ) {
+    return;
+  }
+  const botToken = decryptChannelSecret(
+    opts.channelTokenSecret,
+    row.accessTokenEncrypted,
+  );
+  if (!botToken) return;
+  botPhotoBackfillInFlight.add(row.id);
+  void fetchAndStoreTelegramProfilePhoto(bundle.db, {
+    tenantId: row.tenantId,
+    botToken,
+    telegramApiBase: opts.telegramApiBase,
+    // external_id akun telegram = id numerik bot (dari getMe saat connect).
+    telegramUserId: row.externalId,
+    ownerType: "channel_account",
+    ownerId: row.id,
+  })
+    .then((stored) => {
+      if (stored) botPhotoBackfillNegative.delete(row.id);
+      else botPhotoBackfillNegative.set(row.id, Date.now());
+    })
+    .catch(() => {
+      botPhotoBackfillNegative.set(row.id, Date.now());
+    })
+    .finally(() => {
+      botPhotoBackfillInFlight.delete(row.id);
+    });
 }
 
 /**
@@ -166,8 +245,25 @@ export function createChannelsRoutes(
     const tenant = await resolveTenantForUser(bundle, c.req.param("tenantId"), c.get("appUser").id);
     if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
     const rows = await listChannelAccounts(bundle.db, { tenantId: tenant.id });
+    // Fase 6D: avatarUrl dari foto tersimpan; akun telegram connected
+    // yang belum punya foto memicu backfill malas (fire-and-forget) —
+    // respons ini tetap menjawab tanpa menunggu Bot API.
+    const withPhoto = await listProfilePhotoOwnerIds(
+      bundle.db,
+      { tenantId: tenant.id },
+      "channel_account",
+      rows.map((r) => r.id),
+    );
+    for (const row of rows) {
+      if (!withPhoto.has(row.id)) scheduleBotPhotoBackfill(bundle, opts, row);
+    }
     const body = ChannelAccountListResponseSchema.parse({
-      channels: rows.map(serializeChannel),
+      channels: rows.map((row) =>
+        serializeChannel(
+          row,
+          withPhoto.has(row.id) ? channelAvatarUrl(tenant.id, row.id) : null,
+        ),
+      ),
     });
     return c.json(body);
   });
@@ -268,7 +364,7 @@ export function createChannelsRoutes(
     if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
     const rows = await listTrashedChannelAccounts(bundle.db, { tenantId: tenant.id });
     const body = ChannelAccountListResponseSchema.parse({
-      channels: rows.map(serializeChannel),
+      channels: rows.map((row) => serializeChannel(row)),
     });
     return c.json(body);
   });
@@ -348,7 +444,7 @@ export function createChannelsRoutes(
     if (outcome.outcome === "already_trashed") {
       return apiError(c, 409, "CHANNEL_ALREADY_TRASHED", "This channel is already in the trash");
     }
-    return c.json(serializeChannel(outcome.account), 200);
+    return c.json(await serializeChannelWithAvatar(bundle, outcome.account), 200);
   });
 
   /**
@@ -379,7 +475,7 @@ export function createChannelsRoutes(
     if (outcome.outcome === "not_trashed") {
       return apiError(c, 409, "CHANNEL_NOT_TRASHED", "This channel is not in the trash");
     }
-    return c.json(serializeChannel(outcome.account), 200);
+    return c.json(await serializeChannelWithAvatar(bundle, outcome.account), 200);
   });
 
   /**
@@ -509,7 +605,7 @@ async function connectTelegram(
         { tenantId: input.tenantId },
         own.id,
       );
-      if (row) return c.json(serializeChannel(row), 200);
+      if (row) return c.json(await serializeChannelWithAvatar(bundle, row), 200);
     }
     // Akun milik workspace ini berstatus 'disconnected'/'error':
     // hidupkan lagi baris yang sama (kredensial + secret baru, webhook
@@ -519,6 +615,8 @@ async function connectTelegram(
       displayName: input.displayName,
       accountId: own.id,
       botUsername: identity.username,
+      botUserId: identity.id,
+      botToken: input.botToken,
       encryptedBotToken,
       client,
     });
@@ -568,7 +666,7 @@ async function connectTelegram(
         { tenantId: input.tenantId },
         ownNow.id,
       );
-      if (winner) return c.json(serializeChannel(winner), 200);
+      if (winner) return c.json(await serializeChannelWithAvatar(bundle, winner), 200);
     }
     return apiError(
       c,
@@ -596,6 +694,18 @@ async function connectTelegram(
     );
   }
 
+  // Fase 6D: ambil foto profil bot (best-effort, fire-and-forget) —
+  // token mentah sedang di tangan; kegagalan foto tidak menggagalkan
+  // connect. Foto tampil di daftar channel pembacaan berikutnya.
+  void fetchAndStoreTelegramProfilePhoto(bundle.db, {
+    tenantId: input.tenantId,
+    botToken: input.botToken,
+    telegramApiBase: opts.telegramApiBase,
+    telegramUserId: identity.id,
+    ownerType: "channel_account",
+    ownerId: row.id,
+  });
+
   return c.json(serializeChannel(row), 201);
 }
 
@@ -616,6 +726,9 @@ async function reviveTelegramAccount(
     displayName?: string;
     accountId: string;
     botUsername: string | null;
+    /** Id numerik bot + token mentah — untuk pengambilan foto profil (Fase 6D). */
+    botUserId: string;
+    botToken: string;
     encryptedBotToken: string;
     client: TelegramBotApiClient;
   },
@@ -657,6 +770,17 @@ async function reviveTelegramAccount(
       "Failed to register the webhook with Telegram",
     );
   }
+
+  // Fase 6D: connect ulang = foto bot di-refresh (best-effort,
+  // fire-and-forget, pola yang sama seperti connect baru).
+  void fetchAndStoreTelegramProfilePhoto(bundle.db, {
+    tenantId: input.tenantId,
+    botToken: input.botToken,
+    telegramApiBase: opts.telegramApiBase,
+    telegramUserId: input.botUserId,
+    ownerType: "channel_account",
+    ownerId: updated.id,
+  });
 
   return c.json(serializeChannel(updated), 200);
 }

@@ -29,6 +29,7 @@ import { createApiKeysRoutes } from "./modules/api-keys/routes";
 import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { createWebchatRoutes } from "./modules/webchat/routes";
 import { createTelegramRoutes } from "./modules/telegram/routes";
+import { createAvatarsRoutes } from "./modules/avatars/routes";
 import { createAdminRoutes } from "./modules/admin/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
@@ -101,7 +102,19 @@ routes.route(
   }),
 );
 // Modul telegram publik (Fase 6A) — webhook Bot API /telegram/webhook/:id.
-routes.route("/", createTelegramRoutes(authBundle, realtimePublisher));
+// Opsi Fase 6D: kunci dekripsi token + base URL Bot API untuk pengambilan
+// foto profil kontak saat pengirim pertama kali terlihat.
+routes.route(
+  "/",
+  createTelegramRoutes(authBundle, realtimePublisher, {
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+    telegramApiBase: env.TELEGRAM_API_BASE,
+  }),
+);
+// Modul avatars (Fase 6D) — penyajian foto profil bot & kontak dari DB
+// /tenants/:tenantId/avatars/... (di balik sesi + membership; URL file
+// provider yang bertoken tidak pernah diedarkan).
+routes.route("/", createAvatarsRoutes(authBundle));
 // Modul automations (Fase 2A) — manajemen automation keyword /tenants/:tenantId/automations.
 routes.route("/", createAutomationsRoutes(authBundle));
 // Modul agents & knowledge (Fase 3A) — agent AI + KB + draf saran.
