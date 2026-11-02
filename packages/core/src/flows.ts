@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, lt, or, sql } from "drizzle-orm";
+import { findFlowTemplate } from "@sahabat-kreator/contracts";
 import {
   auditLogs,
   automationRuns,
@@ -904,6 +906,80 @@ export async function createFlow(
       meta: { name: row.name },
     });
     return { kind: "created" as const, flow: { ...row, runCount: 0 } };
+  });
+}
+
+export type InstantiateFlowTemplateResult =
+  | { kind: "created"; flow: FlowWithRunCount }
+  | { kind: "template_not_found" };
+
+/**
+ * Membuat flow DRAFT dari template katalog (Fase 12B — definisi
+ * template hidup di kontrak, `FLOW_TEMPLATES`). Graf template disalin
+ * DALAM (JSON round-trip: definisi statis tidak boleh berubah karena
+ * flow hasil instantiate diedit) dan id setiap node diregenerasi
+ * dengan pola id acak core (`n_<base64url>`) agar dua hasil
+ * instantiate dari template yang sama tidak pernah berbagi id node —
+ * rujukan silang seperti goto_flow selalu menunjuk flow, bukan node,
+ * jadi regenerasi aman. Nama bawaan = `input.name` atau
+ * `template.defaultName`. Audit: `flow.created` (konsisten buat
+ * manual) + `flow.template_instantiated` bermeta slug.
+ */
+export async function instantiateFlowTemplate(
+  db: Database,
+  input: { tenantId: string; userId: string; slug: string; name?: string },
+): Promise<InstantiateFlowTemplateResult> {
+  const template = findFlowTemplate(input.slug);
+  if (!template) return { kind: "template_not_found" as const };
+  const idMap = new Map<string, string>();
+  for (const node of template.graph.nodes) {
+    idMap.set(node.id, `n_${randomBytes(9).toString("base64url")}`);
+  }
+  const copy = JSON.parse(JSON.stringify(template.graph)) as {
+    nodes: FlowGraphNode[];
+    edges: FlowGraphEdge[];
+  };
+  const graph: FlowGraphData = {
+    nodes: copy.nodes.map((n) => ({
+      ...n,
+      id: idMap.get(n.id) ?? n.id,
+    })),
+    edges: copy.edges.map((e) => ({
+      ...e,
+      from: idMap.get(e.from) ?? e.from,
+      to: idMap.get(e.to) ?? e.to,
+    })),
+  };
+  const name = input.name?.trim() ? input.name.trim() : template.defaultName;
+  return withTenantDb(db, input.tenantId, async (tx) => {
+    const [row] = await tx
+      .insert(flows)
+      .values({
+        tenantId: input.tenantId,
+        name,
+        status: "draft",
+        graph,
+        createdByUserId: input.userId,
+      })
+      .returning();
+    await flowAudit(tx, input.tenantId, {
+      actorType: "user",
+      actorId: input.userId,
+      action: "flow.created",
+      flowId: row.id,
+      meta: { name: row.name },
+    });
+    await flowAudit(tx, input.tenantId, {
+      actorType: "user",
+      actorId: input.userId,
+      action: "flow.template_instantiated",
+      flowId: row.id,
+      meta: { templateSlug: template.slug, name: row.name },
+    });
+    return {
+      kind: "created" as const,
+      flow: { ...row, runCount: 0 },
+    };
   });
 }
 

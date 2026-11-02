@@ -1,1 +1,26 @@
-{"dependencies":{"@sahabat-kreator/ai":"workspace:*","@sahabat-kreator/db":"workspace:*","drizzle-orm":"^0.44.6"},"devDependencies":{"@types/node":"^22.10.2","tsx":"^4.19.2","typescript":"^5.6.3"},"exports":{".":"./src/index.ts"},"main":"./src/index.ts","name":"@sahabat-kreator/core","private":true,"scripts":{"typecheck":"tsc --noEmit","verify":"tsx scripts/verify.ts"},"type":"module","types":"./src/index.ts","version":"0.1.0"}
+{
+  "dependencies": {
+    "@sahabat-kreator/ai": "workspace:*",
+    "@sahabat-kreator/db": "workspace:*",
+    "drizzle-orm": "^0.44.6",
+    "@sahabat-kreator/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "name": "@sahabat-kreator/core",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "verify": "tsx scripts/verify.ts"
+  },
+  "type": "module",
+  "types": "./src/index.ts",
+  "version": "0.1.0"
+}

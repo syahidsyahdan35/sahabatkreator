@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import {
   CreateFlowRequestSchema,
+  FLOW_TEMPLATES,
   FlowGraphSchema,
   FlowListQuerySchema,
   FlowListResponseSchema,
@@ -10,7 +11,9 @@ import {
   FlowRunListResponseSchema,
   FlowRunStepListQuerySchema,
   FlowRunStepListResponseSchema,
+  FlowTemplateListResponseSchema,
   FlowValidationResponseSchema,
+  InstantiateFlowTemplateRequestSchema,
   UpdateFlowRequestSchema,
   type FlowGraph,
   type FlowResponse,
@@ -21,6 +24,7 @@ import {
   deactivateFlow,
   deleteFlow,
   getFlow,
+  instantiateFlowTemplate,
   listFlowRunSteps,
   listFlowRuns,
   listFlows,
@@ -41,6 +45,9 @@ import { resolveTenantForUser } from "../tenants/guard";
  * yang bisa diamati:
  *   GET    /tenants/:tenantId/flows                    daftar
  *   POST   /tenants/:tenantId/flows                    buat draft
+ *   GET    /tenants/:tenantId/flows/templates          katalog template (12B)
+ *   POST   /tenants/:tenantId/flows/templates/:slug/instantiate
+ *                                                      buat draft dari template
  *   GET    /tenants/:tenantId/flows/:id                detail
  *   PATCH  /tenants/:tenantId/flows/:id                edit (draft saja)
  *   DELETE /tenants/:tenantId/flows/:id                hapus (draft saja)
@@ -103,6 +110,8 @@ export function createFlowsRoutes(bundle: AuthBundle | null) {
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured");
     app.get(base, unavailable);
     app.post(base, unavailable);
+    app.get(`${base}/templates`, unavailable);
+    app.post(`${base}/templates/:slug/instantiate`, unavailable);
     app.get(`${base}/runs/:runId/steps`, unavailable);
     app.get(`${base}/:id`, unavailable);
     app.patch(`${base}/:id`, unavailable);
@@ -217,6 +226,64 @@ export function createFlowsRoutes(bundle: AuthBundle | null) {
       graph: parsed.data.graph as FlowGraph | undefined,
     });
     return c.json(serializeFlow(result.flow), 201);
+  });
+
+  // ---- Galeri template (Fase 12B, sebelum route :id agar tidak tertangkap) --
+  // Katalog statis dari kontrak (FLOW_TEMPLATES): respons hanya ringkasan
+  // (slug, kunci i18n nama/deskripsi, kategori, jumlah node, kebutuhan) —
+  // graf penuh tidak keluar di daftar; ia disalin server saat instantiate.
+  app.get(`${base}/templates`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const body = FlowTemplateListResponseSchema.parse({
+      templates: FLOW_TEMPLATES.map((tpl) => ({
+        slug: tpl.slug,
+        nameKey: tpl.nameKey,
+        descriptionKey: tpl.descriptionKey,
+        category: tpl.category,
+        nodeCount: tpl.graph.nodes.length,
+        needs: tpl.needs,
+      })),
+    });
+    return c.json(body);
+  });
+
+  // Membuat flow DRAFT dari template. Peran = mutasi flow (owner/admin).
+  // Body boleh kosong sama sekali; {name} opsional menimpa nama bawaan
+  // template. Slug tak dikenal → 404 FLOW_TEMPLATE_NOT_FOUND.
+  app.post(`${base}/templates/:slug/instantiate`, async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    let name: string | undefined;
+    try {
+      const json = (await c.req.json()) as { name?: unknown } | null;
+      if (json && typeof json === "object" && json.name !== undefined) {
+        const parsed = InstantiateFlowTemplateRequestSchema.safeParse(json);
+        if (!parsed.success) {
+          return apiError(c, 400, "VALIDATION_ERROR", "Invalid instantiate payload");
+        }
+        name = parsed.data.name;
+      }
+    } catch {
+      // Body kosong sah = pakai nama bawaan template.
+    }
+    const result = await instantiateFlowTemplate(bundle.db, {
+      tenantId: g.tenant.id,
+      userId: g.appUser.id,
+      slug: c.req.param("slug") ?? "",
+      name,
+    });
+    switch (result.kind) {
+      case "created":
+        return c.json(serializeFlow(result.flow), 201);
+      case "template_not_found":
+        return apiError(
+          c,
+          404,
+          "FLOW_TEMPLATE_NOT_FOUND",
+          "Flow template not found",
+        );
+    }
   });
 
   // ---- Langkah satu run (sebelum route :id agar tidak tertangkap) -----------
