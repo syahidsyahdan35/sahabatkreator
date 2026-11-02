@@ -3,6 +3,30 @@
 Catatan deploy staging pertama Sahabat Kreator (Fase 0) ke server staging
 (103.186.31.46) di balik Cloudflare Tunnel. Ditulis 2026-11-01.
 
+## Gerbang smoke test (berlaku setiap fase — "tanpa kendor")
+
+Sebuah fase hanya boleh dilaporkan selesai bila SELURUH baterai ini
+hijau pada tree finalnya:
+
+1. Typecheck semua paket (`pnpm -r --if-present typecheck`).
+2. PGlite verify skema DB (`pnpm --filter @sahabat-kreator/db verify`)
+   — plus skrip verify khusus fase bila ada (mis. `verify:agent-tools`).
+3. Rantai verifikasi dari server terhadap API (tenant uji + mock
+   bila perlu) dengan hitungan PASS eksplisit — TANPA Playwright
+   (aturan user 2026-11-02; UI diuji user sendiri).
+4. `pnpm check:drift` — pemeriksa drift permukaan publik (Fase 15A):
+   gagal bila ada rute kontrak publik v1 tanpa pemetaan SDK/MCP,
+   pemetaan menunjuk nama yang tidak ada, atau tier MCP tidak cocok.
+   Registry: `PUBLIC_V1_SURFACE` di `packages/contracts`; matriks
+   cakupan + keputusan permukaan dashboard-only: `docs/COVERAGE-MATRIX.md`.
+5. Build SEMUA dist + grep string baru di bundle lokal DAN server
+   (API/worker staging berjalan dari dist tsup, bukan src).
+6. Pasca-deploy: health publik `https://botara.my.id/api/health` ok,
+   service systemd aktif, `.env.staging` pulih byte-identik
+   (sha256 baseline `9c1ded2a…`), channel asli user utuh.
+7. `verify-sdk` + `verify-mcp` terhadap staging untuk fase yang
+   menyentuh permukaan publik.
+
 ## Topologi
 
 ```
@@ -5521,3 +5545,120 @@ Commit: `cd15ac6` (butir 3), `03a060f` (butir 4 backend), `9c6724e`
   lenyap saat reset 11A). (4) Chunk SettingsPage 100,65 kB dicatat
   sebagai pengamatan, bukan kegagalan: ia malas dan di luar muatan
   awal.
+
+---
+
+## Update Fase 15A — Audit & Sinkronisasi Kontrak Lintas Antarmuka (2026-11-03)
+
+Menjalankan aturan sinkronisasi kontrak (user 2026-11-02 22:10) secara
+retrospektif ke seluruh permukaan + memasang penjaga drift permanen.
+TANPA migrasi (jurnal tetap 40 entri) dan tanpa perubahan perilaku
+dashboard.
+
+### Yang dibangun
+
+- **Matriks cakupan** `docs/COVERAGE-MATRIX.md` (dokumen hidup): 23
+  baris kemampuan × Kontrak | API dashboard | API v1 | SDK | MCP |
+  CLI (nama perintah rencana untuk 14D). Setiap permukaan yang tidak
+  mengekspos kemampuan membawa keputusan + alasan satu baris — diam
+  bukan keputusan.
+- **15 rute BACA v1 baru** (sebelumnya dashboard-only semua):
+  `GET /v1/broadcasts` + `/:id`, `GET /v1/flows` + `/:id`,
+  `GET /v1/flow-templates`, `GET /v1/automations` + `/:id`,
+  `GET /v1/agents` + `/:id`, `GET /v1/channels` + `/:id`,
+  `GET /v1/whatsapp-templates?channelAccountId=`,
+  `GET /v1/knowledge/documents` + `/:id`, `GET /v1/knowledge/stats`.
+  Semua membaca lewat service core dalam konteks RLS tenant pemilik
+  kunci dan memakai SERIALIZER YANG SAMA dengan dashboard (serializer
+  modul dashboard kini diekspor untuk dipakai ulang — tidak ada bentuk
+  respons kedua). Paginasi mengikuti sumber dayanya: broadcast & flow
+  berkursor; sisanya daftar penuh seperti dashboard-nya.
+- **7 scope baca baru**: `broadcasts:read`, `flows:read`,
+  `automations:read`, `agents:read`, `channels:read`,
+  `whatsapp_templates:read`, `knowledge:read` — total 14 scope.
+  `API_KEY_DEFAULT_SCOPES` kini 11 scope baca (preseden comments:read
+  10B); `CreateApiKeyRequestSchema.max` 7 → 14. Union scope salinan
+  tangan di `packages/core/src/api-keys.ts` diselaraskan (contoh
+  drift persis yang fase ini jaga). Label scope dwibahasa baru di
+  Settings (i18n en/id + peta label SettingsPage).
+- **SDK**: 15 metode baca baru (listBroadcasts/getBroadcast, listFlows/
+  getFlow, listFlowTemplates, listAutomations/getAutomation,
+  listAgents/getAgent, listChannels/getChannel, listWhatsAppTemplates,
+  listKnowledgeDocuments/getKnowledgeDocument, getKnowledgeStats).
+- **MCP**: 15 tool baca baru yang bersesuaian + **`update_contact`**
+  (tier TULIS) — menutup celah Fase 13A yang baru membawa metode SDK.
+  Total kini 26 tool: 21 baca / 5 tulis. Tool `update_contact`
+  mengikuti kontrak `UpdateContactRequest` persis (name/tags/
+  pipelineStage/optInStatus/customFields — kontrak memang tidak
+  membawa phone/email pada PATCH).
+- **Registry + pemeriksa drift**: `PUBLIC_V1_SURFACE` di contracts
+  (26 entri rute → skema kontrak → metode SDK → tool MCP + tier, atau
+  pengecualian beralasan) dan skrip `packages/sdk/scripts/check-drift.ts`
+  (`pnpm check:drift`) yang memeriksanya terhadap implementasi nyata
+  dua arah — rute terdaftar di modul public-v1, ekspor skema kontrak,
+  metode client SDK, registrasi + tier tool MCP (termasuk gerbang
+  `writeDisabledResult` untuk tier tulis). Langkah ini ditambahkan ke
+  daftar Gerbang smoke test di kepala dokumen ini.
+- **Keputusan dashboard-only yang dicatat** (alasan penuh di matriks):
+  broadcast kirim/jadwal/batal (radius ledak; menunggu mesin opt-in
+  13C), tulis flow + aktivasi (artefak builder visual), instantiate
+  template, tulis otomasi, tulis agen + antrean saran + playground,
+  tulis KB + lampiran berkas (byte provenance; teksnya terekspos
+  sebagai entri), hubungkan/putus channel (kustodi rahasia + OAuth),
+  sinkron/buat/hapus template WA di Meta, saved replies, tim/undangan,
+  analitik/usage, manajemen API key (kunci tak boleh mengelola kunci),
+  audit log, integration logs + replay, payment links (menunggu 14A),
+  platform settings. Satu celah kecil dicatat sadar: `GET
+  /v1/contacts/:id` belum ada (daftar+cari+PATCH dinilai cukup;
+  kandidat fase permukaan berikutnya). Detail flow: endpoint
+  `/v1/automations/:id` memakai pola dashboard (ambil dari
+  listAutomations tenant sendiri) karena hanya daftar yang
+  menghasilkan bentuk WithRunCount; jalur v1 channels TIDAK memicu
+  backfill malas foto bot Telegram yang dimiliki daftar dashboard
+  (bacaan API key tanpa efek samping).
+
+### Verifikasi Fase 15A (gerbang smoke penuh, tanpa Playwright)
+
+- Typecheck SEMUA paket hijau; build semua dist hijau; grep bundle
+  lokal + server (api `whatsapp_templates:read`/`listBroadcasts`,
+  web `scopeBroadcastsRead` di chunk Settings + utama, mcp
+  `list_whatsapp_templates`).
+- PGlite `verify` db: **SEMUA LULUS (33 seksi)** — tak ada perubahan
+  skema fase ini.
+- **check:drift: LULUS** pada tree final (26 rute selaras), dan
+  **uji-rusak dua arah GAGAL sebagaimana mestinya** (exit 1): nama
+  metode SDK di registry diganti → drift SDK dua arah terdeteksi;
+  nama tool MCP di server diganti → drift MCP dua arah terdeteksi;
+  sesudah dipulihkan → lulus lagi (exit 0).
+- **Rantai dari server: 49 PASS / 0 FAIL** — dua tenant uji
+  `fase15a-*@sk.test`; data tertanam lewat API dashboard (agent,
+  dokumen KB, otomasi, flow, produk) + SQL (channel telegram &
+  whatsapp, broadcast draft, template WA APPROVED). Seluruh endpoint
+  baru terbukti memuat data tenant sendiri; regresi permukaan lama
+  (me, contacts POST/PATCH customFields, products, comments) hijau;
+  kunci terbatas (hanya contacts:read) → 403 `API_KEY_SCOPE_DENIED`
+  di 6 permukaan baru & tetap 200 di contacts; tenant B → daftar
+  kosong + 404 untuk get-by-id milik A di 6 sumber daya; respons
+  channels terbukti tanpa field kredensial; whatsapp-templates:
+  akun telegram → 400, tanpa channelAccountId → 400, akun tenant
+  lain → 404.
+- **verify-sdk: SEMUA LULUS (14 cek)** termasuk 8 cek baca baru;
+  kunci default baru terbukti membawa tepat 11 scope baca.
+  **verify-mcp: SEMUA LULUS (30 cek)** terhadap staging (tenant uji
+  khusus + percakapan webchat asli): 26 tool terdaftar, anotasi tier
+  benar untuk semua tool baru, tool baca baru jalan di tier read-only,
+  `update_contact` menolak tanpa `MCP_ALLOW_WRITES` dan menggabung
+  customFields per kunci saat writes on, negatif scope kunci terbatas
+  tetap `API_KEY_SCOPE_DENIED` bertipe.
+- Pasca-deploy: 4 service aktif, health publik ok, `.env.staging`
+  sha256 `9c1ded2a…` **byte-identik** (fase ini tidak memakai jendela
+  env sama sekali), channel asli user utuh (Telegram "Botara My Id" +
+  Messenger "Sahabat Kreator Indonesia" tetap connected), berkas
+  rantai/verify di server dihapus.
+- Batas jujur: (1) Label scope baru di Settings belum diuji klik —
+  menunggu uji UI user; typecheck + bundle terverifikasi dan
+  pembuatan kunci 14-scope terbukti di rantai. (2) Tenant uji
+  `fase15a-*@sk.test` tertinggal di staging (pola fase sebelumnya;
+  lenyap saat reset 11A). (3) `check:drift` bersifat statis (baca
+  sumber) — ia menjaga PEMETAAN permukaan, bukan perilaku runtime;
+  perilaku tetap dibuktikan rantai + verify-sdk/mcp tiap fase.
