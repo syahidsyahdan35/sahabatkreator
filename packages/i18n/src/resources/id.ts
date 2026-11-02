@@ -674,6 +674,8 @@ export const id: Resources = {
     scopeConversationsRead: "Baca percakapan & pesan",
     scopeMessagesWrite: "Kirim pesan",
     scopeProductsRead: "Baca produk",
+    scopeCommentsRead: "Baca komentar",
+    scopeCommentsWrite: "Moderasi komentar (sembunyikan / tampilkan)",
     createButton: "Buat key",
     saving: "Membuat…",
     emptyTitle: "Belum ada API key",

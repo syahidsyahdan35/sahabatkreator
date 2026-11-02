@@ -26,7 +26,9 @@ import { z } from "zod";
  *   MCP_ALLOW_WRITES          (opsional, Fase 9B) tiering keamanan:
  *                                      DEFAULT server ini READ-ONLY.
  *                                      Tool TULIS (create_contact,
- *                                      send_message) terdaftar tetapi
+ *                                      send_message, hide_comment,
+ *                                      unhide_comment — dua terakhir
+ *                                      Fase 10B) terdaftar tetapi
  *                                      MENOLAK dengan error yang jelas
  *                                      sampai env ini bernilai persis
  *                                      "1". Tool baca selalu jalan.
@@ -205,6 +207,54 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   async () => run(() => client.listProducts()),
+);
+
+server.registerTool(
+  "list_comments",
+  {
+    description:
+      "Daftar komentar Instagram/Messenger yang tercatat dari webhook (scope comments:read), terbaru dulu, beserta aturan yang cocok dan jejak aksinya (DM/balasan publik/sembunyikan) serta status moderasi. Hasil: { comments }.",
+    inputSchema: {
+      channelAccountId: z.string().uuid().optional().describe("Saring ke satu akun channel (opsional)"),
+      automationId: z.string().uuid().optional().describe("Saring ke komentar yang cocok dengan aturan ini (opsional)"),
+      limit: z.number().int().min(1).max(200).optional().describe("Maks. jumlah komentar (default server 50)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ channelAccountId, automationId, limit }) =>
+    run(() => client.listComments({ channelAccountId, automationId, limit })),
+);
+
+server.registerTool(
+  "hide_comment",
+  {
+    description:
+      "Sembunyikan satu komentar di Instagram/Facebook (scope comments:write). Meta dipanggil dulu; status lokal berubah hanya bila Meta menerima. [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
+    inputSchema: {
+      commentId: z.string().uuid().describe("Id komentar (dari list_comments)"),
+    },
+    annotations: { readOnlyHint: false },
+  },
+  async ({ commentId }) =>
+    writesEnabled
+      ? run(() => client.hideComment(commentId))
+      : writeDisabledResult("hide_comment"),
+);
+
+server.registerTool(
+  "unhide_comment",
+  {
+    description:
+      "Tampilkan lagi satu komentar yang tersembunyi di Instagram/Facebook (scope comments:write). [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
+    inputSchema: {
+      commentId: z.string().uuid().describe("Id komentar (dari list_comments)"),
+    },
+    annotations: { readOnlyHint: false },
+  },
+  async ({ commentId }) =>
+    writesEnabled
+      ? run(() => client.unhideComment(commentId))
+      : writeDisabledResult("unhide_comment"),
 );
 
 await server.connect(new StdioServerTransport());

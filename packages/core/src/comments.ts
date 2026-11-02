@@ -710,11 +710,17 @@ export async function getComment(
  * Perbarui status moderasi lokal SESUDAH Graph menerima perubahan
  * (route moderasi manual memanggil Graph lebih dulu; kegagalan Graph
  * berarti fungsi ini tidak dipanggil dan status lokal tidak berubah).
+ * `actorType` membedakan jalur dashboard ('user', bawaan) dari jalur
+ * API publik v1 ('api_key' — actorId = id kunci, pola Fase 5A).
  */
 export async function setCommentModerationStatus(
   db: Database,
   ctx: TenantContext & { userId: string },
-  input: { commentId: string; hidden: boolean },
+  input: {
+    commentId: string;
+    hidden: boolean;
+    actorType?: "user" | "api_key";
+  },
 ): Promise<Comment | null> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [row] = await tx
@@ -733,7 +739,7 @@ export async function setCommentModerationStatus(
     if (!row) return null;
     await tx.insert(auditLogs).values({
       tenantId: ctx.tenantId,
-      actorType: "user",
+      actorType: input.actorType ?? "user",
       actorId: ctx.userId,
       action: input.hidden ? "comment.hidden" : "comment.unhidden",
       meta: {

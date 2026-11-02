@@ -1553,6 +1553,9 @@ export const ApiKeyScopeSchema = z.enum([
   "conversations:read",
   "messages:write",
   "products:read",
+  // Fase 10B: permukaan publik komentar (aturan sinkronisasi kontrak).
+  "comments:read",
+  "comments:write",
 ]);
 export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
 
@@ -1562,6 +1565,8 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "conversations:read",
   "messages:write",
   "products:read",
+  "comments:read",
+  "comments:write",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1569,11 +1574,12 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "contacts:read",
   "conversations:read",
   "products:read",
+  "comments:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(5).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(7).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -1635,6 +1641,14 @@ export const V1ListMessagesQuerySchema = z.object({
   limit: z.number().int().min(1).max(200).optional(),
 });
 export type ListMessagesQuery = z.infer<typeof V1ListMessagesQuerySchema>;
+
+/** Query daftar komentar API publik /v1 (Fase 10B). */
+export const V1ListCommentsQuerySchema = z.object({
+  channelAccountId: z.string().uuid().optional(),
+  automationId: z.string().uuid().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+});
+export type ListCommentsQuery = z.infer<typeof V1ListCommentsQuerySchema>;
 
 // ---------------------------------------------------------------------------
 // Realtime (Fase 6G) — event "nudge" yang diterbitkan ke Redis pub/sub dan

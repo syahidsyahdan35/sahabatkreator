@@ -38,6 +38,8 @@ const SCOPE_LABEL_KEYS: Record<ApiKeyScope, TranslationKey> = {
   "conversations:read": "settings.scopeConversationsRead",
   "messages:write": "settings.scopeMessagesWrite",
   "products:read": "settings.scopeProductsRead",
+  "comments:read": "settings.scopeCommentsRead",
+  "comments:write": "settings.scopeCommentsWrite",
 };
 
 /** Scope read tercentang secara bawaan di form (selaras default API). */

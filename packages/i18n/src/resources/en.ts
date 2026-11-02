@@ -675,6 +675,8 @@ export const en = {
     scopeConversationsRead: "Read conversations & messages",
     scopeMessagesWrite: "Send messages",
     scopeProductsRead: "Read products",
+    scopeCommentsRead: "Read comments",
+    scopeCommentsWrite: "Moderate comments (hide / unhide)",
     createButton: "Create key",
     saving: "Creating…",
     emptyTitle: "No API keys yet",

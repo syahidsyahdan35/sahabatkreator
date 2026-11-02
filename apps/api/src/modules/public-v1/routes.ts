@@ -1,6 +1,7 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import {
+  CommentListResponseSchema,
   ContactListResponseSchema,
   ConversationListResponseSchema,
   ConversationStatusSchema,
@@ -9,12 +10,14 @@ import {
   ProductListResponseSchema,
   PublicMeResponseSchema,
   SendMessageRequestSchema,
+  V1ListCommentsQuerySchema,
   type ApiKeyScope,
 } from "@sahabat-kreator/contracts";
 import {
   createContact,
   getTenantNameById,
   hashApiKey,
+  listComments,
   listContacts,
   listConversations,
   listMessages,
@@ -27,6 +30,11 @@ import {
 import type { RealtimePublisher } from "@sahabat-kreator/queue";
 import type { AuthBundle } from "../../auth";
 import { apiError, type ApiKeyAuthContext, type AppVariables } from "../../http";
+import {
+  performCommentModeration,
+  serializeComment,
+  type CommentsModuleOptions,
+} from "../comments/routes";
 import { serializeContact } from "../contacts/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeMessage } from "../messages-serialize";
@@ -71,12 +79,19 @@ function extractPresentedKey(headers: Headers): string | null {
  *   GET  /v1/conversations/:id/messages          (conversations:read)
  *   POST /v1/conversations/:id/messages          (messages:write) → pesan queued
  *   GET  /v1/products          (products:read)
+ *   GET  /v1/comments          (comments:read)   komentar IG/Messenger
+ *                                                tercatat (Fase 10B)
+ *   POST /v1/comments/:id/hide   (comments:write) moderasi manual —
+ *   POST /v1/comments/:id/unhide (comments:write) Graph dulu, lokal
+ *                                                sesudahnya (helper yang
+ *                                                sama dengan dashboard)
  * Penolakan: tanpa/bukan kunci → 401 API_KEY_INVALID; kunci dicabut → 401
  * API_KEY_REVOKED; scope kurang → 403 API_KEY_SCOPE_DENIED.
  */
 export function createPublicV1Routes(
   bundle: AuthBundle | null,
   publisher?: RealtimePublisher | null,
+  commentOpts: CommentsModuleOptions = {},
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -264,6 +279,75 @@ export function createPublicV1Routes(
     });
     return c.json(body);
   });
+
+  app.get("/v1/comments", async (c) => {
+    const denied = requireScope(c, "comments:read");
+    if (denied) return denied;
+    const query = V1ListCommentsQuerySchema.safeParse({
+      channelAccountId: c.req.query("channelAccountId") || undefined,
+      automationId: c.req.query("automationId") || undefined,
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    });
+    if (!query.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
+    }
+    const auth = c.get("apiKeyAuth");
+    const rows = await listComments(
+      bundle.db,
+      { tenantId: auth.tenantId },
+      query.data,
+    );
+    const body = CommentListResponseSchema.parse({
+      comments: rows.map(serializeComment),
+    });
+    return c.json(body);
+  });
+
+  const moderateComment = (hidden: boolean) => async (c: {
+    req: { param: (k: string) => string | undefined };
+    get: (k: "apiKeyAuth") => ApiKeyAuthContext;
+    json: (v: unknown) => Response;
+  }) => {
+    const denied = requireScope(c, "comments:write");
+    if (denied) return denied;
+    const id = c.req.param("id") ?? "";
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(
+        c as Parameters<typeof apiError>[0],
+        404,
+        "NOT_FOUND",
+        "Comment not found",
+      );
+    }
+    const auth = c.get("apiKeyAuth");
+    const outcome = await performCommentModeration(bundle, commentOpts, {
+      tenantId: auth.tenantId,
+      actorId: auth.apiKey.id,
+      actorType: "api_key",
+      commentId: id,
+      hidden,
+    });
+    if (outcome.kind === "not_found") {
+      return apiError(
+        c as Parameters<typeof apiError>[0],
+        404,
+        "NOT_FOUND",
+        "Comment not found",
+      );
+    }
+    if (outcome.kind === "failed") {
+      return apiError(
+        c as Parameters<typeof apiError>[0],
+        422,
+        "META_COMMENT_ACTION_FAILED",
+        "Meta rejected the moderation request",
+      );
+    }
+    return c.json(serializeComment(outcome.comment));
+  };
+
+  app.post("/v1/comments/:id/hide", moderateComment(true));
+  app.post("/v1/comments/:id/unhide", moderateComment(false));
 
   return app;
 }

@@ -126,6 +126,10 @@ const EXPECTED_TOOLS = [
   "list_messages",
   "send_message",
   "list_products",
+  // Fase 10B: permukaan komentar (aturan sinkronisasi kontrak).
+  "list_comments",
+  "hide_comment",
+  "unhide_comment",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -142,7 +146,7 @@ try {
   const tools = await client.listTools();
   const names = tools.tools.map((t) => t.name).sort();
   check(
-    "tools/list memuat 7 tools",
+    "tools/list memuat 10 tools",
     JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()),
     names.join(","),
   );
@@ -154,9 +158,12 @@ try {
     hintOf("whoami") === true &&
       hintOf("list_contacts") === true &&
       hintOf("list_products") === true &&
+      hintOf("list_comments") === true &&
       hintOf("create_contact") === false &&
-      hintOf("send_message") === false,
-    `create_contact=${String(hintOf("create_contact"))} send_message=${String(hintOf("send_message"))}`,
+      hintOf("send_message") === false &&
+      hintOf("hide_comment") === false &&
+      hintOf("unhide_comment") === false,
+    `create_contact=${String(hintOf("create_contact"))} send_message=${String(hintOf("send_message"))} hide_comment=${String(hintOf("hide_comment"))}`,
   );
 
   const whoami = await call(client, "whoami");
@@ -229,6 +236,28 @@ try {
     "list_products",
     !productsResult.isError && !!products && Array.isArray(products.products),
     products ? `count=${products.products.length}` : resultText(productsResult),
+  );
+
+  // Fase 10B: permukaan komentar — baca jalan di tier read-only; tulis
+  // (hide_comment) menolak tanpa MCP_ALLOW_WRITES seperti tool tulis lain.
+  const commentsResult = await call(client, "list_comments", { limit: 5 });
+  const commentsList = resultJson<{ comments: unknown[] }>(commentsResult);
+  check(
+    "list_comments",
+    !commentsResult.isError && !!commentsList && Array.isArray(commentsList.comments),
+    commentsList
+      ? `count=${commentsList.comments.length}`
+      : resultText(commentsResult),
+  );
+
+  const rejectedHide = await call(client, "hide_comment", {
+    commentId: "00000000-0000-4000-8000-000000000000",
+  });
+  check(
+    "tanpa MCP_ALLOW_WRITES: hide_comment DITOLAK (menyebut MCP_ALLOW_WRITES)",
+    rejectedHide.isError === true &&
+      resultText(rejectedHide).includes("MCP_ALLOW_WRITES"),
+    resultText(rejectedHide).slice(0, 120),
   );
 } finally {
   await client.close();

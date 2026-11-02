@@ -1,10 +1,13 @@
 import type {
   ApiError,
+  CommentListResponse,
+  CommentResponse,
   ContactListResponse,
   ContactResponse,
   ConversationListResponse,
   CreateContactRequest,
   ErrorCode,
+  ListCommentsQuery,
   ListContactsQuery,
   ListConversationsQuery,
   ListMessagesQuery,
@@ -35,11 +38,14 @@ import type {
 
 export type {
   ApiError,
+  CommentListResponse,
+  CommentResponse,
   ContactListResponse,
   ContactResponse,
   ConversationListResponse,
   CreateContactRequest,
   ErrorCode,
+  ListCommentsQuery,
   ListContactsQuery,
   ListConversationsQuery,
   ListMessagesQuery,
@@ -220,5 +226,41 @@ export class SahabatKreatorClient {
   /** GET /v1/products (scope `products:read`). */
   async listProducts(): Promise<ProductListResponse> {
     return this.request<ProductListResponse>("GET", "/products");
+  }
+
+  /**
+   * GET /v1/comments (scope `comments:read`) — komentar Instagram/
+   * Messenger yang tercatat dari webhook, terbaru dulu, beserta jejak
+   * aksi aturan comment-to-DM/moderasi (Fase 10B).
+   */
+  async listComments(
+    query: ListCommentsQuery = {},
+  ): Promise<CommentListResponse> {
+    return this.request<CommentListResponse>("GET", "/comments", {
+      query: {
+        channelAccountId: query.channelAccountId,
+        automationId: query.automationId,
+        limit: query.limit,
+      },
+    });
+  }
+
+  /**
+   * POST /v1/comments/:id/hide (scope `comments:write`) — sembunyikan
+   * komentar di Meta; status lokal berubah hanya bila Meta menerima.
+   */
+  async hideComment(commentId: string): Promise<CommentResponse> {
+    return this.request<CommentResponse>(
+      "POST",
+      `/comments/${encodeURIComponent(commentId)}/hide`,
+    );
+  }
+
+  /** POST /v1/comments/:id/unhide (scope `comments:write`). */
+  async unhideComment(commentId: string): Promise<CommentResponse> {
+    return this.request<CommentResponse>(
+      "POST",
+      `/comments/${encodeURIComponent(commentId)}/unhide`,
+    );
   }
 }

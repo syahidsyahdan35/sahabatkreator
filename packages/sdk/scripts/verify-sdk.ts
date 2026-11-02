@@ -37,6 +37,22 @@ check("me() mengembalikan tenant", typeof me.tenantId === "string" && me.tenantI
 const contacts = await client.listContacts({ limit: 5 });
 check("listContacts() berhasil", Array.isArray(contacts.contacts) && typeof contacts.total === "number", `total=${contacts.total}`);
 
+// Fase 10B: permukaan komentar (scope comments:read pada kunci uji).
+// Kunci tanpa scope itu menerima API_KEY_SCOPE_DENIED bertipe — keduanya
+// membuktikan endpoint + metode SDK terhubung; keberhasilan penuh hanya
+// untuk kunci berscope komentar.
+try {
+  const comments = await client.listComments({ limit: 5 });
+  check("listComments() berhasil", Array.isArray(comments.comments), `count=${comments.comments.length}`);
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listComments() terhubung (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

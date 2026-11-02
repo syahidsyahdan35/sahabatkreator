@@ -43,7 +43,9 @@ export type ApiKeyScope =
   | "contacts:write"
   | "conversations:read"
   | "messages:write"
-  | "products:read";
+  | "products:read"
+  | "comments:read"
+  | "comments:write";
 
 /** Hash SHA-256 (hex) dari kunci utuh — satu-satunya bentuk yang disimpan/dicari. */
 export function hashApiKey(fullKey: string): string {
