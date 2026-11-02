@@ -122,6 +122,11 @@ const platformOptions: PlatformSettingsOptions = {
     meta_app_id: env.META_APP_ID,
     meta_ig_config_id: env.META_IG_CONFIG_ID,
     meta_wa_config_id: env.META_WA_CONFIG_ID,
+    // Fase 11B: email Resend — env hanya fallback; sumber utama Panel
+    // Admin (resend_api_key rahasia + identitas pengirim publik).
+    resend_api_key: env.RESEND_API_KEY,
+    resend_from_email: env.RESEND_FROM_EMAIL,
+    resend_from_name: env.RESEND_FROM_NAME,
   },
 };
 
@@ -181,9 +186,15 @@ routes.route("/", createNotesRoutes(authBundle));
 // Modul team (Fase 9C) — member & undangan /tenants/:tenantId/team/*
 // + penerimaan undangan /invitations/:token/*. Basis URL publik sama
 // dengan tautan bayar (BETTER_AUTH_URL = origin web publik).
+// Fase 11B: opsi platform + secret enkripsi token agar pembuatan
+// undangan bisa mengantrekan email Resend lewat outbox.
 routes.route(
   "/",
-  createTeamRoutes(authBundle, { publicBaseUrl: env.BETTER_AUTH_URL }),
+  createTeamRoutes(authBundle, {
+    publicBaseUrl: env.BETTER_AUTH_URL,
+    platform: platformOptions,
+    channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+  }),
 );
 // Modul analitik (Fase 9B) — pemakaian AI /tenants/:tenantId/analytics/ai-usage.
 routes.route("/", createAnalyticsRoutes(authBundle));
@@ -312,6 +323,8 @@ routes.route(
     },
     // Fase 7D: redirect URI OAuth tunggal ditampilkan read-only di panel.
     metaOAuthRedirectUri: `${(env.BETTER_AUTH_URL ?? "").replace(/\/+$/, "")}/api/meta/oauth/callback`,
+    // Fase 11B: base URL API Resend untuk probe uji koneksi panel.
+    resendApiBase: env.RESEND_API_BASE,
   }),
 );
 // Modul Meta OAuth Connect (Fase 7D) — "Lanjutkan dengan Facebook":

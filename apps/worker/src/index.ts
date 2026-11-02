@@ -9,6 +9,8 @@ import {
 import { MetaGraphClient } from "@sahabat-kreator/channel-messenger";
 import {
   INTEGRATION_LOG_RETENTION_DAYS,
+  INVITATION_EMAIL_OUTBOX_TYPE,
+  deliverInvitationEmail,
   dispatchBroadcast,
   embedKbDocumentChunks,
   evaluateCommentForAutomations,
@@ -34,6 +36,7 @@ import {
   KB_EMBED_JOB,
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
+  TEAM_INVITATION_EMAIL_JOB,
   createAutomationQueue,
   createRealtimePublisher,
   createRedisConnection,
@@ -42,6 +45,7 @@ import {
   enqueueBroadcastDispatch,
   enqueueCommentEvaluate,
   enqueueFlowStep,
+  enqueueInvitationEmail,
   enqueueKbEmbed,
   enqueueSequenceStep,
   type AgentRespondJobData,
@@ -49,6 +53,7 @@ import {
   type BroadcastDispatchJobData,
   type CommentEvaluateJobData,
   type FlowStepJobData,
+  type InvitationEmailJobData,
   type KbEmbedJobData,
   type MainJobData,
   type SequenceStepJobData,
@@ -116,6 +121,16 @@ import {
  *    di-resolve per job (mock paksa via env / OpenRouter panel→env /
  *    nonaktif). Retrieval agent & node flow ai_response memakai
  *    provider yang sama untuk meng-embed kueri — hibrida bila aktif.
+ * 8. EMAIL UNDANGAN TIM (Fase 11B): relay menerjemahkan event outbox
+ *    `team.invitation_email_requested` (ditulis API sesudah undangan
+ *    tercipta, hanya bila email platform terkonfigurasi) menjadi job
+ *    `team.invitation_email`; processor-nya menjalankan
+ *    `deliverInvitationEmail` di core: konfigurasi Resend di-resolve
+ *    per job (panel → env), token undangan dibuka dari ciphertext
+ *    payload, email dwibahasa dikirim, dan hasil tercatat di baris
+ *    undangan (email_sent_at / email_error). Kegagalan provider
+ *    DILEMPAR agar BullMQ retry (attempts 3) — undangan sendiri tetap
+ *    sah lewat tautan salin apa pun hasil emailnya.
  *
  * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
  * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
@@ -163,6 +178,12 @@ const platformSettingsOptions: PlatformSettingsOptions = {
   env: {
     openrouter_api_key: env.OPENROUTER_API_KEY,
     openrouter_model: env.OPENROUTER_MODEL,
+    // Fase 11B: fallback env konfigurasi email Resend (sumber utama
+    // Panel Admin) agar job email undangan me-resolve konfigurasi yang
+    // sama seperti API.
+    resend_api_key: env.RESEND_API_KEY,
+    resend_from_email: env.RESEND_FROM_EMAIL,
+    resend_from_name: env.RESEND_FROM_NAME,
   },
 };
 
@@ -452,6 +473,39 @@ const bullWorker = new Worker<MainJobData>(
       }
       return result;
     }
+    if (job.name === TEAM_INVITATION_EMAIL_JOB) {
+      // Fase 11B: kirim email satu undangan tim via Resend. Seluruh
+      // keputusan (konfigurasi per job, idempotensi, pencatatan hasil
+      // di baris undangan) ada di core; worker hanya memetakan hasil:
+      // "failed" DILEMPAR agar BullMQ retry (attempts 3 + backoff) —
+      // kegagalan permanen berakhir sebagai job gagal yang terlihat,
+      // dengan email_error sudah tercatat di baris undangan.
+      const data = job.data as InvitationEmailJobData;
+      const result = await deliverInvitationEmail(
+        db,
+        {
+          platform: platformSettingsOptions,
+          tokenSecret: env.CHANNEL_TOKEN_SECRET,
+          apiBase: env.RESEND_API_BASE,
+          publicBaseUrl: env.BETTER_AUTH_URL,
+        },
+        {
+          tenantId: data.tenantId,
+          invitationId: data.invitationId,
+          tokenEnc: data.tokenEnc,
+        },
+      );
+      if (result.kind === "failed") {
+        throw new Error(
+          `[worker] team.invitation_email invitation=${data.invitationId} gagal: ${result.code}: ${result.message}`,
+        );
+      }
+      console.log(
+        `[worker] team.invitation_email invitation=${data.invitationId} hasil=${result.kind}` +
+          (result.kind === "skipped" ? ` reason=${result.reason}` : ""),
+      );
+      return result;
+    }
     if (job.name === AGENT_RESPOND_JOB) {
       const data = job.data as AgentRespondJobData;
       // Fase 6C: provider di-resolve per job (panel → env; lihat di atas).
@@ -645,6 +699,33 @@ async function relayTick(): Promise<void> {
         await enqueueKbEmbed(queue, {
           tenantId: event.tenantId,
           documentId: payload.documentId,
+          outboxEventId: event.id,
+        });
+        return;
+      }
+      // Fase 11B: undangan tim baru meminta pengiriman email → job
+      // `team.invitation_email` (jobId deterministik dari id event).
+      // Payload membawa token undangan sebagai CIPHERTEXT (bukan teks
+      // terang); event hanya ditulis API bila email platform
+      // terkonfigurasi saat undangan dibuat.
+      if (event.type === INVITATION_EMAIL_OUTBOX_TYPE) {
+        const payload = event.payload as {
+          invitationId?: unknown;
+          tokenEnc?: unknown;
+        };
+        if (
+          typeof payload.invitationId !== "string" ||
+          typeof payload.tokenEnc !== "string"
+        ) {
+          console.warn(
+            `[worker] event ${INVITATION_EMAIL_OUTBOX_TYPE} ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        await enqueueInvitationEmail(queue, {
+          tenantId: event.tenantId,
+          invitationId: payload.invitationId,
+          tokenEnc: payload.tokenEnc,
           outboxEventId: event.id,
         });
         return;

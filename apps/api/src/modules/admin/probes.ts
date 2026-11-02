@@ -73,6 +73,48 @@ export async function probeOpenRouterKey(
 }
 
 // ---------------------------------------------------------------------------
+// Resend — GET /domains (Fase 11B): memvalidasi kunci API email; jumlah
+// domain terverifikasi adalah info non-rahasia yang berguna bagi pemilik
+// (domain pengirim WAJIB terverifikasi di Resend agar kirim berhasil).
+// ---------------------------------------------------------------------------
+
+export async function probeResendKey(
+  key: string | null,
+  apiBase?: string,
+): Promise<ProbeResult> {
+  if (!key) return { ok: false, code: "NOT_CONFIGURED" };
+  const base = (apiBase ?? "https://api.resend.com").replace(/\/+$/, "");
+  let res: Response;
+  try {
+    res = await fetch(`${base}/domains`, {
+      method: "GET",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      headers: { Authorization: `Bearer ${key}` },
+    });
+  } catch {
+    return { ok: false, code: "RESEND_UNREACHABLE" };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, code: "RESEND_AUTH_FAILED" };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      code: "RESEND_UNEXPECTED_STATUS",
+      info: { status: res.status },
+    };
+  }
+  const body = (await res.json().catch(() => null)) as {
+    data?: unknown[];
+  } | null;
+  return {
+    ok: true,
+    code: "OK",
+    info: { domains: Array.isArray(body?.data) ? body.data.length : 0 },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Cloudflare R2 — HeadBucket bertanda tangan SigV4 (tanpa dependensi AWS SDK)
 // ---------------------------------------------------------------------------
 

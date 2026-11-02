@@ -24,7 +24,7 @@ import {
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
 import { requireAuth } from "../auth/session";
-import { probeOpenRouterKey, probeR2Bucket, type ProbeResult } from "./probes";
+import { probeOpenRouterKey, probeR2Bucket, probeResendKey, type ProbeResult } from "./probes";
 
 export interface AdminRoutesOptions {
   /** Allowlist mentah env PLATFORM_ADMIN_EMAILS (koma-terpisah). */
@@ -39,6 +39,12 @@ export interface AdminRoutesOptions {
    * Meta App. Dihitung dari BETTER_AUTH_URL oleh pemanggil.
    */
   metaOAuthRedirectUri?: string;
+  /**
+   * Base URL API Resend (Fase 11B) — hanya untuk probe uji koneksi;
+   * default https://api.resend.com, override env RESEND_API_BASE untuk
+   * mock rantai. Pengiriman sungguhan di-resolve worker dari env-nya.
+   */
+  resendApiBase?: string;
 }
 
 function serializeStatus(s: CorePlatformSettingStatus): PlatformSettingStatus {
@@ -63,6 +69,11 @@ const KEY_MAX_LENGTH: Record<PlatformSettingKey, number> = {
   meta_app_id: 128,
   meta_ig_config_id: 128,
   meta_wa_config_id: 128,
+  // Fase 11B: kunci Resend rahasia; identitas pengirim publik (alamat
+  // email + nama tampil) — panjang mengikuti sifat nilainya.
+  resend_api_key: 512,
+  resend_from_email: 320,
+  resend_from_name: 128,
 };
 
 /**
@@ -77,6 +88,9 @@ const TESTABLE_KEYS: ReadonlySet<PlatformSettingKey> = new Set([
   "openrouter_api_key",
   "r2_access_key_id",
   "r2_secret_access_key",
+  // Fase 11B: GET /domains Resend memvalidasi kunci tanpa mengirim
+  // email apa pun — uji yang jujur untuk kredensial email.
+  "resend_api_key",
 ]);
 
 /**
@@ -154,6 +168,12 @@ export function createAdminRoutes(
         igConfigId: publicConfig.meta_ig_config_id,
         waConfigId: publicConfig.meta_wa_config_id,
         oauthRedirectUri: options.metaOAuthRedirectUri ?? "",
+      },
+      // Fase 11B: identitas pengirim email efektif (panel → env) —
+      // publik menurut sifatnya, ditampilkan untuk verifikasi pemilik.
+      email: {
+        fromEmail: publicConfig.resend_from_email,
+        fromName: publicConfig.resend_from_name,
       },
     });
     return c.json(body);
@@ -235,6 +255,13 @@ export function createAdminRoutes(
         options.platform,
       );
       result = await probeOpenRouterKey(effective);
+    } else if (key === "resend_api_key") {
+      const effective = await getProviderSecret(
+        bundle.db,
+        "resend_api_key",
+        options.platform,
+      );
+      result = await probeResendKey(effective, options.resendApiBase);
     } else {
       const [accessKeyId, secretAccessKey] = await Promise.all([
         getProviderSecret(bundle.db, "r2_access_key_id", options.platform),

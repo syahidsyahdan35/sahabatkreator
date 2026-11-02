@@ -19,10 +19,13 @@ import {
   isTeamManager,
   listInvitations,
   listTeamMembers,
+  queueInvitationEmail,
   removeMember,
+  resolveEmailConfig,
   revokeInvitation,
   updateMemberRole,
   type Invitation,
+  type PlatformSettingsOptions,
   type TeamMemberRow,
 } from "@sahabat-kreator/core";
 import type { AuthBundle } from "../../auth";
@@ -44,13 +47,29 @@ import { resolveTenantForUser } from "../tenants/guard";
  * Gerbang peran: membaca daftar member untuk semua member; seluruh
  * mutasi tim owner/admin (route memeriksa `tenant.role`, invariant
  * owner & larangan self-action ditegakkan di core `team.ts`).
- * Email sungguhan tidak dikirim (belum ada provider email): tautan
- * dikembalikan SEKALI pada respons pembuatan untuk disalin pengundang —
- * server hanya menyimpan hash tokennya.
+ * Tautan dikembalikan SEKALI pada respons pembuatan untuk disalin
+ * pengundang — server hanya menyimpan hash tokennya.
+ * Email undangan (Fase 11B): bila email platform (Resend) terkonfigurasi,
+ * pembuatan juga mengantrekan pengiriman email lewat outbox → job
+ * worker (respons TIDAK menunggu pengiriman) dan respons menyatakan
+ * `emailDelivery: "queued"`; tanpa konfigurasi email, respons
+ * menyatakan `"not_configured"` dan tautan salin tetap satu-satunya
+ * jalur — sama seperti perilaku 9C.
  */
 export interface TeamRoutesOptions {
   /** Basis URL publik web (untuk merakit tautan undangan utuh). */
   publicBaseUrl?: string;
+  /**
+   * Opsi resolver Panel Admin (Fase 11B): dipakai untuk memutuskan
+   * apakah email undangan bisa diantrekan (konfigurasi Resend efektif).
+   * Tanpa opsi ini pengiriman email selalu "not_configured".
+   */
+  platform?: PlatformSettingsOptions;
+  /**
+   * Secret env untuk mengenkripsi token undangan ke payload outbox
+   * (CHANNEL_TOKEN_SECRET) — token mentah tidak pernah disimpan.
+   */
+  channelTokenSecret?: string;
 }
 
 function serializeMember(
@@ -70,6 +89,7 @@ function serializeMember(
 function serializeInvitation(
   row: Invitation,
   inviteUrl: string | null,
+  emailDelivery: "queued" | "not_configured" | null = null,
 ): InvitationResponse {
   return InvitationResponseSchema.parse({
     id: row.id,
@@ -79,6 +99,9 @@ function serializeInvitation(
     role: row.role === "owner" ? "agent" : row.role,
     status: invitationStatus(row),
     inviteUrl,
+    emailDelivery,
+    emailSentAt: row.emailSentAt?.toISOString() ?? null,
+    emailError: row.emailError ?? null,
     expiresAt: row.expiresAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
   });
@@ -196,7 +219,35 @@ export function createTeamRoutes(
     }
     const base = (opts.publicBaseUrl ?? "").replace(/\/+$/, "");
     const inviteUrl = `${base}/invite/${result.token}`;
-    return c.json(serializeInvitation(result.invitation, inviteUrl), 201);
+    // Fase 11B: antrekan email undangan bila email platform
+    // terkonfigurasi. Keputusan dibuat di sini (bukan di job) agar
+    // respons bisa menyatakan statusnya dengan jujur; event outbox
+    // membawa token sebagai ciphertext (lihat core email.ts).
+    // Kegagalan antre tidak menggagalkan undangan yang sudah tercipta.
+    let emailDelivery: "queued" | "not_configured" = "not_configured";
+    if (opts.platform) {
+      try {
+        const emailConfig = await resolveEmailConfig(bundle.db, opts.platform);
+        if (emailConfig) {
+          const queued = await queueInvitationEmail(bundle.db, {
+            tenantId: g.tenant.id,
+            invitationId: result.invitation.id,
+            token: result.token,
+            encryptionSecret: opts.channelTokenSecret,
+          });
+          if (queued) emailDelivery = "queued";
+        }
+      } catch (err) {
+        console.error(
+          "[api] antre email undangan gagal (undangan tetap sah):",
+          err,
+        );
+      }
+    }
+    return c.json(
+      serializeInvitation(result.invitation, inviteUrl, emailDelivery),
+      201,
+    );
   });
 
   // ---- Cabut undangan (owner/admin) ------------------------------------------
