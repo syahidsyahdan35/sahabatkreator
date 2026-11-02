@@ -7,6 +7,8 @@ import type {
   CreatedApiKeyResponse,
   CreateApiKeyRequest,
   AgentResponse,
+  AgentPlaygroundRequest,
+  AgentPlaygroundResponse,
   AgentSuggestionListResponse,
   AgentSuggestionResponse,
   AutomationListResponse,
@@ -731,6 +733,21 @@ export const api = {
       return request<AgentResponse>(
         `/api/tenants/${tenantId}/agents/${agentId}`,
         { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /**
+     * POST /api/tenants/:tenantId/agents/:id/playground → uji KERING agent
+     * (Fase 12E): balasan calon + potongan KB terambil + niat tool.
+     * Tidak ada data yang berubah di server selain catatan usage uji.
+     */
+    playground(
+      tenantId: string,
+      agentId: string,
+      input: AgentPlaygroundRequest,
+    ): Promise<AgentPlaygroundResponse> {
+      return request<AgentPlaygroundResponse>(
+        `/api/tenants/${tenantId}/agents/${agentId}/playground`,
+        { method: "POST", body: JSON.stringify(input) },
       );
     },
   },

@@ -46,12 +46,13 @@ interface AgentsPageProps {
 }
 
 /**
- * Halaman AI Agents (Fase 3B): pengelolaan agent workspace aktif lewat API 3A
- * — daftar + sakelar aktif, form buat/edit (prompt, model, mode auto/suggest),
- * dan antrean draf balasan mode suggest dengan approve/reject. Semua teks
- * lewat i18n; tanggal lewat Intl.
+ * Seksi daftar agent untuk hub /agents (Fase 12E): pengelolaan agent
+ * workspace aktif lewat API 3A — daftar + sakelar aktif, form buat/edit
+ * (prompt, model, mode auto/suggest). Antrean saran kini seksi terpisah
+ * (`SuggestionsSection`) di tabnya sendiri; keduanya dirangkai
+ * AgentsHubPage. Semua teks lewat i18n; tanggal lewat Intl.
  */
-export function AgentsPage({ t, locale }: AgentsPageProps) {
+export function AgentsListSection({ t, locale }: AgentsPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
   const tenantId = active?.id ?? null;
 
@@ -272,8 +273,6 @@ export function AgentsPage({ t, locale }: AgentsPageProps) {
         </ul>
       )}
 
-      <SuggestionsQueue t={t} locale={locale} tenantId={active.id} agents={agents} />
-
       {formTarget ? (
         <AgentFormModal
           t={t}
@@ -482,11 +481,14 @@ function SuggestionsQueue({
   locale,
   tenantId,
   agents,
+  hideHeading = false,
 }: {
   t: Translate;
   locale: Locale;
   tenantId: string;
   agents: AgentResponse[];
+  /** Tab hub (12E) sudah memberi label seksi — judul antrean disembunyikan. */
+  hideHeading?: boolean;
 }) {
   const { refresh: refreshBadge } = usePendingApprovals();
   const [drafts, setDrafts] = useState<AgentSuggestionResponse[]>([]);
@@ -568,9 +570,13 @@ function SuggestionsQueue({
     agents.find((a) => a.id === agentId)?.name ?? shortId(agentId);
 
   return (
-    <div className="mt-8">
-      <h2 className="text-lg font-bold text-ink">{t("agents.draftsTitle")}</h2>
-      <p className="mt-1 text-sm text-muted">{t("agents.draftsSubtitle")}</p>
+    <div className={hideHeading ? undefined : "mt-8"}>
+      {hideHeading ? null : (
+        <>
+          <h2 className="text-lg font-bold text-ink">{t("agents.draftsTitle")}</h2>
+          <p className="mt-1 text-sm text-muted">{t("agents.draftsSubtitle")}</p>
+        </>
+      )}
       <FieldError message={error} />
       {loading ? (
         <p className="mt-4 text-sm text-muted">{t("common.loading")}</p>
@@ -638,5 +644,76 @@ function SuggestionsQueue({
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * Seksi Antrean Saran untuk hub /agents (Fase 12E): penjaga status
+ * workspace + daftar agent (untuk nama pada kartu draf) lalu antrean
+ * itu sendiri. Judul seksi datang dari label tab hub.
+ */
+export function SuggestionsSection({ t, locale }: AgentsPageProps) {
+  const { status, tenants, active, reload } = useWorkspace();
+  const tenantId = active?.id ?? null;
+  const [agents, setAgents] = useState<AgentResponse[]>([]);
+
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    // Nama agent hanya pelengkap label kartu draf — gagal memuatnya
+    // tidak boleh menggagalkan antrean (fallback ID ringkas di kartu).
+    api.agents
+      .list(tenantId)
+      .then((list) => {
+        if (!cancelled) setAgents(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  if (status === "loading") {
+    return (
+      <section>
+        <p className="text-sm text-muted">{t("workspace.loading")}</p>
+      </section>
+    );
+  }
+  if (status === "error") {
+    return (
+      <section>
+        <div className="rounded-xl border border-line bg-surface p-6">
+          <p className="text-sm text-danger">{t("workspace.loadError")}</p>
+          <button
+            type="button"
+            onClick={() => void reload()}
+            className="mt-3 rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
+          >
+            {t("common.retry")}
+          </button>
+        </div>
+      </section>
+    );
+  }
+  if (tenants.length === 0 || !active) {
+    return (
+      <section>
+        <div className="rounded-xl border border-dashed border-line bg-surface p-6">
+          <h2 className="text-lg font-semibold text-ink">{t("workspace.emptyTitle")}</h2>
+          <p className="mt-1 max-w-md text-sm text-muted">{t("workspace.emptyBody")}</p>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <SuggestionsQueue
+      t={t}
+      locale={locale}
+      tenantId={active.id}
+      agents={agents}
+      hideHeading
+    />
   );
 }

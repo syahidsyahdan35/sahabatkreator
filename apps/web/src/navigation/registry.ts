@@ -36,7 +36,12 @@ export const NAV_REGISTRY: NavItem[] = [
   // Flow Builder (Fase 8B): daftar /flows + builder canvas /flows/:flowId
   // (matchNavPath memetakan sub-path ke item ini, pola deep-link Inbox).
   { id: "flows",       labelKey: "nav.flows",       icon: "flow",      route: "/flows",       mobile: { slot: "more" }, order: { desktop: 7,  more: 3 } },
-  { id: "knowledge",   labelKey: "nav.knowledge",   icon: "book",      route: "/knowledge",   mobile: { slot: "more" }, order: { desktop: 8,  more: 4 } },
+  // Knowledge Base TIDAK lagi entri tersendiri (Fase 12E): ia tab di
+  // dalam hub /agents bersama Agen, Antrean Saran, dan Playground
+  // (keputusan user — ketiganya saling berhubungan). URL lama /knowledge
+  // dialihkan App ke /agents?tab=knowledge. Order desktop/more item di
+  // bawah ini sengaja TIDAK direnumber — celah angka tidak berpengaruh
+  // pada urutan render (semua daftar di-sort).
   { id: "products",    labelKey: "nav.products",    icon: "bag",       route: "/products",    mobile: { slot: "more" }, order: { desktop: 9,  more: 5 } },
   { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
   { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },

@@ -29,6 +29,12 @@ type Translate = (
 interface KnowledgePageProps {
   t: Translate;
   locale: Locale;
+  /**
+   * Fase 12E: dirender sebagai tab Knowledge Base di hub /agents —
+   * judul halaman (h1 + subjudul) disembunyikan karena label tab sudah
+   * mengatakannya; semua isi & perilaku lain persis sama.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -43,7 +49,7 @@ interface KnowledgePageProps {
  * menghapus entri turunan dari daftar dokumen juga membersihkan
  * berkasnya — dan sebaliknya.
  */
-export function KnowledgePage({ t, locale }: KnowledgePageProps) {
+export function KnowledgePage({ t, locale, embedded = false }: KnowledgePageProps) {
   const { status, tenants, active, reload } = useWorkspace();
   const tenantId = active?.id ?? null;
 
@@ -117,7 +123,9 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
   if (status === "loading") {
     return (
       <section>
-        <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        {embedded ? null : (
+          <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        )}
         <p className="mt-6 text-sm text-muted">{t("workspace.loading")}</p>
       </section>
     );
@@ -125,7 +133,9 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
   if (status === "error") {
     return (
       <section>
-        <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        {embedded ? null : (
+          <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        )}
         <div className="mt-6 rounded-xl border border-line bg-surface p-6">
           <p className="text-sm text-danger">{t("workspace.loadError")}</p>
           <button
@@ -142,7 +152,9 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
   if (tenants.length === 0 || !active) {
     return (
       <section>
-        <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        {embedded ? null : (
+          <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+        )}
         <div className="mt-6 rounded-xl border border-dashed border-line bg-surface p-6">
           <h2 className="text-lg font-semibold text-ink">{t("workspace.emptyTitle")}</h2>
           <p className="mt-1 max-w-md text-sm text-muted">{t("workspace.emptyBody")}</p>
@@ -153,19 +165,31 @@ export function KnowledgePage({ t, locale }: KnowledgePageProps) {
 
   return (
     <section>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
-          <p className="mt-1 text-sm text-muted">{t("knowledge.subtitle")}</p>
+      {embedded ? (
+        <div className="flex flex-wrap items-start justify-end gap-3">
+          <button
+            type="button"
+            onClick={() => setFormOpen(true)}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
+          >
+            {t("knowledge.addButton")}
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={() => setFormOpen(true)}
-          className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
-        >
-          {t("knowledge.addButton")}
-        </button>
-      </div>
+      ) : (
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-ink">{t("knowledge.title")}</h1>
+            <p className="mt-1 text-sm text-muted">{t("knowledge.subtitle")}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFormOpen(true)}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
+          >
+            {t("knowledge.addButton")}
+          </button>
+        </div>
+      )}
 
       <div className="mt-4 rounded-xl border border-line bg-elevated p-4">
         <p className="text-xs leading-relaxed text-muted">

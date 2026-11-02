@@ -20,8 +20,7 @@ import { ProfileBlock } from "./components/ProfileBlock";
 import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { DashboardPage } from "./pages/DashboardPage";
 import { AutomationsPage } from "./pages/AutomationsPage";
-import { AgentsPage } from "./pages/AgentsPage";
-import { KnowledgePage } from "./pages/KnowledgePage";
+import { AgentsHubPage } from "./pages/AgentsHubPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { InboxPage } from "./pages/InboxPage";
 import {
@@ -157,14 +156,34 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
   const { pendingCount } = usePendingApprovals();
   const [moreOpen, setMoreOpen] = useState(false);
 
+  // Pengalihan /knowledge (Fase 12E): Knowledge Base kini tab di hub
+  // /agents dan entri registry-nya sudah dihapus — URL lama (bookmark,
+  // tautan dari sesi sebelumnya, returnTo pasca-login) dialihkan ke
+  // tab-nya dengan replace agar tidak menumpuk riwayat.
+  useEffect(() => {
+    if (path === "/knowledge") onReplaceTo("/agents?tab=knowledge");
+  }, [path, onReplaceTo]);
+
   // Halaman aktif SELALU diturunkan dari URL (Fase 6E) — tidak ada state
   // halaman terpisah. `match.segment` untuk Inbox adalah id percakapan
-  // deep-link; untuk item lain tidak dipakai.
-  const match = matchNavPath(path);
+  // deep-link; untuk item lain tidak dipakai. Query string (tab hub
+  // /agents, Fase 12E) bukan bagian identitas halaman — dibuang sebelum
+  // pencocokan registry.
+  const match = matchNavPath(path.split("?")[0] ?? path);
   const activeItem = match.item;
   const activeId = activeItem.id;
 
   if (!user) return null;
+
+  // Satu frame kosong selama pengalihan /knowledge berjalan (effect di
+  // atas menukar URL pada commit yang sama).
+  if (path === "/knowledge") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg text-ink">
+        <p className="text-sm text-muted">{t("common.loading")}</p>
+      </div>
+    );
+  }
 
   const badges = { pendingApprovals: pendingCount, unreadInbox: totalUnread };
   const moreActive = activeItem.mobile.slot === "more";
@@ -241,9 +260,7 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
             onConversationChange={handleConversationChange}
           />
         ) : activeId === "agents" ? (
-          <AgentsPage t={t} locale={locale} />
-        ) : activeId === "knowledge" ? (
-          <KnowledgePage t={t} locale={locale} />
+          <AgentsHubPage t={t} locale={locale} />
         ) : activeId === "channels" ? (
           <ChannelsPage t={t} locale={locale} />
         ) : activeId === "automations" ? (

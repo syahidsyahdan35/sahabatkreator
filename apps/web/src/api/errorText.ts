@@ -96,6 +96,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.KB_DOCUMENT_TYPE_UNSUPPORTED");
     case "KB_DOCUMENT_TOO_LARGE":
       return t("errors.KB_DOCUMENT_TOO_LARGE");
+    case "AGENT_PROVIDER_ERROR":
+      return t("errors.AGENT_PROVIDER_ERROR");
     case "ASSIGNEE_NOT_MEMBER":
       return t("errors.ASSIGNEE_NOT_MEMBER");
     case "INVITATION_EXPIRED":
