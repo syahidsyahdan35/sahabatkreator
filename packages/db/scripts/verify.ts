@@ -733,5 +733,87 @@ console.log(
   "[14] Hotfix Telegram: index unik parsial menolak bot aktif ganda lintas tenant (connected & error), membolehkan baris disconnected; lengan provider_external_lookup hanya membuka pasangan persis: OK",
 );
 
+// ---------- 15. Fase 6A.2: percakapan channel (kolom kind) ----------
+// Migrasi 0021: (a) kolom `kind` ada, default 'private' (baris TG_CONV_A
+// dari seksi [12] yang di-insert tanpa kind membuktikannya); (b) CHECK
+// menolak nilai di luar private/group/channel; (c) pernyataan backfill
+// migrasi (title terisi → 'group') diterapkan pada baris bergaya
+// pra-0021 — percakapan grup seksi [13] di-insert dengan title + kind
+// default, persis bentuk data warisan — dan mengubahnya menjadi 'group'
+// sementara baris tanpa title tetap 'private'; (d) percakapan channel
+// dengan kontak jangkar = channel itu sendiri (identitas
+// external_user_id = id channel) menresolusi alamat posting dashboard
+// lewat query poller ke ID CHANNEL.
+const kindCol = await db.query<{ data_type: string; column_default: string }>(
+  `SELECT data_type, column_default FROM information_schema.columns
+    WHERE table_name = 'conversations' AND column_name = 'kind'`,
+);
+assert.equal(kindCol.rows.length, 1);
+const defaultKind = await db.query<{ kind: string }>(
+  `SELECT kind FROM conversations WHERE id = $1`,
+  [TG_CONV_A],
+);
+assert.equal(defaultKind.rows[0].kind, "private");
+await assert.rejects(
+  db.query(
+    `INSERT INTO conversations (tenant_id, channel_account_id, contact_id, provider, kind)
+     VALUES ($1, $2, $3, 'telegram', 'bogus')`,
+    [TENANT_A, TG_ACC_A, CONTACT_A],
+  ),
+  /conversations_kind_valid/,
+);
+// Simulasi backfill migrasi 0021 atas data warisan bergaya pra-0021.
+await db.query(`UPDATE conversations SET kind = 'group' WHERE title IS NOT NULL`);
+const backfilled = await db.query<{ id: string; kind: string }>(
+  `SELECT id, kind FROM conversations WHERE id IN ($1, $2) ORDER BY id`,
+  [TG_GROUP_CONV, TG_CONV_A],
+);
+assert.deepEqual(
+  backfilled.rows.map((r) => `${r.id}:${r.kind}`),
+  [`${TG_CONV_A}:private`, `${TG_GROUP_CONV}:group`],
+);
+const CHAN_CONTACT_A = "45454545-4545-4454-8454-454545454545";
+const CHAN_CONV_A = "46464646-4646-4464-8464-464646464646";
+await db.query(
+  `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kanal Uji 6A.2')`,
+  [CHAN_CONTACT_A, TENANT_A],
+);
+await db.query(
+  `INSERT INTO channel_identities (tenant_id, contact_id, channel_account_id, provider, external_user_id)
+   VALUES ($1, $2, $3, 'telegram', '-100555000111')`,
+  [TENANT_A, CHAN_CONTACT_A, TG_ACC_A],
+);
+await db.query(
+  `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider, provider_chat_id, title, kind)
+   VALUES ($1, $2, $3, $4, 'telegram', '-100555000111', 'Kanal Uji 6A.2', 'channel')`,
+  [CHAN_CONV_A, TENANT_A, TG_ACC_A, CHAN_CONTACT_A],
+);
+await db.query(
+  `INSERT INTO messages (tenant_id, conversation_id, direction, sender_type, sender_name, type, content_text, provider_message_id, status)
+   VALUES ($1, $2, 'inbound', 'contact', 'Kanal Uji 6A.2', 'text', 'Postingan admin lain', 'telegram:555001:501', 'received'),
+          ($1, $2, 'outbound', 'user', NULL, 'text', 'Postingan dari dashboard', NULL, 'queued')`,
+  [TENANT_A, CHAN_CONV_A],
+);
+const chanSeen = await db.transaction(async (tx) => {
+  await tx.query(`SET LOCAL ROLE app_user`);
+  await tx.query(`SELECT set_config('app.system_delivery', 'telegram', true)`);
+  return tx.query<{ chat_id: string }>(
+    `SELECT coalesce(cv.provider_chat_id, ci.external_user_id) AS chat_id
+       FROM messages m
+       JOIN conversations cv ON cv.id = m.conversation_id
+       JOIN channel_accounts ca ON ca.id = cv.channel_account_id
+       JOIN channel_identities ci
+         ON ci.channel_account_id = cv.channel_account_id
+        AND ci.contact_id = cv.contact_id
+      WHERE m.conversation_id = $1
+        AND m.direction = 'outbound' AND m.status = 'queued'`,
+    [CHAN_CONV_A],
+  );
+});
+assert.deepEqual(chanSeen.rows.map((r) => r.chat_id), ["-100555000111"]);
+console.log(
+  "[15] Fase 6A.2: kolom kind ada + default 'private' + CHECK menolak nilai liar; backfill title→'group' tepat; percakapan channel (jangkar = channel sendiri) teresolusi alamat postingnya ke id channel lewat query poller: OK",
+);
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

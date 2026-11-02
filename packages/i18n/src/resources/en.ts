@@ -102,6 +102,10 @@ export const en = {
     deliveryNote: "Webchat replies are delivered live to the visitor (status becomes Sent when they are connected). Other channels still save replies with Queued status.",
     mediaMessage: "Media message",
     groupLabel: "Group",
+    channelLabel: "Channel",
+    postButton: "Post to channel",
+    postPlaceholder: "Write a post…",
+    channelDeliveryNote: "Posts are published to all subscribers of this channel. This is a broadcast timeline, not a two-way conversation.",
     senderAgent: "AI Agent",
     senderSystem: "System",
     status: {

@@ -12,7 +12,7 @@ import {
   type Message,
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
-import { withTenantDb } from "./tx";
+import { withTenantDb, type DbTx } from "./tx";
 
 /**
  * Service domain Telegram (Fase 6A, RANCANGAN §4) — channel Bot API.
@@ -37,6 +37,25 @@ import { withTenantDb } from "./tx";
  * penulis per pesan disimpan di `messages.sender_name`. Kontak jangkar
  * percakapan grup = pengirim pertama (semantik sequence per-kontak tetap
  * menunjuk kontak percakapan, sama seperti privat).
+ *
+ * Channel siaran (Fase 6A.2): channel adalah chat bertipe "channel" —
+ * satu arah, penulisnya channel itu sendiri. Ia diwakili SATU percakapan
+ * `kind='channel'` per (akun, channel): linimasa postingan, BUKAN antrean
+ * kerja. Karena itu postingan channel (a) TIDAK menaikkan unread,
+ * (b) TIDAK menulis event outbox `message.received`, dan (c) tetap
+ * ditolak jalur evaluasi automation/agent lewat penjaga `kind` di core
+ * (automations.ts & agent-runtime.ts) bila ada event liar yang mengarah
+ * ke sana. Kontak jangkar percakapan channel = CHANNEL ITU SENDIRI
+ * (keputusan yang disengaja, meniru semantik Telegram `sender_chat`):
+ * satu kontak per channel, bernama judul channel, dengan identitas
+ * `external_user_id` = id chat channel — bukan orang, melainkan entitas
+ * siaran; pola ini membuat resolusi alamat poller (coalesce
+ * provider_chat_id → identitas) bekerja tanpa jalur khusus.
+ * Postingan kita sendiri yang terkirim via sendMessage memantul kembali
+ * sebagai `channel_post` dengan message_id yang sama; poller menyimpan
+ * id itu di pesan outbound (`telegram:<botId>:<message_id>`), sehingga
+ * pantulannya ter-dedup dan linimasa menampilkan postingan itu SATU kali
+ * sebagai kiriman kita.
  */
 
 export interface CreateTelegramChannelInput {
@@ -247,17 +266,23 @@ export async function recordTelegramInboundMessage(
           .orderBy(desc(conversations.createdAt))
           .limit(1);
 
+    // Fase 6A.2: `kind` adalah sumber kebenaran jenis percakapan kini
+    // (bukan lagi kehadiran judul) — diselaraskan juga pada baris lama.
+    const wantKind = input.isGroup ? "group" : "private";
     let conversationId: string;
     if (existingConv && existingConv.status !== "closed") {
       conversationId = existingConv.id;
       // Rapikan kolom 6A.1 pada percakapan lama: judul grup bisa berubah
       // di Telegram; provider_chat_id privat lama bisa masih NULL.
-      const patch: { title?: string; providerChatId?: string } = {};
+      const patch: { title?: string; providerChatId?: string; kind?: string } = {};
       if (input.isGroup && input.chatTitle && existingConv.title !== input.chatTitle) {
         patch.title = input.chatTitle;
       }
       if (existingConv.providerChatId !== input.chatExternalId) {
         patch.providerChatId = input.chatExternalId;
+      }
+      if (existingConv.kind !== wantKind) {
+        patch.kind = wantKind;
       }
       if (Object.keys(patch).length > 0) {
         await tx
@@ -275,6 +300,7 @@ export async function recordTelegramInboundMessage(
           provider: "telegram",
           providerChatId: input.chatExternalId,
           title: input.isGroup ? (input.chatTitle ?? null) : null,
+          kind: wantKind,
           status: "open",
         })
         .returning();
@@ -348,12 +374,202 @@ export async function recordTelegramInboundMessage(
   });
 }
 
+/**
+ * Temukan/buat pasangan kontak + percakapan untuk SATU channel Telegram
+ * (Fase 6A.2). Kontak jangkar = channel itu sendiri: identitas
+ * (akun, external_user_id = id chat channel) menunjuk kontak bernama
+ * judul channel — meniru semantik `sender_chat` Telegram (penulis
+ * postingan adalah channel-nya, bukan admin perorangan). Nama kontak &
+ * judul percakapan mengikuti judul channel terbaru. Percakapan yang
+ * 'closed' tidak dihidupkan lagi di sini (sama seperti resolusi lain:
+ * baris tertutup berarti pemilik menutupnya dengan sengaja) — fungsi ini
+ * mengembalikan percakapan terbuka yang ada atau membuat yang baru.
+ */
+async function ensureTelegramChannelConversation(
+  tx: DbTx,
+  account: Pick<TelegramAccountRef, "id" | "tenantId">,
+  input: { chatExternalId: string; chatTitle?: string | null },
+): Promise<{ conversationId: string; contactId: string; created: boolean }> {
+  const fallbackName = "Telegram Channel";
+  const [identity] = await tx
+    .select()
+    .from(channelIdentities)
+    .where(
+      and(
+        eq(channelIdentities.channelAccountId, account.id),
+        eq(channelIdentities.externalUserId, input.chatExternalId),
+      ),
+    )
+    .limit(1);
+
+  let contactId: string;
+  if (identity) {
+    contactId = identity.contactId;
+    // Channel berganti judul → nama kontak (label siaran) ikut diperbarui
+    // (hanya bila memang berubah — postingan rutin tidak menulis ulang).
+    if (input.chatTitle) {
+      const [contact] = await tx
+        .select({ name: contacts.name })
+        .from(contacts)
+        .where(eq(contacts.id, contactId))
+        .limit(1);
+      if (contact && contact.name !== input.chatTitle) {
+        await tx
+          .update(contacts)
+          .set({ name: input.chatTitle })
+          .where(eq(contacts.id, contactId));
+      }
+    }
+  } else {
+    const [contact] = await tx
+      .insert(contacts)
+      .values({
+        tenantId: account.tenantId,
+        name: input.chatTitle ?? fallbackName,
+      })
+      .returning();
+    contactId = contact.id;
+    await tx.insert(channelIdentities).values({
+      tenantId: account.tenantId,
+      contactId,
+      channelAccountId: account.id,
+      provider: "telegram",
+      externalUserId: input.chatExternalId,
+      username: null,
+    });
+  }
+
+  const [existing] = await tx
+    .select()
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, account.tenantId),
+        eq(conversations.channelAccountId, account.id),
+        eq(conversations.providerChatId, input.chatExternalId),
+      ),
+    )
+    .orderBy(desc(conversations.createdAt))
+    .limit(1);
+  if (existing && existing.status !== "closed") {
+    const patch: { title?: string; kind?: string } = {};
+    if (input.chatTitle && existing.title !== input.chatTitle) {
+      patch.title = input.chatTitle;
+    }
+    if (existing.kind !== "channel") patch.kind = "channel";
+    if (Object.keys(patch).length > 0) {
+      await tx.update(conversations).set(patch).where(eq(conversations.id, existing.id));
+    }
+    return { conversationId: existing.id, contactId, created: false };
+  }
+
+  const [conv] = await tx
+    .insert(conversations)
+    .values({
+      tenantId: account.tenantId,
+      channelAccountId: account.id,
+      contactId,
+      provider: "telegram",
+      providerChatId: input.chatExternalId,
+      title: input.chatTitle ?? null,
+      kind: "channel",
+      status: "open",
+    })
+    .returning();
+  return { conversationId: conv.id, contactId, created: true };
+}
+
+export interface RecordTelegramChannelPostInput {
+  /** Id chat channel (`chat.id`, negatif) — penulis sekaligus alamat. */
+  chatExternalId: string;
+  /** Judul channel dari payload `channel_post`. */
+  chatTitle?: string | null;
+  /** Id dedup global: `telegram:<botId>:<message_id>` (pola jalur pesan). */
+  providerMessageId: string;
+  text: string;
+}
+
+/**
+ * Mencatat satu `channel_post` Telegram ke linimasa percakapan channel
+ * (Fase 6A.2). Semantik BERBEDA dari pesan percakapan biasa, disengaja:
+ *
+ * - **Dedup pantulan lebih dulu:** postingan yang KITA kirim dari
+ *   dashboard memantul kembali dengan message_id yang sama, dan poller
+ *   sudah menyimpannya di pesan outbound → baris itu ditemukan di sini
+ *   dan dikembalikan apa adanya; linimasa tetap menampilkan SATU baris
+ *   (kiriman kita, arah outbound). Retry webhook Telegram untuk
+ *   postingan orang lain ter-dedup dengan cara yang sama.
+ * - **Tanpa unread & tanpa outbox:** channel adalah linimasa siaran,
+ *   bukan antrean kerja — postingan tidak menaikkan badge agen dan tidak
+ *   memicu automation/sequence/agent (penjaga `kind` di jalur evaluasi
+ *   adalah lapis kedua bila ada event liar).
+ *
+ * Mengembalikan pesan yang tersimpan/ ditemukan, atau NULL bila
+ * kembarannya dimiliki tenant/akun lain (akui webhook, jangan ganda).
+ */
+export async function recordTelegramChannelPost(
+  db: Database,
+  account: Pick<TelegramAccountRef, "id" | "tenantId">,
+  input: RecordTelegramChannelPostInput,
+): Promise<Message | null> {
+  return withTenantDb(db, account.tenantId, async (tx) => {
+    // (1) Dedup: pantulan postingan sendiri / retry update yang sama.
+    const [dupe] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.providerMessageId, input.providerMessageId))
+      .limit(1);
+    if (dupe) return dupe;
+
+    const { conversationId } = await ensureTelegramChannelConversation(
+      tx,
+      account,
+      { chatExternalId: input.chatExternalId, chatTitle: input.chatTitle },
+    );
+
+    // (2) Simpan postingan sebagai pesan masuk linimasa. sender_name =
+    // judul channel: penulisnya channel itu sendiri (sender_chat).
+    // ON CONFLICT DO NOTHING melindungi balapan index unik global
+    // (pola yang sama seperti jalur pesan 6A.1).
+    const [message] = await tx
+      .insert(messages)
+      .values({
+        tenantId: account.tenantId,
+        conversationId,
+        direction: "inbound",
+        senderType: "contact",
+        senderName: input.chatTitle ?? null,
+        type: "text",
+        contentText: input.text,
+        providerMessageId: input.providerMessageId,
+        status: "received",
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (!message) return null;
+
+    const now = new Date();
+    await tx
+      .update(conversations)
+      .set({ lastMessageAt: now, updatedAt: now })
+      .where(eq(conversations.id, conversationId));
+
+    return message;
+  });
+}
+
 export interface TelegramQueuedDelivery {
   tenantId: string;
   messageId: string;
   conversationId: string;
   contentText: string | null;
   channelAccountId: string;
+  /**
+   * external_id akun = id numerik bot (Fase 6A.2): poller menyusun
+   * provider_message_id majemuk `telegram:<botId>:<message_id>` untuk
+   * pesan yang baru terkirim agar pantulan `channel_post`-nya ter-dedup.
+   */
+  botExternalId: string;
   /** Envelope enkripsi token bot akun pemilik (dekripsi di lapisan pengirim). */
   encryptedBotToken: string | null;
   /**
@@ -388,6 +604,7 @@ export async function listQueuedTelegramDeliveries(
         conversationId: messages.conversationId,
         contentText: messages.contentText,
         channelAccountId: channelAccounts.id,
+        botExternalId: channelAccounts.externalId,
         encryptedBotToken: channelAccounts.accessTokenEncrypted,
         chatExternalId: sql<string>`coalesce(${conversations.providerChatId}, ${channelIdentities.externalUserId})`,
       })
@@ -421,17 +638,37 @@ export async function listQueuedTelegramDeliveries(
 }
 
 export interface TelegramMyChatMemberInput {
-  /** Id chat tempat status bot berubah (grup: negatif). */
+  /** Id chat tempat status bot berubah (grup/channel: negatif). */
   chatExternalId: string;
   chatTitle?: string | null;
   /** Status baru bot di chat itu dari Telegram (member/administrator/kicked/left/...). */
   memberStatus: string;
+  /**
+   * Tipe chat Telegram (Fase 6A.2): 'channel' mengubah perilaku — bot
+   * yang menjadi admin channel membuat channel itu langsung tampil
+   * sebagai percakapan linimasa walau belum ada postingan.
+   */
+  chatType?: string | null;
 }
+
+/** Status keanggotaan yang berarti bot AKTIF di chat (bisa menerima update). */
+const TELEGRAM_ACTIVE_MEMBER_STATUSES = new Set([
+  "creator",
+  "administrator",
+  "member",
+]);
 
 /**
  * Mencatat update `my_chat_member` (Fase 6A.1): bot dimasukkan/dikeluarkan
- * dari sebuah chat. BUKAN pesan — tidak membuat kontak/percakapan/pesan;
- * cukup satu baris audit agar pemilik punya jejak kapan botnya masuk grup.
+ * dari sebuah chat. BUKAN pesan — untuk grup cukup satu baris audit agar
+ * pemilik punya jejak kapan botnya masuk grup.
+ *
+ * Fase 6A.2 — chat bertipe channel: bot yang menjadi ADMIN channel
+ * (status aktif) sekaligus membuat percakapan channel-nya tampil di
+ * dashboard (find-or-create lewat pola yang sama seperti channel_post),
+ * supaya pemilik bisa langsung memposting tanpa menunggu postingan
+ * pertama dari admin lain. Bot dikeluarkan dari channel → audit saja;
+ * riwayat linimasa tetap tersimpan.
  * Tidak fatal bila gagal: pemanggil (route webhook) mengabaikan error-nya
  * agar webhook tetap menjawab 200.
  */
@@ -441,6 +678,17 @@ export async function recordTelegramMyChatMember(
   input: TelegramMyChatMemberInput,
 ): Promise<void> {
   await withTenantDb(db, account.tenantId, async (tx) => {
+    let channelConversationId: string | null = null;
+    if (
+      input.chatType === "channel" &&
+      TELEGRAM_ACTIVE_MEMBER_STATUSES.has(input.memberStatus)
+    ) {
+      const ensured = await ensureTelegramChannelConversation(tx, account, {
+        chatExternalId: input.chatExternalId,
+        chatTitle: input.chatTitle,
+      });
+      channelConversationId = ensured.conversationId;
+    }
     await tx.insert(auditLogs).values({
       tenantId: account.tenantId,
       actorType: "system",
@@ -450,7 +698,11 @@ export async function recordTelegramMyChatMember(
         channelAccountId: account.id,
         chatId: input.chatExternalId,
         chatTitle: input.chatTitle ?? null,
+        chatType: input.chatType ?? null,
         memberStatus: input.memberStatus,
+        ...(channelConversationId
+          ? { channelConversationId }
+          : {}),
       },
     });
   });

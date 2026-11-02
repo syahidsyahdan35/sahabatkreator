@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -142,12 +143,24 @@ export const conversations = pgTable(
      */
     providerChatId: varchar("provider_chat_id", { length: 255 }),
     /**
-     * Judul percakapan di provider (Fase 6A.1) — HANYA diisi untuk
-     * percakapan grup Telegram (`chat.title`); percakapan privat & provider
-     * lain NULL dan tampil memakai nama kontak. Kehadiran judul inilah
-     * penanda percakapan grup bagi API/UI (`isGroup`).
+     * Judul percakapan di provider (Fase 6A.1) — diisi untuk percakapan
+     * grup & channel Telegram (`chat.title`); percakapan privat & provider
+     * lain NULL dan tampil memakai nama kontak. (Sampai 6A.1 kehadiran
+     * judul adalah penanda grup; sejak 6A.2 penanda jenis adalah kolom
+     * `kind` di bawah — judul kini murni label tampilan.)
      */
     title: varchar("title", { length: 255 }),
+    /**
+     * Jenis percakapan di provider (Fase 6A.2): 'private' (1:1), 'group'
+     * (banyak anggota, dua arah), atau 'channel' (siaran satu arah —
+     * linimasa postingan Telegram, BUKAN antrean kerja). Sampai 6A.1
+     * jenis disimpulkan dari kehadiran `title`; kolom eksplisit ini
+     * menjadi sumber kebenaran tunggal: `isGroup`/`isChannel` di API
+     * diturunkan darinya, dan jalur evaluasi automation/agent MENOLAK
+     * memproses pesan percakapan 'channel'. Default 'private' juga
+     * berlaku untuk provider lain (webchat selalu privat).
+     */
+    kind: varchar("kind", { length: 16 }).notNull().default("private"),
     status: conversationStatusEnum("status").notNull().default("open"),
     assigneeUserId: uuid("assignee_user_id").references(() => users.id, {
       onDelete: "set null",
@@ -168,6 +181,10 @@ export const conversations = pgTable(
     ),
     index("conversations_contact_id_idx").on(t.contactId),
     index("conversations_channel_account_id_idx").on(t.channelAccountId),
+    check(
+      "conversations_kind_valid",
+      sql`${t.kind} IN ('private', 'group', 'channel')`,
+    ),
   ],
 );
 

@@ -22,8 +22,11 @@ import type { AuthBundle } from "../../auth";
  *    — lengan RLS `system_delivery_scan`, baca saja).
  * 2. Untuk tiap pesan: dekripsi token bot akunnya (AES-256-GCM, kunci dari
  *    env CHANNEL_TOKEN_SECRET) dan kirim via Bot API `sendMessage`.
- * 3. Tandai `sent` (audit `message.sent`) atau `failed` (audit
- *    `message.failed` + kolom error_code) dalam konteks tenant pemilik.
+ * 3. Tandai `sent` (audit `message.sent`; sejak Fase 6A.2 sekaligus
+ *    menyimpan provider_message_id majemuk hasil sendMessage agar
+ *    pantulan `channel_post` postingan sendiri ter-dedup) atau `failed`
+ *    (audit `message.failed` + kolom error_code) dalam konteks tenant
+ *    pemilik.
  *
  * Token TIDAK PERNAH dicatat: log hanya memuat kode error aman
  * (`telegram_http_<status>`) — pesan error klien Bot API kita memang
@@ -105,16 +108,37 @@ export function startTelegramDeliveryPoller(
           token,
         });
         try {
-          await client.sendMessage({
+          const result = await client.sendMessage({
             chatId: delivery.chatExternalId,
             text: delivery.contentText,
           });
-          await markOutboundMessageSent(
-            bundle.db,
-            ctx,
-            delivery.messageId,
-            "telegram-poller",
-          );
+          // Fase 6A.2: simpan id pesan provider (format majemuk yang
+          // sama seperti jalur webhook) pada baris outbound — pantulan
+          // `channel_post` untuk postingan kita sendiri ter-dedup
+          // terhadap baris ini, bukan menjadi postingan masuk ganda.
+          const compositeId = `telegram:${delivery.botExternalId}:${result.providerMessageId}`;
+          try {
+            await markOutboundMessageSent(
+              bundle.db,
+              ctx,
+              delivery.messageId,
+              "telegram-poller",
+              compositeId,
+            );
+          } catch {
+            // Balapan sangat jarang: pantulannya tiba dan tercatat lebih
+            // dulu, sehingga id majemuk menabrak index unik global.
+            // Penandaan `sent` tidak boleh ikut gagal — ulang tanpa id.
+            console.error(
+              `[telegram] menyimpan provider id pesan ${delivery.messageId} gagal (kemungkinan pantulan lebih dulu) — tandai sent tanpa id`,
+            );
+            await markOutboundMessageSent(
+              bundle.db,
+              ctx,
+              delivery.messageId,
+              "telegram-poller",
+            );
+          }
         } catch (err) {
           const code =
             err instanceof TelegramApiError

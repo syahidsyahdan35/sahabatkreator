@@ -370,7 +370,11 @@ export interface AutomationFiredResult {
 }
 
 export interface EvaluateInboundResult {
-  /** Pesan tidak ditemukan / bukan inbound / percakapan hilang. */
+  /**
+   * Pesan tidak ditemukan / bukan inbound / percakapan hilang / pesan
+   * milik percakapan channel siaran (Fase 6A.2 — channel tidak pernah
+   * dievaluasi automation).
+   */
   evaluated: boolean;
   fired: AutomationFiredResult[];
   /**
@@ -424,6 +428,15 @@ export async function evaluateInboundMessageForAutomations(
       )
       .limit(1);
     if (!conversation) return null;
+    // PENJAGA CHANNEL (Fase 6A.2): percakapan `kind='channel'` adalah
+    // linimasa siaran satu arah, BUKAN percakapan — TIDAK ada keyword
+    // automation, TIDAK ada pendaftaran sequence, TIDAK ada pembatalan
+    // enrollment yang boleh berjalan untuk pesannya. Jalur ingest
+    // channel memang tidak menulis event outbox, jadi penjaga eksplisit
+    // ini adalah lapis kedua: event `message.received` liar yang
+    // mengarah ke pesan channel tetap berhenti di sini, sebelum efek
+    // samping apa pun (termasuk aturan berhenti sequence di bawah).
+    if (conversation.kind === "channel") return "channel" as const;
     const [contact] = await tx
       .select()
       .from(contacts)
@@ -505,6 +518,16 @@ export async function evaluateInboundMessageForAutomations(
   });
 
   if (!context)
+    return {
+      evaluated: false,
+      fired: [],
+      skippedDuplicates: 0,
+      cancelledEnrollments: 0,
+    };
+  // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
+  // tembakan automation dan (karena `evaluated` false) worker juga tidak
+  // meneruskan pesan ini ke agent AI.
+  if (context === "channel")
     return {
       evaluated: false,
       fired: [],

@@ -351,6 +351,7 @@ export type AgentSkipReason =
   | "not_inbound"
   | "not_from_contact"
   | "conversation_not_found"
+  | "channel_conversation"
   | "ai_disabled"
   | "no_active_agent"
   | "capped"
@@ -436,6 +437,13 @@ export async function respondToInboundMessage(
       )
       .limit(1);
     if (!conversation) return { kind: "conversation_not_found" as const };
+    // PENJAGA CHANNEL (Fase 6A.2): postingan channel siaran bukan pesan
+    // percakapan — agent TIDAK PERNAH menjawabnya. Jalur ingest channel
+    // tidak menulis event outbox, jadi ini lapis kedua untuk event liar
+    // (pasangan penjaga yang sama di evaluateInboundMessageForAutomations).
+    if (conversation.kind === "channel") {
+      return { kind: "channel_conversation" as const };
+    }
     if (!conversation.agentEnabled) return { kind: "ai_disabled" as const };
     return { kind: "ok" as const, message, conversation };
   });

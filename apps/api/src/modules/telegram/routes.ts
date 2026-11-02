@@ -1,12 +1,14 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  recordTelegramChannelPost,
   recordTelegramInboundMessage,
   recordTelegramMyChatMember,
   resolveTelegramAccountById,
   verifyChannelWebhookSecret,
 } from "@sahabat-kreator/core";
 import {
+  parseTelegramChannelPost,
   parseTelegramUpdate,
   type TelegramUpdate,
 } from "@sahabat-kreator/channel-telegram";
@@ -30,6 +32,8 @@ import { apiError, type AppVariables } from "../../http";
  * pesan teks disimpan lewat core (kontak + percakapan + pesan + outbox
  * `message.received` dalam satu transaksi) — pemrosesan berat (automation,
  * agent) terjadi di worker lewat relay outbox, bukan di request ini.
+ * Update `channel_post` (Fase 6A.2) punya jalur sendiri ke linimasa
+ * channel dan SENGAJA tidak menghasilkan event outbox itu.
  */
 export function createTelegramRoutes(bundle: AuthBundle | null) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -70,7 +74,9 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
     }
 
     // Update `my_chat_member` (Fase 6A.1): bot dimasukkan/dikeluarkan
-    // grup. Bukan pesan — tidak membuat percakapan; cukup jejak audit.
+    // grup. Bukan pesan — cukup jejak audit. Fase 6A.2: untuk chat
+    // bertipe channel, bot yang menjadi ADMIN juga membuat percakapan
+    // channel-nya tampil di dashboard (diurus core).
     // Kegagalan mencatat TIDAK boleh menggagalkan webhook (tetap 200).
     const memberUpdate = (payload as TelegramUpdate).my_chat_member;
     if (memberUpdate?.chat && typeof memberUpdate.chat.id === "number") {
@@ -79,9 +85,30 @@ export function createTelegramRoutes(bundle: AuthBundle | null) {
           chatExternalId: String(memberUpdate.chat.id),
           chatTitle: memberUpdate.chat.title ?? null,
           memberStatus: memberUpdate.new_chat_member?.status ?? "unknown",
+          chatType: memberUpdate.chat.type ?? null,
         });
       } catch (err) {
         console.error("[telegram] gagal mencatat my_chat_member", err);
+      }
+      return c.json({ ok: true });
+    }
+
+    // Update `channel_post` (Fase 6A.2): postingan channel tempat bot
+    // menjadi admin — termasuk pantulan postingan yang kita kirim
+    // sendiri dari dashboard (ter-dedup di core terhadap pesan outbound
+    // yang menyimpan message_id yang sama). Bukan pesan percakapan:
+    // masuk linimasa channel tanpa unread & tanpa automation/agent.
+    // Non-teks → parser mengembalikan null → 200 diabaikan.
+    if ((payload as TelegramUpdate).channel_post) {
+      const post = parseTelegramChannelPost(payload);
+      if (post) {
+        await recordTelegramChannelPost(bundle.db, account, {
+          chatExternalId: post.chatExternalId,
+          chatTitle: post.chatTitle,
+          // Sematkan id bot seperti jalur pesan: index unik global.
+          providerMessageId: `telegram:${account.externalId}:${post.providerMessageId}`,
+          text: post.text,
+        });
       }
       return c.json({ ok: true });
     }

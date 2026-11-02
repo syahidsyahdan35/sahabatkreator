@@ -366,6 +366,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                               {t("inbox.groupLabel")}
                             </span>
                           ) : null}
+                          {conv.isChannel ? (
+                            <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent">
+                              {t("inbox.channelLabel")}
+                            </span>
+                          ) : null}
                           <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-medium text-muted">
                             {t(`inbox.status.${conv.status}` as TranslationKey)}
                           </span>
@@ -405,7 +410,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                     </div>
                     <div className="text-xs text-muted">
                       {t(`inbox.providers.${selected.provider}` as TranslationKey)}
-                      {selected.isGroup ? ` · ${t("inbox.groupLabel")}` : ""}
+                      {selected.isChannel
+                        ? ` · ${t("inbox.channelLabel")}`
+                        : selected.isGroup
+                          ? ` · ${t("inbox.groupLabel")}`
+                          : ""}
                       {" · "}
                       {t(`inbox.status.${selected.status}` as TranslationKey)}
                       {selected.unreadCount > 0
@@ -496,7 +505,11 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                           e.currentTarget.form?.requestSubmit();
                         }
                       }}
-                      placeholder={t("inbox.replyPlaceholder")}
+                      placeholder={
+                        selected.isChannel
+                          ? t("inbox.postPlaceholder")
+                          : t("inbox.replyPlaceholder")
+                      }
                       rows={2}
                       maxLength={4096}
                       className={`${inputClassName} resize-none`}
@@ -506,11 +519,19 @@ export function InboxPage({ t, locale }: InboxPageProps) {
                       disabled={sending || !draft.trim()}
                       className="shrink-0 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
                     >
-                      {sending ? t("inbox.sending") : t("inbox.sendButton")}
+                      {sending
+                        ? t("inbox.sending")
+                        : selected.isChannel
+                          ? t("inbox.postButton")
+                          : t("inbox.sendButton")}
                     </button>
                   </div>
                   <FieldError message={sendError} />
-                  <p className="mt-2 text-[11px] text-muted">{t("inbox.deliveryNote")}</p>
+                  <p className="mt-2 text-[11px] text-muted">
+                    {selected.isChannel
+                      ? t("inbox.channelDeliveryNote")
+                      : t("inbox.deliveryNote")}
+                  </p>
                 </form>
               </>
             ) : (

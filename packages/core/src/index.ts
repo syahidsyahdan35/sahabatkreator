@@ -132,11 +132,13 @@ export {
   createTelegramChannelAccount,
   resolveTelegramAccountById,
   recordTelegramInboundMessage,
+  recordTelegramChannelPost,
   listQueuedTelegramDeliveries,
   recordTelegramMyChatMember,
   type CreateTelegramChannelInput,
   type TelegramAccountRef,
   type RecordTelegramInboundInput,
+  type RecordTelegramChannelPostInput,
   type TelegramQueuedDelivery,
   type TelegramMyChatMemberInput,
 } from "./telegram";

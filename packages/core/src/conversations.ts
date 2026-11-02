@@ -27,11 +27,18 @@ import { withTenantDb } from "./tx";
 export interface ConversationWithSummary extends Conversation {
   contactName: string;
   /**
-   * Percakapan grup (Fase 6A.1): hanya percakapan grup yang membawa
-   * `title` dari provider (judul grup Telegram); privat/provider lain
-   * titlenya NULL. UI menampilkan `title ?? contactName` sebagai nama.
+   * Percakapan grup (Fase 6A.1; sejak 6A.2 diturunkan dari kolom `kind`,
+   * bukan lagi kehadiran `title`). UI menampilkan `title ?? contactName`
+   * sebagai nama tampilan.
    */
   isGroup: boolean;
+  /**
+   * Percakapan channel siaran (Fase 6A.2, `kind === 'channel'`):
+   * linimasa postingan satu arah. Untuk baris seperti ini `unreadCount`
+   * SELALU dilaporkan 0 — postingan channel bukan antrean kerja agen,
+   * apa pun nilai kolomnya di DB.
+   */
+  isChannel: boolean;
   lastMessagePreview: string | null;
   lastMessageDirection: Message["direction"] | null;
 }
@@ -74,10 +81,16 @@ export async function listConversations(
     }
     return rows.map((r) => {
       const last = lastByConversation.get(r.conversation.id);
+      const isChannel = r.conversation.kind === "channel";
       return {
         ...r.conversation,
         contactName: r.contactName,
-        isGroup: r.conversation.title !== null,
+        isGroup: r.conversation.kind === "group",
+        isChannel,
+        // Channel: unread ditegakkan 0 di permukaan API (Fase 6A.2) —
+        // jalur ingest channel memang tidak pernah menaikkannya, dan
+        // penegakan ini menjaga badge tetap benar apa pun datanya.
+        unreadCount: isChannel ? 0 : r.conversation.unreadCount,
         lastMessagePreview: last?.contentText ?? null,
         lastMessageDirection: last?.direction ?? null,
       };
@@ -356,17 +369,29 @@ export async function getConversationDeliveryTarget(
  * sungguhan mengirimnya (Fase 1F: hub WebSocket webchat) + audit
  * `message.sent`. Mengembalikan baris terbaru, atau null bila pesan tidak
  * ada / tidak lagi berstatus queued.
+ *
+ * `providerMessageId` (opsional, Fase 6A.2): id pesan di sisi provider
+ * hasil pengiriman — disimpan ke baris yang sama agar webhook pantulan
+ * (khususnya `channel_post` Telegram untuk postingan kita sendiri)
+ * ter-dedup terhadap baris ini. Bila penyimpanan id itu menabrak index
+ * unik global (balapan: pantulan tiba & tercatat lebih dulu — sangat
+ * jarang), pemanggil boleh memanggil ulang TANPA id ini agar penandaan
+ * `sent` tetap berhasil; lihat poller Telegram.
  */
 export async function markOutboundMessageSent(
   db: Database,
   ctx: Pick<TenantContext, "tenantId">,
   messageId: string,
   via: string,
+  providerMessageId?: string,
 ): Promise<Message | null> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [updated] = await tx
       .update(messages)
-      .set({ status: "sent" })
+      .set({
+        status: "sent",
+        ...(providerMessageId ? { providerMessageId } : {}),
+      })
       .where(
         and(
           eq(messages.tenantId, ctx.tenantId),

@@ -101,6 +101,10 @@ export const id: Resources = {
     deliveryNote: "Balasan Webchat terkirim langsung ke pengunjung (status menjadi Terkirim saat ia terhubung). Channel lain masih menyimpan balasan dengan status Antre.",
     mediaMessage: "Pesan media",
     groupLabel: "Grup",
+    channelLabel: "Kanal",
+    postButton: "Posting ke channel",
+    postPlaceholder: "Tulis postingan…",
+    channelDeliveryNote: "Postingan diterbitkan ke semua pelanggan channel ini. Ini linimasa siaran, bukan percakapan dua arah.",
     senderAgent: "Agent AI",
     senderSystem: "Sistem",
     status: {

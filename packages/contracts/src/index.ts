@@ -190,6 +190,14 @@ export const ConversationResponseSchema = z.object({
   title: z.string().nullable(),
   /** Percakapan grup (banyak anggota) vs privat 1:1 (Fase 6A.1). */
   isGroup: z.boolean(),
+  /**
+   * Percakapan channel siaran (Fase 6A.2): linimasa postingan satu arah
+   * (mis. channel Telegram tempat bot menjadi admin). Bukan percakapan
+   * dua arah — postingan masuk tidak memicu automation/agent dan
+   * unreadCount-nya selalu 0; membalas di utas ini = memposting ke
+   * channel.
+   */
+  isChannel: z.boolean(),
   provider: ChannelProviderSchema,
   status: ConversationStatusSchema,
   assigneeUserId: z.string().uuid().nullable(),

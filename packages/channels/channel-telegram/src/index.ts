@@ -70,6 +70,13 @@ export interface TelegramChatMemberUpdated {
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
+  /**
+   * Chat atas nama siapa pesan ini terbit (Fase 6A.2): pada `channel_post`,
+   * penulisnya adalah channel itu sendiri — field ini menunjuk chat
+   * channel-nya, dan `from` biasanya kosong (admin anonim) atau berisi
+   * admin yang memposting atas nama pribadi.
+   */
+  sender_chat?: TelegramChat;
   chat: TelegramChat;
   date?: number;
   text?: string;
@@ -195,7 +202,9 @@ export class TelegramBotApiClient {
       secret_token: input.secretToken,
       // `my_chat_member` agar bot tahu saat dimasukkan/dikeluarkan grup
       // (Fase 6A.1) — update itu bukan pesan dan hanya dicatat audit.
-      allowed_updates: ["message", "my_chat_member"],
+      // `channel_post` (Fase 6A.2): postingan channel tempat bot menjadi
+      // ADMIN — termasuk pantulan postingan yang bot kirim sendiri.
+      allowed_updates: ["message", "my_chat_member", "channel_post"],
     });
   }
 
@@ -239,11 +248,59 @@ export class TelegramBotApiClient {
 // ---------------------------------------------------------------------------
 
 /**
+ * Postingan channel yang dinormalisasi (Fase 6A.2). Channel adalah siaran
+ * satu arah: tidak ada pengirim perorangan — penulisnya adalah channel
+ * itu sendiri (`sender_chat`), jadi `chatExternalId` sekaligus identitas
+ * penulisnya. Diproses route webhook lewat fungsi core khusus channel,
+ * BUKAN jalur pesan masuk biasa (tanpa unread, tanpa automation/agent).
+ */
+export interface TelegramChannelPost {
+  /** Id pesan di channel (message_id Telegram, belum disematkan id bot). */
+  providerMessageId: string;
+  /** Id chat channel (negatif) — alamat siaran & alamat balasan posting. */
+  chatExternalId: string;
+  /** Judul channel saat postingan terbit. */
+  chatTitle: string | null;
+  text: string;
+  sentAt: string;
+}
+
+/**
+ * Menormalkan update `channel_post` TEKS menjadi TelegramChannelPost.
+ * Null untuk update lain / postingan non-teks / bentuk tak dikenal —
+ * pemanggil menjawab 200 dan mengabaikannya seperti pola update lain.
+ * Sengaja TIDAK lewat parseTelegramUpdate: channel_post tidak punya
+ * `from` pengguna dan semantiknya berbeda total dari pesan percakapan.
+ */
+export function parseTelegramChannelPost(
+  payload: unknown,
+): TelegramChannelPost | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const post = (payload as TelegramUpdate).channel_post;
+  if (!post || typeof post.text !== "string" || !post.text.trim()) {
+    return null;
+  }
+  if (!post.chat || typeof post.chat.id !== "number") return null;
+  if (post.chat.type !== "channel") return null;
+  if (typeof post.message_id !== "number") return null;
+  return {
+    providerMessageId: String(post.message_id),
+    chatExternalId: String(post.chat.id),
+    chatTitle: post.chat.title ?? null,
+    text: post.text,
+    sentAt:
+      typeof post.date === "number"
+        ? new Date(post.date * 1000).toISOString()
+        : new Date().toISOString(),
+  };
+}
+
+/**
  * Menormalkan satu update Telegram menjadi StandardEvent. Hanya pesan
  * teks (`message.text`) yang menjadi `message.received`; update lain
- * (edited, channel post, my_chat_member, callback, non-teks)
- * menghasilkan array kosong agar pemanggil menjawab 200 dan
- * mengabaikannya dengan aman.
+ * (edited, channel post — jalur khusus parseTelegramChannelPost,
+ * my_chat_member, callback, non-teks) menghasilkan array kosong agar
+ * pemanggil menjawab 200 dan mengabaikannya dengan aman.
  *
  * Grup (Fase 6A.1): `chat.type` group/supergroup → conversationKind
  * "group" + conversationTitle dari `chat.title`. Perhatikan pemisahan
