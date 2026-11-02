@@ -5,5 +5,7 @@ dist/
 !.env.example
 *.log
 coverage/
+test-results/
+playwright-report/
 .turbo/
 .DS_Store

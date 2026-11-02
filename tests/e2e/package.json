@@ -1,0 +1,1 @@
+{"devDependencies":{"@playwright/test":"1.49.1"},"name":"@sahabat-kreator/e2e","private":true,"scripts":{"test":"playwright test","test:install":"playwright install chromium"},"type":"module","version":"0.1.0"}
