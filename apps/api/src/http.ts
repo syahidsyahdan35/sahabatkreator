@@ -31,7 +31,10 @@ export function apiError(
   status: 400 | 401 | 403 | 404 | 409 | 422 | 500 | 503,
   code: ErrorCode,
   message: string,
+  details?: unknown,
 ) {
-  const body = ApiErrorSchema.parse({ error: { code, message } });
+  const body = ApiErrorSchema.parse({
+    error: { code, message, ...(details !== undefined ? { details } : {}) },
+  });
   return c.json(body, status);
 }

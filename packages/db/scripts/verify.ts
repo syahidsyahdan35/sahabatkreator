@@ -57,7 +57,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 6D (profile_photos)
 // + 1 tabel Fase 7B.1 (integration_log)
 // + 2 tabel Fase 7C (broadcasts, broadcast_recipients)
-assert.equal(Number(tablesRes.rows[0].count), 36);
+// + 3 tabel Fase 8A (flows, flow_runs, flow_run_steps)
+assert.equal(Number(tablesRes.rows[0].count), 39);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -138,7 +139,9 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada broadcasts & broadcast_recipients dan lengan
 //   baca `system_broadcast_scan` pada broadcasts (Fase 7C, migrasi
 //   0030) = 48.
-assert.equal(Number(policies.rows[0].count), 48);
+// + tenant_isolation pada flows, flow_runs, flow_run_steps (Fase 8A,
+//   migrasi 0031) = 51.
+assert.equal(Number(policies.rows[0].count), 51);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -153,7 +156,8 @@ await db.exec(`
     products, payment_links,
     automation_steps, sequence_enrollments,
     platform_settings, profile_photos, integration_log,
-    broadcasts, broadcast_recipients
+    broadcasts, broadcast_recipients,
+    flows, flow_runs, flow_run_steps
   TO app_user;
 `);
 
@@ -1471,6 +1475,108 @@ const BC_MSG_ID = "73737373-7373-4373-8373-737373737373";
   assert.equal(recipAfter.rows[0].message_id, null);
   console.log(
     "[23] Fase 7C: broadcasts/broadcast_recipients — isolasi tenant kedua tabel + insert silang ditolak; lengan system_broadcast_scan hanya SELECT broadcasts lintas tenant (recipients tertutup, tulis ditolak); unik (broadcast, kontak) menolak ganda; hapus pesan → message_id SET NULL: OK",
+  );
+}
+
+// ---------- 24. Fase 8A: flows + flow_runs + flow_run_steps ----------
+// Migrasi 0031: (a) ketiga tabel ada dengan enum status; (b) konteks
+// tenant A hanya melihat flow/run/langkah tenant A pada KETIGA tabel
+// dan insert lintas tenant ditolak WITH CHECK; (c) tanpa konteks: 0
+// baris; (d) unik parsial (flow_id, trigger_message_id) menolak run
+// kedua untuk pesan pemicu yang sama (idempotensi eksekusi); (e)
+// hapus flow → run & langkah ikut terhapus (FK cascade).
+const FLOW_ID = "81818181-8181-4181-8181-818181818181";
+const FLOW_ID_B = "82828282-8282-4282-8282-828282828282";
+const FLOW_RUN_ID = "83838383-8383-4383-8383-838383838383";
+const FLOW_MSG_ID = "84848484-8484-4484-8484-848484848484";
+{
+  await db.query(
+    `INSERT INTO flows (id, tenant_id, name, status, graph)
+     VALUES ($1, $3, 'Flow Verify A', 'active', '{"nodes":[{"id":"t","type":"trigger","config":{"kind":"any_message"}}],"edges":[]}'),
+            ($2, $4, 'Flow Verify B', 'draft', '{"nodes":[],"edges":[]}')`,
+    [FLOW_ID, FLOW_ID_B, TENANT_A, TENANT_B],
+  );
+  await db.query(
+    `INSERT INTO messages (id, tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+     VALUES ($1, $2, $3, 'inbound', 'contact', 'text', 'pemicu flow', 'received')`,
+    [FLOW_MSG_ID, TENANT_A, CONV_A],
+  );
+  await db.query(
+    `INSERT INTO flow_runs (id, tenant_id, flow_id, conversation_id, contact_id, trigger_message_id, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'waiting')`,
+    [FLOW_RUN_ID, TENANT_A, FLOW_ID, CONV_A, CONTACT_A, FLOW_MSG_ID],
+  );
+  await db.query(
+    `INSERT INTO flow_run_steps (tenant_id, run_id, seq, node_id, node_type, detail)
+     VALUES ($1, $2, 1, 's1', 'send_message', '{"outcome":"queued"}')`,
+    [TENANT_A, FLOW_RUN_ID],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO flow_runs (tenant_id, flow_id, conversation_id, contact_id, trigger_message_id, status)
+       VALUES ($1, $2, $3, $4, $5, 'running')`,
+      [TENANT_A, FLOW_ID, CONV_A, CONTACT_A, FLOW_MSG_ID],
+    ),
+    /duplicate key|flow_runs_flow_trigger_message_unique/i,
+  );
+
+  const flowViews = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const ownF = await tx.query<{ id: string }>(`SELECT id FROM flows ORDER BY id`);
+    const ownR = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_runs`,
+    );
+    const ownS = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_run_steps`,
+    );
+    await tx.query(`SAVEPOINT sp_fl1`);
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO flows (tenant_id, name) VALUES ($1, 'Siluman')`,
+        [TENANT_B],
+      );
+    } catch {
+      crossBlocked = true;
+      await tx.query(`ROLLBACK TO SAVEPOINT sp_fl1`);
+    }
+    await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+    const bareF = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flows`,
+    );
+    const bareR = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_runs`,
+    );
+    const bareS = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_run_steps`,
+    );
+    return { ownF, ownR, ownS, crossBlocked, bareF, bareR, bareS };
+  });
+  assert.deepEqual(
+    flowViews.ownF.rows.map((r) => r.id),
+    [FLOW_ID],
+  );
+  assert.equal(flowViews.ownR.rows[0].n, "1");
+  assert.equal(flowViews.ownS.rows[0].n, "1");
+  assert.equal(flowViews.crossBlocked, true);
+  assert.equal(flowViews.bareF.rows[0].n, "0");
+  assert.equal(flowViews.bareR.rows[0].n, "0");
+  assert.equal(flowViews.bareS.rows[0].n, "0");
+  // Hapus flow → run & langkah cascade.
+  await db.query(`DELETE FROM flows WHERE id = $1`, [FLOW_ID]);
+  const runsAfter = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM flow_runs WHERE flow_id = $1`,
+    [FLOW_ID],
+  );
+  const stepsAfter = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM flow_run_steps WHERE run_id = $1`,
+    [FLOW_RUN_ID],
+  );
+  assert.equal(runsAfter.rows[0].n, "0");
+  assert.equal(stepsAfter.rows[0].n, "0");
+  console.log(
+    "[24] Fase 8A: flows/flow_runs/flow_run_steps — isolasi tenant ketiga tabel + insert silang ditolak; unik (flow, pesan pemicu) menolak run ganda; hapus flow → run & langkah cascade: OK",
   );
 }
 

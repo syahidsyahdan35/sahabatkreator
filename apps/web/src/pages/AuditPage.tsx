@@ -46,6 +46,7 @@ const CATEGORY_VALUES = [
   "integration",
   "platform_settings",
   "broadcast",
+  "flow",
 ] as const;
 type CategoryValue = (typeof CATEGORY_VALUES)[number];
 
@@ -64,6 +65,7 @@ const CATEGORY_LABEL_KEYS: Record<CategoryValue, TranslationKey> = {
   integration: "audit.categoryIntegration",
   platform_settings: "audit.categoryPlatformSettings",
   broadcast: "audit.categoryBroadcast",
+  flow: "audit.categoryFlow",
 };
 
 /**
@@ -117,6 +119,14 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "broadcast.failed": "audit.actionBroadcastFailed",
   "broadcast.cancelled": "audit.actionBroadcastCancelled",
   "broadcast.deleted": "audit.actionBroadcastDeleted",
+  "flow.created": "audit.actionFlowCreated",
+  "flow.updated": "audit.actionFlowUpdated",
+  "flow.activated": "audit.actionFlowActivated",
+  "flow.deactivated": "audit.actionFlowDeactivated",
+  "flow.run_started": "audit.actionFlowRunStarted",
+  "flow.run_completed": "audit.actionFlowRunCompleted",
+  "flow.run_failed": "audit.actionFlowRunFailed",
+  "flow.run_cancelled": "audit.actionFlowRunCancelled",
 };
 
 const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
@@ -134,6 +144,8 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   integration_log: "audit.targetIntegrationLog",
   platform_setting: "audit.targetPlatformSetting",
   broadcast: "audit.targetBroadcast",
+  flow: "audit.targetFlow",
+  flow_run: "audit.targetFlowRun",
 };
 
 /** Warna chip actor mengikuti token semantik (pola chip Logs). */

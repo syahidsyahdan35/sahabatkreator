@@ -6,6 +6,7 @@ import {
   INTEGRATION_LOG_RETENTION_DAYS,
   dispatchBroadcast,
   evaluateInboundMessageForAutomations,
+  executeFlowStep,
   executeSequenceStep,
   pruneIntegrationLogs,
   purgeExpiredTrashedChannels,
@@ -19,6 +20,7 @@ import {
   AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
   BROADCAST_DISPATCH_JOB,
+  FLOW_STEP_JOB,
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
   createAutomationQueue,
@@ -27,10 +29,12 @@ import {
   enqueueAgentRespond,
   enqueueAutomationEvaluate,
   enqueueBroadcastDispatch,
+  enqueueFlowStep,
   enqueueSequenceStep,
   type AgentRespondJobData,
   type AutomationEvaluateJobData,
   type BroadcastDispatchJobData,
+  type FlowStepJobData,
   type MainJobData,
   type SequenceStepJobData,
 } from "@sahabat-kreator/queue";
@@ -75,7 +79,16 @@ import {
  *    materialisasi penerima + pesan `queued` per penerima (opt-out &
  *    jendela 24 jam Meta menjadi `skipped`). Pengiriman tetap oleh
  *    poller API; worker menutup broadcast lewat penyapu berkala
- *    `reconcileBroadcasts` (sinkron status penerima ← status pesan).`
+ *    `reconcileBroadcasts` (sinkron status penerima ← status pesan).
+ * 6. FLOW ENGINE (Fase 8A): evaluasi pesan masuk (processor yang sama)
+ *    diperluas — sesudah automation keyword/sequence, flow AKTIF yang
+ *    trigger-nya cocok memulai run di core; agent hanya menerima pesan
+ *    yang tidak ditangani keduanya. Relay menerjemahkan event outbox
+ *    `flow.step_due` menjadi job tertunda `flow.step`
+ *    (jobId `flow-<runId>-<seq>`); processor-nya menjalankan
+ *    `executeFlowStep` di core (graf node: kirim pesan, kondisi, delay,
+ *    tag/stage, enroll sequence, respons AI, handoff) dengan log per
+ *    langkah di `flow_run_steps`.`
  *
  * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
  * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
@@ -154,9 +167,13 @@ const bullWorker = new Worker<MainJobData>(
         conversationId: data.conversationId,
         messageId: data.messageId,
       });
-      if (result.fired.length > 0 || result.skippedDuplicates > 0) {
+      if (
+        result.fired.length > 0 ||
+        result.skippedDuplicates > 0 ||
+        result.flowRunsStarted > 0
+      ) {
         console.log(
-          `[worker] automation.evaluate event=${data.outboxEventId} fired=${result.fired.length} duplicates=${result.skippedDuplicates}`,
+          `[worker] automation.evaluate event=${data.outboxEventId} fired=${result.fired.length} duplicates=${result.skippedDuplicates} flowRuns=${result.flowRunsStarted}`,
         );
       }
       // Fase 6G: automation yang menembak membuat pesan outbound
@@ -175,10 +192,14 @@ const bullWorker = new Worker<MainJobData>(
       // memeriksa ulang kelayakannya (agent aktif, ai_enabled, caps).
       // Fase 2C: pendaftaran sequence dihitung sebagai tembakan (fired),
       // jadi pesan pemicu sequence TIDAK pernah diteruskan ke agent.
+      // Fase 8A: run flow yang dimulai (atau duplikatnya) juga dihitung
+      // tertangani — urutan lengkapnya keyword → flow → AI.
       if (
         result.evaluated &&
         result.fired.length === 0 &&
-        result.skippedDuplicates === 0
+        result.skippedDuplicates === 0 &&
+        result.flowRunsStarted === 0 &&
+        result.flowDuplicateStarts === 0
       ) {
         await enqueueAgentRespond(queue, {
           tenantId: data.tenantId,
@@ -233,6 +254,45 @@ const bullWorker = new Worker<MainJobData>(
             ? ` materialized=${result.materialized} queued=${result.queued ?? 0} skipped=${result.skipped ?? 0}`
             : ""),
       );
+      return result;
+    }
+    if (job.name === FLOW_STEP_JOB) {
+      // Fase 8A: eksekusi run flow — node demi node di core sampai run
+      // menunggu (delay) atau terminal. Node `ai_response` me-resolve
+      // provider LLM per job (panel → env → mock), sama seperti
+      // agent.respond; resolusi diteruskan sebagai callback agar core
+      // hanya memakainya bila node itu benar-benar dicapai.
+      const data = job.data as FlowStepJobData;
+      const result = await executeFlowStep(
+        db,
+        {
+          tenantId: data.tenantId,
+          runId: data.runId,
+          stepSeq: data.stepSeq,
+        },
+        {
+          resolveLlmProvider: resolveAgentLlmProvider,
+          publicBaseUrl: env.BETTER_AUTH_URL,
+        },
+      );
+      // Pesan `queued` yang dibuat langkah ini → nudge pengiriman.
+      if (result.outboundMessageId && result.conversationId) {
+        await realtimePublisher.publishNudge({
+          kind: "message.queued",
+          tenantId: data.tenantId,
+          conversationId: result.conversationId,
+        });
+      }
+      if (result.stepsExecuted || result.reason) {
+        console.log(
+          `[worker] flow.step run=${data.runId} seq=${data.stepSeq} executed=${result.executed}` +
+            (result.status ? ` status=${result.status}` : "") +
+            (result.reason ? ` reason=${result.reason}` : "") +
+            (result.stepsExecuted !== undefined
+              ? ` steps=${result.stepsExecuted}`
+              : ""),
+        );
+      }
       return result;
     }
     if (job.name === AGENT_RESPOND_JOB) {
@@ -348,6 +408,40 @@ async function relayTick(): Promise<void> {
         await enqueueBroadcastDispatch(
           queue,
           { tenantId: event.tenantId, broadcastId: payload.broadcastId },
+          Number.isNaN(delayMs) ? 0 : delayMs,
+        );
+        return;
+      }
+      // Fase 8A: resume flow jatuh tempo → job BullMQ TERTUNDA
+      // `flow.step` (delay = resumeAt − sekarang; run yang dimulai
+      // menulis resumeAt = sekarang sehingga eksekusi pertama praktis
+      // tanpa delay dari jalur yang sama). Run yang dibatalkan/opt-out
+      // sebelum waktunya tetap menghasilkan job — core menolaknya
+      // dengan aman (status terminal / seq basi).
+      if (event.type === "flow.step_due") {
+        const payload = event.payload as {
+          runId?: unknown;
+          stepSeq?: unknown;
+          resumeAt?: unknown;
+        };
+        if (
+          typeof payload.runId !== "string" ||
+          typeof payload.stepSeq !== "number" ||
+          typeof payload.resumeAt !== "string"
+        ) {
+          console.warn(
+            `[worker] event flow.step_due ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        const delayMs = Date.parse(payload.resumeAt) - Date.now();
+        await enqueueFlowStep(
+          queue,
+          {
+            tenantId: event.tenantId,
+            runId: payload.runId,
+            stepSeq: payload.stepSeq,
+          },
           Number.isNaN(delayMs) ? 0 : delayMs,
         );
         return;

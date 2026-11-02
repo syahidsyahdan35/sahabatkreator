@@ -124,6 +124,11 @@ export function auditActionCategory(action: string): string {
  * sequence.*). Hanya nilai string non-kosong yang dipakai.
  */
 const TARGET_KEYS: ReadonlyArray<readonly [string, string]> = [
+  // flowRunId/flowId didahulukan: meta flow.* membawa keduanya
+  // (run_started/run_completed/run_failed/run_cancelled → target run;
+  // created/updated/activated/deactivated hanya membawa flowId).
+  ["flowRunId", "flow_run"],
+  ["flowId", "flow"],
   // broadcastId didahulukan dari channelAccountId: meta broadcast.*
   // membawa keduanya, dan target utamanya adalah broadcast-nya.
   ["broadcastId", "broadcast"],

@@ -49,6 +49,7 @@ export const AUTOMATION_EVALUATE_JOB = "automation.evaluate";
 export const AGENT_RESPOND_JOB = "agent.respond";
 export const SEQUENCE_STEP_JOB = "sequence.step";
 export const BROADCAST_DISPATCH_JOB = "broadcast.dispatch";
+export const FLOW_STEP_JOB = "flow.step";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -105,6 +106,22 @@ export interface BroadcastDispatchJobData {
   broadcastId: string;
 }
 
+/**
+ * Job Fase 8A: jalankan langkah-langkah flow untuk satu run sampai
+ * run menunggu (node delay) atau terminal. Di-enqueue oleh relay
+ * outbox dari event `flow.step_due` (ditulis core saat run dibuat dan
+ * setiap kali run masuk status `waiting`), sebagai job TERTUNDA
+ * BullMQ dengan delay = sisa waktu node delay. jobId deterministik
+ * `flow-<runId>-<nextStepSeq>`: resume yang sama tidak pernah punya
+ * dua job; eksekusi ganda pun aman karena core menolak seq basi
+ * (next_step_seq sudah maju) dan run yang sudah terminal.
+ */
+export interface FlowStepJobData {
+  tenantId: string;
+  runId: string;
+  stepSeq: number;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -128,6 +145,11 @@ export function broadcastDispatchJobId(broadcastId: string): string {
   return `broadcast-${broadcastId}`;
 }
 
+/** jobId deterministik satu resume flow: `flow-<runId>-<stepSeq>`. */
+export function flowStepJobId(runId: string, stepSeq: number): string {
+  return `flow-${runId}-${stepSeq}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -142,7 +164,8 @@ export type MainJobData =
   | AutomationEvaluateJobData
   | AgentRespondJobData
   | SequenceStepJobData
-  | BroadcastDispatchJobData;
+  | BroadcastDispatchJobData
+  | FlowStepJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -245,6 +268,31 @@ export async function enqueueBroadcastDispatch(
     ...options,
   });
   return job.id ?? broadcastDispatchJobId(data.broadcastId);
+}
+
+/**
+ * Meng-enqueue eksekusi flow sebagai job TERTUNDA BullMQ. `delayMs`
+ * dihitung relay dari `resumeAt` event outbox (titik mulai delay
+ * bergeser ±2 dtk dari jadwal ideal node delay — toleransi yang sama
+ * seperti sequence/broadcast). Aman dipanggil berulang: jobId
+ * diturunkan dari (runId, stepSeq).
+ */
+export async function enqueueFlowStep(
+  queue: MainQueue,
+  data: FlowStepJobData,
+  delayMs: number,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(FLOW_STEP_JOB, data, {
+    jobId: flowStepJobId(data.runId, data.stepSeq),
+    delay: Math.max(0, Math.floor(delayMs)),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? flowStepJobId(data.runId, data.stepSeq);
 }
 
 export {

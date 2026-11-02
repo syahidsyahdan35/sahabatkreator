@@ -17,6 +17,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
+import { startFlowRunsForInboundMessage } from "./flows";
 
 /**
  * Service domain automation (Fase 2A, RANCANGAN §5 & §6; Fase 2C sequence).
@@ -387,6 +388,21 @@ export interface EvaluateInboundResult {
   skippedDuplicates: number;
   /** Enrollment aktif yang dibatalkan karena pesan masuk ini (aturan 2C-a). */
   cancelledEnrollments: number;
+  /**
+   * Fase 8A: run flow yang DIMULAI pesan ini (flow aktif dengan
+   * trigger cocok, sesudah pencocokan automation). Run yang dimulai
+   * dihitung sebagai pesan tertangani — worker tidak meneruskannya
+   * ke agent (urutan keyword → flow → AI).
+   */
+  flowRunsStarted: number;
+  /**
+   * Fase 8A: flow cocok yang TIDAK memulai run baru karena run untuk
+   * pesan ini sudah ada (evaluasi ulang/replay) — pesan tetap dianggap
+   * tertangani flow, worker tidak meneruskannya ke agent.
+   */
+  flowDuplicateStarts: number;
+  /** Fase 8A: run flow `waiting` yang dibatalkan karena kontak opt-out. */
+  cancelledFlowRuns: number;
 }
 
 /**
@@ -523,6 +539,9 @@ export async function evaluateInboundMessageForAutomations(
       fired: [],
       skippedDuplicates: 0,
       cancelledEnrollments: 0,
+      flowRunsStarted: 0,
+      flowDuplicateStarts: 0,
+      cancelledFlowRuns: 0,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
   // tembakan automation dan (karena `evaluated` false) worker juga tidak
@@ -533,6 +552,9 @@ export async function evaluateInboundMessageForAutomations(
       fired: [],
       skippedDuplicates: 0,
       cancelledEnrollments: 0,
+      flowRunsStarted: 0,
+      flowDuplicateStarts: 0,
+      cancelledFlowRuns: 0,
     };
   const text = context.message.contentText ?? "";
 
@@ -794,11 +816,27 @@ export async function evaluateInboundMessageForAutomations(
     }
   }
 
+  // --- Fase 8A: flow engine — dievaluasi SETELAH automation keyword/
+  // sequence (urutan keyword → flow → agent). Flow aktif yang
+  // trigger-nya cocok memulai run; kontak opt-out tidak memulai run
+  // dan run `waiting`-nya di percakapan ini dibatalkan di sana.
+  const flowOutcome = await startFlowRunsForInboundMessage(db, {
+    tenantId,
+    conversationId,
+    messageId,
+    messageText: text,
+    contact: context.contact ?? null,
+    conversation: context.conversation,
+  });
+
   return {
     evaluated: true,
     fired,
     skippedDuplicates,
     cancelledEnrollments: context.cancelledEnrollments,
+    flowRunsStarted: flowOutcome.startedRunIds.length,
+    flowDuplicateStarts: flowOutcome.duplicateStarts,
+    cancelledFlowRuns: flowOutcome.cancelledRunIds.length,
   };
 }
 

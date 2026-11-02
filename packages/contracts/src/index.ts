@@ -44,6 +44,11 @@ export const ErrorCodeSchema = z.enum([
   // sudah terminal) → 409.
   "BROADCAST_CHANNEL_UNSUPPORTED",
   "BROADCAST_INVALID_STATE",
+  // Fase 8A: flow engine — graf tidak sah saat aktivasi (daftar masalah
+  // terstruktur di `details.issues`) → 422; transisi status tidak sah
+  // (edit flow aktif, aktifkan yang sudah aktif, dst.) → 409.
+  "FLOW_GRAPH_INVALID",
+  "FLOW_INVALID_STATE",
   "PRODUCT_HAS_LINKS",
   "API_KEY_INVALID",
   "API_KEY_REVOKED",
@@ -1567,6 +1572,7 @@ export const AuditCategorySchema = z.enum([
   "integration",
   "platform_settings",
   "broadcast",
+  "flow",
 ]);
 export type AuditCategory = z.infer<typeof AuditCategorySchema>;
 
@@ -1833,3 +1839,247 @@ export const BroadcastRecipientListQuerySchema = z.object({
 export type BroadcastRecipientListQuery = z.infer<
   typeof BroadcastRecipientListQuerySchema
 >;
+
+// ---------------------------------------------------------------------------
+// Fase 8A — Flow Engine
+// ---------------------------------------------------------------------------
+
+/**
+ * FORMAT GRAF FLOW — kontrak sumber kebenaran (dipakai API, eksekutor
+ * worker, dan Flow Builder UI Fase 8B):
+ *
+ *   graph = { nodes: FlowNode[], edges: FlowEdge[] }
+ *   FlowNode = { id: string, type: FlowNodeType, config: object }
+ *   FlowEdge = { from: nodeId, to: nodeId, branch?: "yes" | "no" }
+ *
+ * Tepat SATU node `trigger` per flow; eksekusi mulai dari node yang
+ * ditunjuk edge keluar trigger. Node tanpa edge keluar = akhir run
+ * (node `end` adalah penanda eksplisit untuk hal yang sama). Edge
+ * `branch` hanya sah keluar dari node `condition` (wajib ada cabang
+ * `yes` DAN `no` — ditegakkan saat aktivasi, bukan di skema bentuk).
+ *
+ * Tipe node v1 dan config-nya:
+ * - trigger       { kind: "keyword", keywords: string[], match:
+ *                   "exact"|"contains" } | { kind: "any_message" }
+ * - send_message  { text } — teks keluar `queued`, variabel {name}.
+ * - condition     { predicate: "has_tag", tag }
+ *                 | { predicate: "stage_equals", stage }
+ *                 | { predicate: "field_equals", field:
+ *                   "name"|"phone"|"email", value }
+ *                 | { predicate: "message_contains", text } — memakai
+ *                   teks pesan pemicu run.
+ * - delay         { amount: int ≥ 0, unit: "seconds"|"minutes"|"hours" }
+ * - add_tag       { tag }    remove_tag { tag }    set_stage { stage }
+ * - enroll_sequence { automationId } — sequence AKTIF milik tenant
+ *                   yang sama (divalidasi saat aktivasi & eksekusi).
+ * - ai_response   {} — memanggil jalur agent.respond yang ada.
+ * - handoff       {} — agent_enabled=false pada percakapan + audit.
+ * - end           {}
+ */
+export const FlowStatusSchema = z.enum(["draft", "active", "archived"]);
+export type FlowStatus = z.infer<typeof FlowStatusSchema>;
+
+export const FlowRunStatusSchema = z.enum([
+  "running",
+  "waiting",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type FlowRunStatus = z.infer<typeof FlowRunStatusSchema>;
+
+export const FlowNodeTypeSchema = z.enum([
+  "trigger",
+  "send_message",
+  "condition",
+  "delay",
+  "add_tag",
+  "remove_tag",
+  "set_stage",
+  "enroll_sequence",
+  "ai_response",
+  "handoff",
+  "end",
+]);
+export type FlowNodeType = z.infer<typeof FlowNodeTypeSchema>;
+
+export const FlowTriggerConfigSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("keyword"),
+    keywords: z.array(z.string().min(1).max(128)).max(20),
+    match: z.enum(["exact", "contains"]),
+  }),
+  z.object({ kind: z.literal("any_message") }),
+]);
+export type FlowTriggerConfig = z.infer<typeof FlowTriggerConfigSchema>;
+
+export const FlowConditionConfigSchema = z.discriminatedUnion("predicate", [
+  z.object({ predicate: z.literal("has_tag"), tag: z.string().min(1).max(64) }),
+  z.object({
+    predicate: z.literal("stage_equals"),
+    stage: z.string().min(1).max(64),
+  }),
+  z.object({
+    predicate: z.literal("field_equals"),
+    field: z.enum(["name", "phone", "email"]),
+    value: z.string().min(1).max(255),
+  }),
+  z.object({
+    predicate: z.literal("message_contains"),
+    text: z.string().min(1).max(255),
+  }),
+]);
+export type FlowConditionConfig = z.infer<typeof FlowConditionConfigSchema>;
+
+export const FlowNodeConfigSchema = z.union([
+  FlowTriggerConfigSchema,
+  z.object({ text: z.string().min(1).max(4096) }),
+  FlowConditionConfigSchema,
+  z.object({
+    amount: z.number().int().min(0).max(100_000),
+    unit: z.enum(["seconds", "minutes", "hours"]),
+  }),
+  z.object({ tag: z.string().min(1).max(64) }),
+  z.object({ stage: z.string().min(1).max(64) }),
+  z.object({ automationId: z.string().uuid() }),
+  // ai_response / handoff / end: config kosong.
+  z.object({}),
+]);
+export type FlowNodeConfig = z.infer<typeof FlowNodeConfigSchema>;
+
+export const FlowNodeSchema = z.object({
+  id: z.string().min(1).max(128),
+  type: FlowNodeTypeSchema,
+  config: z.record(z.string(), z.unknown()).default({}),
+});
+export type FlowNode = z.infer<typeof FlowNodeSchema>;
+
+export const FlowEdgeSchema = z.object({
+  from: z.string().min(1).max(128),
+  to: z.string().min(1).max(128),
+  branch: z.enum(["yes", "no"]).optional(),
+});
+export type FlowEdge = z.infer<typeof FlowEdgeSchema>;
+
+export const FlowGraphSchema = z.object({
+  nodes: z.array(FlowNodeSchema).max(200),
+  edges: z.array(FlowEdgeSchema).max(400),
+});
+export type FlowGraph = z.infer<typeof FlowGraphSchema>;
+
+/** Satu masalah validasi graf (aktivasi) — kode stabil + konteks. */
+export const FlowGraphIssueSchema = z.object({
+  code: z.string(),
+  severity: z.enum(["error", "warning"]),
+  nodeId: z.string().nullable(),
+  message: z.string(),
+});
+export type FlowGraphIssue = z.infer<typeof FlowGraphIssueSchema>;
+
+export const FlowResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  status: FlowStatusSchema,
+  graph: FlowGraphSchema,
+  runCount: z.number().int().nonnegative(),
+  createdByUserId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type FlowResponse = z.infer<typeof FlowResponseSchema>;
+
+export const FlowListResponseSchema = z.object({
+  flows: z.array(FlowResponseSchema),
+  nextCursor: z.string().nullable(),
+});
+export type FlowListResponse = z.infer<typeof FlowListResponseSchema>;
+
+export const FlowListQuerySchema = z.object({
+  status: FlowStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type FlowListQuery = z.infer<typeof FlowListQuerySchema>;
+
+export const CreateFlowRequestSchema = z.object({
+  name: z.string().min(1).max(255),
+  graph: FlowGraphSchema.optional(),
+});
+export type CreateFlowRequest = z.infer<typeof CreateFlowRequestSchema>;
+
+/**
+ * Edit hanya sah selama flow masih `draft` (mengubah graf flow aktif
+ * di tengah jalan akan mengubah arti run yang sedang berjalan — flow
+ * aktif harus dinonaktifkan dulu, yang mengembalikannya ke draft).
+ */
+export const UpdateFlowRequestSchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+  graph: FlowGraphSchema.optional(),
+});
+export type UpdateFlowRequest = z.infer<typeof UpdateFlowRequestSchema>;
+
+/** Hasil validasi graf (respons aktivasi yang gagal maupun endpoint validasi). */
+export const FlowValidationResponseSchema = z.object({
+  valid: z.boolean(),
+  issues: z.array(FlowGraphIssueSchema),
+});
+export type FlowValidationResponse = z.infer<
+  typeof FlowValidationResponseSchema
+>;
+
+export const FlowRunResponseSchema = z.object({
+  id: z.string().uuid(),
+  flowId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  contactId: z.string().uuid(),
+  contactName: z.string(),
+  triggerMessageId: z.string().uuid(),
+  status: FlowRunStatusSchema,
+  currentNodeId: z.string().nullable(),
+  stepCount: z.number().int().nonnegative(),
+  errorCode: z.string().nullable(),
+  startedAt: z.string().datetime(),
+  completedAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type FlowRunResponse = z.infer<typeof FlowRunResponseSchema>;
+
+export const FlowRunListResponseSchema = z.object({
+  runs: z.array(FlowRunResponseSchema),
+  nextCursor: z.string().nullable(),
+});
+export type FlowRunListResponse = z.infer<typeof FlowRunListResponseSchema>;
+
+export const FlowRunListQuerySchema = z.object({
+  status: FlowRunStatusSchema.optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type FlowRunListQuery = z.infer<typeof FlowRunListQuerySchema>;
+
+export const FlowRunStepResponseSchema = z.object({
+  id: z.string().uuid(),
+  runId: z.string().uuid(),
+  seq: z.number().int().positive(),
+  nodeId: z.string(),
+  nodeType: z.string(),
+  detail: z.record(z.string(), z.unknown()),
+  error: z.string().nullable(),
+  createdAt: z.string().datetime(),
+});
+export type FlowRunStepResponse = z.infer<typeof FlowRunStepResponseSchema>;
+
+export const FlowRunStepListResponseSchema = z.object({
+  steps: z.array(FlowRunStepResponseSchema),
+  nextCursor: z.string().nullable(),
+});
+export type FlowRunStepListResponse = z.infer<
+  typeof FlowRunStepListResponseSchema
+>;
+
+export const FlowRunStepListQuerySchema = z.object({
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+export type FlowRunStepListQuery = z.infer<typeof FlowRunStepListQuerySchema>;
