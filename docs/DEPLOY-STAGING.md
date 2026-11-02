@@ -1395,3 +1395,114 @@ pun.
 - Judul grup mengikuti `chat.title` terakhir yang terlihat; bot yang
   dikeluarkan dari grup tidak menutup percakapan otomatis (audit
   `my_chat_member` adalah jejaknya).
+
+---
+
+## Hotfix Telegram — satu bot = satu koneksi + Disconnect channel (2026-11-02)
+
+Dua temuan user yang dilunasi fase ini: (1) bot Telegram yang sama bisa
+dihubungkan ke banyak workspace — koneksi kedua membajak webhook bot
+secara diam-diam karena satu bot hanya punya satu webhook; (2) status
+"connected" tidak punya tombol disconnect di mana pun (tidak ada UI,
+tidak ada endpoint).
+
+### Penjaga satu bot = satu koneksi (migrasi 0020)
+- **Index unik parsial** `channel_accounts_provider_external_active_unique`
+  pada `(provider, external_id)` WHERE `status <> 'disconnected'`
+  (dibangkitkan dari skema): duplikat AKTIF mustahil di level data,
+  lintas tenant; baris 'disconnected' dikecualikan agar bot bisa
+  dihubungkan lagi setelah diputuskan. Ditambah **lengan RLS sempit**
+  `provider_external_lookup` (pola 0006/0012/0016/0018): transaksi
+  men-set `app.channel_provider` + `app.channel_external_id` dan hanya
+  baris pasangan persis itu yang terbuka — fondasi lookup connect
+  lintas tenant tanpa membocorkan tenant pemiliknya. Total staging:
+  **33 policy**.
+- **Alur connect** (setelah `getMe`): bot aktif milik workspace LAIN →
+  **409 `TELEGRAM_BOT_ALREADY_CONNECTED`** (kode kontrak baru; pesan UI
+  dwibahasa; tanpa baris baru, tanpa setWebhook — webhook pemilik sah
+  tidak diganggu). Milik workspace yang SAMA: 'connected' → idempoten
+  200 akun yang ada; 'disconnected'/'error' → baris yang sama
+  dihidupkan lagi (kredensial + secret baru, webhook didaftarkan ulang;
+  index unik per tenant melarang baris kedua). Unique-violation karena
+  balapan dipetakan ke hasil yang sama (409 / idempoten).
+- **Prasyarat data migrasi (disclosure):** pembuatan index awalnya
+  ditolak duplikat warisan artefak uji fase-fase lama — bot mock
+  `777001` di 4 tenant uji 6A/6A.1 dan seed `webchat-1d`/`webchat-1e`
+  masing-masing di 2 tenant "Studio Fase 1D/1E" (tenant uji berbeda
+  bernama sama). Semua baris kembar di luar yang tertua per pasangan
+  di-set 'disconnected' + kredensial dikosongkan (5 baris, semua tenant
+  uji — tidak ada data workspace asli user yang disentuh), lalu migrasi
+  teraplikasi bersih.
+
+### Disconnect channel (DELETE, owner/admin)
+- `DELETE /api/tenants/:tenantId/channels/:channelId` → 204 (pola
+  DELETE api-keys/KB; role selain owner/admin → 403; non-member → 404;
+  idempoten). Core `disconnectChannelAccount`: status 'disconnected',
+  token terenkripsi + hash secret webhook DIKOSONGKAN, audit
+  `channel.disconnected`. Percakapan & pesan TIDAK dihapus.
+- **Telegram:** klien Bot API ditambah `getWebhookInfo`/`deleteWebhook`.
+  Webhook hanya dicabut bila URL aktif menunjuk ke akun ini — akun
+  bukan pemilik tidak bisa mencabut webhook pemilik (hasil cek dicatat
+  di meta audit `webhookDeleted`). Bot API gagal dihubungi tidak
+  menggagalkan disconnect lokal: hash secret sudah kosong sehingga
+  webhook sisa ditolak 401 oleh route webhook kita.
+- **Webchat:** cukup status — route sesi publik sudah menolak akun
+  non-'connected' (404), jadi siteKey berhenti bekerja seketika.
+- **UI Channels:** tombol Putuskan/Disconnect pada baris belum putus +
+  dialog konfirmasi dwibahasa (pesan berhenti, riwayat tetap, bisa
+  dihubungkan lagi); baris terputus tampil redup dan cuplikan embed
+  webchat disembunyikan. Bundle baru `index-CO6KlYsI.js`.
+
+### Verifikasi (rantai dari server, tenant uji sendiri — TANPA Playwright)
+- Mock Bot API diperluas (getWebhookInfo/deleteWebhook/state per bot);
+  jendela `TELEGRAM_API_BASE` dibuka lalu dicabut; `.env.staging` akhir
+  terverifikasi kembali 9 variabel (600), mock mati, skrip /tmp dihapus.
+- Rantai publik: **29/29 PASS** — A connect → B connect bot sama **409**
+  + kode kontrak, B tanpa baris, mock setWebhook tetap 1x → A reconnect
+  **200 idempoten** (id sama, webhook tak disentuh) → webhook masuk →
+  percakapan → member 'agent' DELETE **403**, non-member **404** →
+  webhook dipindah (poke) ke akun lain: A disconnect **204** dan
+  deleteWebhook **tidak** terpanggil → riwayat A tetap ada → B connect
+  **201** → B disconnect sebagai pemilik: deleteWebhook **1x**, webhook
+  kosong → B reconnect **200 revive** baris yang sama → token invalid
+  tetap 422 → webchat: sesi 200 → disconnect → sesi **404**, riwayat
+  tetap, baris 'disconnected' → tanpa sesi 401 → health ok. Token mock:
+  **0 kemunculan** di journal API+worker.
+- Lokal: typecheck semua proyek hijau; PGlite verify lulus termasuk
+  seksi baru **[14]** (index parsial menolak duplikat connected & error
+  lintas tenant, membolehkan baris disconnected; lengan lookup hanya
+  membuka pasangan persis) dan hitungan policy 32 → **33**.
+
+### Remediasi duplikat ASLI user (keputusan user: survivor = koneksi pertama)
+Duplikat nyata `@botaramyid_bot` (bot_id 8808425227) ada di dua
+workspace user; webhook hidup menunjuk akun terbaru `10be58d5`
+("WS Mas Romo"). Dilaksanakan dengan modul aplikasi sendiri di server
+ (skrip sekali jalan, dihapus sesudahnya; tidak ada nilai token/secret
+ yang dicetak/dicatat):
+1. `10be58d5` diputuskan lewat jalur disconnect baru: token didekripsi
+   via core → `getWebhookInfo` membuktikan webhook memang menunjuk
+   akun itu → `deleteWebhook` terpanggil → core
+   `disconnectChannelAccount` (actor system `connection-remediation`,
+   audit `channel.disconnected` dengan `webhookDeleted: true`).
+   Langkah ini sekaligus prasyarat pembuatan index 0020.
+2. Secret webhook survivor `8fb9b81c` ("Mas Romo WS Baru") **dirotasi**:
+   plaintext lama memang tidak tersimpan (hanya hash SHA-256) — secret
+   acak baru dibuat, hash-nya disimpan via core, lalu `setWebhook`
+   memakai token terenkripsi survivor ke
+   `https://botara.my.id/api/telegram/webhook/8fb9b81c-…` dengan
+   secret_token baru dan allowed_updates ["message","my_chat_member"].
+3. Terverifikasi: `getWebhookInfo` (token survivor) menunjukkan URL =
+   URL survivor; DB: tepat **satu** akun `@botaramyid_bot` aktif
+   (8fb9b81c, connected), `10be58d5` 'disconnected' dengan token+secret
+   kosong; percakapan survivor (1 percakapan, 3 pesan) utuh.
+
+### Batas jujur
+- Bukti terakhir bahwa pesan user sungguhan mendarat di survivor hanya
+  bisa diberikan oleh chat nyata user ke botnya (getWebhookInfo + DB
+  sudah membuktikan arah webhook & secret yang terdaftar konsisten).
+- Token pengunjung webchat yang sudah terbit sebelum disconnect tidak
+  dicek ulang status akunnya (desain 1F; sesi BARU yang ditolak) —
+  token itu berakhir sendiri ≤30 hari.
+- Akun berstatus 'error' ikut menghalangi workspace lain (mereka masih
+  memegang klaim bot + webhook terdaftar sebagian) — jalan keluarnya
+  disconnect dari workspace pemilik, sesuai pesan error dwibahasa.
