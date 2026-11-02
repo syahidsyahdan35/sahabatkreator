@@ -26,6 +26,8 @@ import type {
   WhatsAppTemplateResponse,
   ChannelAccountListResponse,
   ChannelAccountResponse,
+  CommentListResponse,
+  CommentResponse,
   ContactDuplicatesResponse,
   ContactListResponse,
   ContactResponse,
@@ -616,6 +618,39 @@ export const api = {
         { method: "GET" },
       );
       return body.enrollments;
+    },
+  },
+  comments: {
+    /** GET /api/tenants/:tenantId/comments → komentar IG/Messenger terbaru (Fase 10B). */
+    async list(
+      tenantId: string,
+      filter?: { channelAccountId?: string; automationId?: string; limit?: number },
+    ): Promise<CommentResponse[]> {
+      const params = new URLSearchParams();
+      if (filter?.channelAccountId)
+        params.set("channelAccountId", filter.channelAccountId);
+      if (filter?.automationId) params.set("automationId", filter.automationId);
+      if (filter?.limit) params.set("limit", String(filter.limit));
+      const qs = params.toString();
+      const body = await request<CommentListResponse>(
+        `/api/tenants/${tenantId}/comments${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+      return body.comments;
+    },
+    /** POST /api/tenants/:tenantId/comments/:id/hide → sembunyikan di Meta + lokal (Fase 10B). */
+    hide(tenantId: string, commentId: string): Promise<CommentResponse> {
+      return request<CommentResponse>(
+        `/api/tenants/${tenantId}/comments/${commentId}/hide`,
+        { method: "POST" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/comments/:id/unhide → tampilkan lagi (Fase 10B). */
+    unhide(tenantId: string, commentId: string): Promise<CommentResponse> {
+      return request<CommentResponse>(
+        `/api/tenants/${tenantId}/comments/${commentId}/unhide`,
+        { method: "POST" },
+      );
     },
   },
   agents: {
