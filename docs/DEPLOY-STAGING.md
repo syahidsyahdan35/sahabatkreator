@@ -1078,3 +1078,108 @@ verifikasi POST publik dijalankan dari server terhadap URL publik asli
   saat run penuh dijalankan menempel di sesi SSH — run diulang sebagai
   proses detached (nohup + log) dan itulah run 14/14 di atas; ini isu
   transport sesi, bukan aplikasi/tes.
+
+## Update Fase 6A — Channel Telegram hidup (adapter Bot API) (2026-11-02)
+
+Telegram menjadi channel kedua yang hidup end-to-end setelah webchat.
+Pola sama seperti 1F: kredensial & resolusi publik diamankan di core,
+pesan keluar selalu lewat antrean `queued` yang sama untuk semua fitur
+(dashboard, automation, sequence, agent) — yang berubah hanya poller
+pengiriman di API.
+
+### Desain kredensial & webhook
+- **Token bot terenkripsi AES-256-GCM** di core
+  (`packages/core/src/channel-secrets.ts`): envelope
+  `v1:<iv>.<tag>.<ciphertext>` (base64url) disimpan di kolom yang sudah
+  ada `channel_accounts.access_token_encrypted`. Kunci dari env
+  **`CHANNEL_TOKEN_SECRET`** (32 byte base64; digenerate DI SERVER,
+  hanya ada di `.env.staging`). Token tidak pernah muncul di respons
+  API (hanya status + `@username` bot dari kolom baru `bot_username`),
+  tidak masuk log, tidak masuk detail audit (audit `channel.created`
+  hanya membawa provider + botUsername).
+- **Webhook secret:** nilai acak 24 byte digenerate saat connect; yang
+  disimpan di `webhook_secret` adalah **hash SHA-256**-nya; verifikasi
+  header `X-Telegram-Bot-Api-Secret-Token` memakai perbandingan
+  timing-safe terhadap hash.
+- Kolom aditif `channel_accounts.bot_username` (migrasi **0017**,
+  drizzle-kit generate). Migrasi **0018** (tulis tangan, pola
+  0006/0012/0016): policy SELECT sempit `telegram_webhook_lookup`
+  (resolusi akun webhook tanpa konteks tenant, berdasarkan
+  `app.telegram_channel_account_id`) + `system_delivery_scan` pada
+  channel_accounts/conversations/channel_identities/messages (scan
+  antrean `queued` percakapan telegram lintas tenant untuk poller,
+  setting `app.system_delivery='telegram'`). Staging sekarang 31 tabel /
+  **32 policy**. PGlite verify lulus termasuk seksi [12] lengan telegram.
+
+### Endpoint & alur
+- `POST /api/tenants/:tenantId/channels` diperluas provider `telegram`
+  {displayName, botToken}: validasi `getMe` (401 → **422
+  TELEGRAM_TOKEN_INVALID**; jaringan mati → 503), external_id = id bot,
+  token terenkripsi, lalu `setWebhook` ke
+  `https://<BETTER_AUTH_URL>/api/telegram/webhook/<channelAccountId>`
+  dengan secret_token. setWebhook gagal → akun berstatus `error` + 422
+  CHANNEL_NOT_CONNECTED. Provider Meta tetap 422
+  CHANNEL_NOT_AVAILABLE_YET.
+- Webhook publik `POST /api/telegram/webhook/:channelAccountId`:
+  akun tak dikenal → 404; secret salah → 401 generik; update non-teks →
+  200 diabaikan. Pesan teks: kontak/identitas (identitas = id pengirim
+  Telegram)/percakapan/pesan inbound + unread + outbox
+  `message.received` dalam SATU transaksi. Dedup memakai
+  provider_message_id majemuk `telegram:<botId>:<message_id>` (index
+  unik provider_message_id bersifat global).
+- Pengiriman: poller di `apps/api/src/modules/telegram/poller.ts`
+  (interval 2 dtk) memindai antrean telegram, mendekripsi token di
+  proses API, `sendMessage` ke chat id identitas kontak, lalu
+  sent/failed (`markOutboundMessageSent/Failed`, audit `message.failed`
+  dengan kode aman `telegram_http_<status>` dsb.). Klien Bot API
+  (`packages/channels/channel-telegram`) tidak pernah memasukkan token
+  ke pesan error; base URL dari env `TELEGRAM_API_BASE` (default
+  `https://api.telegram.org`) — override ini yang memungkinkan uji mock.
+- UI Channels: form hubungkan Telegram (nama tampilan bot + input token
+  type=password + petunjuk BotFather), daftar menampilkan `@username`;
+  i18n en+id lengkap. Perbaikan UI nyata dari fase ini: label field nama
+  bot diganti "Bot display name"/"Nama tampilan bot" karena sebelumnya
+  identik dengan label nama channel webchat ("Channel name") sehingga
+  locator a11y ambigu — tertangkap regresi Playwright channels-webchat.
+
+### Verifikasi Fase 6A (mock Bot API di server, BUKAN token asli)
+- Mock Bot API kecil (Bun, 127.0.0.1:39011 di server) menerapkan
+  getMe/setWebhook/sendMessage + pencatatan state. Jendela uji: baris
+  `TELEGRAM_API_BASE=http://127.0.0.1:39011` ditambahkan sementara ke
+  `.env.staging`, API direstart; setelah uji baris itu DICABUT dan API
+  direstart lagi. Keadaan akhir env terverifikasi = env awal +
+  `CHANNEL_TOKEN_SECRET` saja (9 variabel), izin file tetap 600, mock
+  dimatikan, skrip uji di /tmp server dihapus.
+- Rantai publik dari server (22 assertion): **22/22 PASS** — sign-up +
+  tenant uji; token invalid → 422 TELEGRAM_TOKEN_INVALID; connect →
+  201 + botUsername `@sk_mock_bot` + status connected; token tidak
+  muncul di respons connect maupun GET channels; mock mencatat getMe
+  dan setWebhook dengan URL webhook publik yang benar + secret_token;
+  webhook secret salah → 401; webhook benar berisi "harga" →
+  percakapan + pesan inbound tampil di API dashboard; automation
+  keyword menembak → mock menerima sendMessage (chat_id benar, teks
+  berisi nominal + nama kontak dari placeholder {name}); balasan manual
+  dashboard → mock menerima sendMessage; kedua pesan outbound berstatus
+  `sent`; update foto (non-teks) → 200 diabaikan; webhook duplikat →
+  tetap 1 pesan inbound.
+- Negatif log: `grep` string token uji mock pada journal API & worker
+  30 menit terakhir = **0 kemunculan**.
+- Regresi Playwright dari server (auth + channels-webchat): run pertama
+  3/4 — kegagalan adalah bug label ambigu di atas (BUKAN lingkungan);
+  setelah perbaikan label + redeploy bundle web
+  `index-CZTYNG1B.js`: **4/4 PASS**. Typecheck semua proyek hijau;
+  `GET https://botara.my.id/api/health` ok.
+
+### Batas jujur
+- **Verifikasi token ASLI menunggu user**: fase ini selesai pada
+  keadaan "siap token asli" — user membuat bot via @BotFather lalu
+  memasukkan tokennya lewat form di halaman Channels; alur connect yang
+  sama (getMe + setWebhook ke Telegram asli) akan berjalan saat itu.
+  Tidak ada token bot asli yang pernah dipakai/diminta dalam fase ini.
+- Cakupan v1 = chat privat 1:1: identitas memakai id pengirim
+  (`from.id`); pada chat privat itu sama dengan chat id tujuan kirim.
+  Grup belum ditargetkan (chat id grup ≠ id pengirim; perlu kolom chat
+  id tersendiri bila grup didukung nanti).
+- Poller pengiriman masih pola jembatan in-process seperti webchat
+  (satu proses API); Redis pub/sub tetap pekerjaan sebelum skala
+  horizontal (konsisten catatan 1F/2A).
