@@ -87,6 +87,79 @@ try {
   );
 }
 
+// Fase 15A: permukaan BACA baru (broadcast, flow, template flow,
+// otomasi, agen, channel, basis pengetahuan). Pola toleran yang sama
+// seperti listComments: keberhasilan penuh untuk kunci berscope baca
+// baru; kunci tanpa scope itu menerima API_KEY_SCOPE_DENIED bertipe —
+// keduanya membuktikan endpoint + metode SDK terhubung.
+async function checkRead<T>(
+  name: string,
+  fn: () => Promise<T>,
+  validate: (value: T) => boolean,
+  detail: (value: T) => string,
+): Promise<void> {
+  try {
+    const value = await fn();
+    check(name, validate(value), detail(value));
+  } catch (err) {
+    const isTyped = err instanceof SahabatKreatorApiError;
+    check(
+      `${name} (atau ditolak scope secara bertipe)`,
+      isTyped && err.code === "API_KEY_SCOPE_DENIED",
+      isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+    );
+  }
+}
+
+await checkRead(
+  "listBroadcasts() berhasil",
+  () => client.listBroadcasts({ limit: 5 }),
+  (v) => Array.isArray(v.broadcasts) && "nextCursor" in v,
+  (v) => `count=${v.broadcasts.length}`,
+);
+await checkRead(
+  "listFlows() berhasil",
+  () => client.listFlows({ limit: 5 }),
+  (v) => Array.isArray(v.flows) && "nextCursor" in v,
+  (v) => `count=${v.flows.length}`,
+);
+await checkRead(
+  "listFlowTemplates() memuat katalog kontrak",
+  () => client.listFlowTemplates(),
+  (v) => v.templates.some((t) => t.slug === "sambutan-tag-minat"),
+  (v) => `count=${v.templates.length}`,
+);
+await checkRead(
+  "listAutomations() berhasil",
+  () => client.listAutomations(),
+  (v) => Array.isArray(v.automations),
+  (v) => `count=${v.automations.length}`,
+);
+await checkRead(
+  "listAgents() berhasil",
+  () => client.listAgents(),
+  (v) => Array.isArray(v.agents),
+  (v) => `count=${v.agents.length}`,
+);
+await checkRead(
+  "listChannels() berhasil",
+  () => client.listChannels(),
+  (v) => Array.isArray(v.channels),
+  (v) => `count=${v.channels.length}`,
+);
+await checkRead(
+  "listKnowledgeDocuments() berhasil",
+  () => client.listKnowledgeDocuments(),
+  (v) => Array.isArray(v.documents),
+  (v) => `count=${v.documents.length}`,
+);
+await checkRead(
+  "getKnowledgeStats() berhasil",
+  () => client.getKnowledgeStats(),
+  (v) => typeof v.totalChunks === "number" && typeof v.embeddedChunks === "number",
+  (v) => `chunks=${v.embeddedChunks}/${v.totalChunks} semantic=${v.semanticSearch.active}`,
+);
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

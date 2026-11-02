@@ -1,5 +1,13 @@
 import type {
+  AgentListResponse,
+  AgentResponse,
   ApiError,
+  AutomationListResponse,
+  AutomationResponse,
+  BroadcastListResponse,
+  BroadcastResponse,
+  ChannelAccountListResponse,
+  ChannelAccountResponse,
   CommentListResponse,
   CommentResponse,
   ContactListResponse,
@@ -7,16 +15,26 @@ import type {
   ConversationListResponse,
   CreateContactRequest,
   ErrorCode,
+  FlowListResponse,
+  FlowResponse,
+  FlowTemplateListResponse,
+  KbDocumentListResponse,
+  KbDocumentResponse,
+  KbStatsResponse,
+  ListBroadcastsQuery,
   ListCommentsQuery,
   ListContactsQuery,
   ListConversationsQuery,
+  ListFlowsQuery,
   ListMessagesQuery,
+  ListWhatsAppTemplatesQuery,
   MessageListResponse,
   MessageResponse,
   ProductListResponse,
   PublicMeResponse,
   SendMessageRequest,
   UpdateContactRequest,
+  WhatsAppTemplateListResponse,
 } from "@sahabat-kreator/contracts";
 
 /**
@@ -38,7 +56,15 @@ import type {
  */
 
 export type {
+  AgentListResponse,
+  AgentResponse,
   ApiError,
+  AutomationListResponse,
+  AutomationResponse,
+  BroadcastListResponse,
+  BroadcastResponse,
+  ChannelAccountListResponse,
+  ChannelAccountResponse,
   CommentListResponse,
   CommentResponse,
   ContactListResponse,
@@ -46,16 +72,26 @@ export type {
   ConversationListResponse,
   CreateContactRequest,
   ErrorCode,
+  FlowListResponse,
+  FlowResponse,
+  FlowTemplateListResponse,
+  KbDocumentListResponse,
+  KbDocumentResponse,
+  KbStatsResponse,
+  ListBroadcastsQuery,
   ListCommentsQuery,
   ListContactsQuery,
   ListConversationsQuery,
+  ListFlowsQuery,
   ListMessagesQuery,
+  ListWhatsAppTemplatesQuery,
   MessageListResponse,
   MessageResponse,
   ProductListResponse,
   PublicMeResponse,
   SendMessageRequest,
   UpdateContactRequest,
+  WhatsAppTemplateListResponse,
 };
 
 /**
@@ -280,5 +316,121 @@ export class SahabatKreatorClient {
       "POST",
       `/comments/${encodeURIComponent(commentId)}/unhide`,
     );
+  }
+
+  // ---------------------------------------------------------------------
+  // Fase 15A — permukaan BACA untuk sumber daya yang sebelumnya hanya
+  // dashboard. Semua metode di bawah GET dengan scope baca khusus;
+  // bentuk respons persis kontrak yang dipakai dashboard (satu sumber
+  // kebenaran). Tulis untuk sumber daya ini tetap dashboard-only —
+  // lihat docs/COVERAGE-MATRIX.md.
+  // ---------------------------------------------------------------------
+
+  /** GET /v1/broadcasts (scope `broadcasts:read`) — daftar berkursor + statistik per broadcast. */
+  async listBroadcasts(
+    query: ListBroadcastsQuery = {},
+  ): Promise<BroadcastListResponse> {
+    return this.request<BroadcastListResponse>("GET", "/broadcasts", {
+      query: { status: query.status, cursor: query.cursor, limit: query.limit },
+    });
+  }
+
+  /** GET /v1/broadcasts/:id (scope `broadcasts:read`) — detail + statistik penerima. */
+  async getBroadcast(broadcastId: string): Promise<BroadcastResponse> {
+    return this.request<BroadcastResponse>(
+      "GET",
+      `/broadcasts/${encodeURIComponent(broadcastId)}`,
+    );
+  }
+
+  /** GET /v1/flows (scope `flows:read`) — daftar berkursor, graf ikut serta. */
+  async listFlows(query: ListFlowsQuery = {}): Promise<FlowListResponse> {
+    return this.request<FlowListResponse>("GET", "/flows", {
+      query: { status: query.status, cursor: query.cursor, limit: query.limit },
+    });
+  }
+
+  /** GET /v1/flows/:id (scope `flows:read`) — satu flow + graf lengkapnya. */
+  async getFlow(flowId: string): Promise<FlowResponse> {
+    return this.request<FlowResponse>(
+      "GET",
+      `/flows/${encodeURIComponent(flowId)}`,
+    );
+  }
+
+  /** GET /v1/flow-templates (scope `flows:read`) — katalog template flow (ringkasan). */
+  async listFlowTemplates(): Promise<FlowTemplateListResponse> {
+    return this.request<FlowTemplateListResponse>("GET", "/flow-templates");
+  }
+
+  /** GET /v1/automations (scope `automations:read`) — keyword, sequence & aturan komentar. */
+  async listAutomations(): Promise<AutomationListResponse> {
+    return this.request<AutomationListResponse>("GET", "/automations");
+  }
+
+  /** GET /v1/automations/:id (scope `automations:read`). */
+  async getAutomation(automationId: string): Promise<AutomationResponse> {
+    return this.request<AutomationResponse>(
+      "GET",
+      `/automations/${encodeURIComponent(automationId)}`,
+    );
+  }
+
+  /** GET /v1/agents (scope `agents:read`) — konfigurasi agen AI workspace. */
+  async listAgents(): Promise<AgentListResponse> {
+    return this.request<AgentListResponse>("GET", "/agents");
+  }
+
+  /** GET /v1/agents/:id (scope `agents:read`). */
+  async getAgent(agentId: string): Promise<AgentResponse> {
+    return this.request<AgentResponse>(
+      "GET",
+      `/agents/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /** GET /v1/channels (scope `channels:read`) — akun channel + status kesehatan (tanpa kredensial). */
+  async listChannels(): Promise<ChannelAccountListResponse> {
+    return this.request<ChannelAccountListResponse>("GET", "/channels");
+  }
+
+  /** GET /v1/channels/:id (scope `channels:read`). */
+  async getChannel(channelId: string): Promise<ChannelAccountResponse> {
+    return this.request<ChannelAccountResponse>(
+      "GET",
+      `/channels/${encodeURIComponent(channelId)}`,
+    );
+  }
+
+  /**
+   * GET /v1/whatsapp-templates (scope `whatsapp_templates:read`) —
+   * cermin template WhatsApp satu akun channel (wajib `channelAccountId`).
+   */
+  async listWhatsAppTemplates(
+    query: ListWhatsAppTemplatesQuery,
+  ): Promise<WhatsAppTemplateListResponse> {
+    return this.request<WhatsAppTemplateListResponse>(
+      "GET",
+      "/whatsapp-templates",
+      { query: { channelAccountId: query.channelAccountId } },
+    );
+  }
+
+  /** GET /v1/knowledge/documents (scope `knowledge:read`) — entri basis pengetahuan + jumlah chunk. */
+  async listKnowledgeDocuments(): Promise<KbDocumentListResponse> {
+    return this.request<KbDocumentListResponse>("GET", "/knowledge/documents");
+  }
+
+  /** GET /v1/knowledge/documents/:id (scope `knowledge:read`). */
+  async getKnowledgeDocument(documentId: string): Promise<KbDocumentResponse> {
+    return this.request<KbDocumentResponse>(
+      "GET",
+      `/knowledge/documents/${encodeURIComponent(documentId)}`,
+    );
+  }
+
+  /** GET /v1/knowledge/stats (scope `knowledge:read`) — cakupan embedding + status pencarian semantik. */
+  async getKnowledgeStats(): Promise<KbStatsResponse> {
+    return this.request<KbStatsResponse>("GET", "/knowledge/stats");
   }
 }

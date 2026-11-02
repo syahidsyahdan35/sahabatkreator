@@ -26,12 +26,16 @@ import { z } from "zod";
  *   MCP_ALLOW_WRITES          (opsional, Fase 9B) tiering keamanan:
  *                                      DEFAULT server ini READ-ONLY.
  *                                      Tool TULIS (create_contact,
- *                                      send_message, hide_comment,
- *                                      unhide_comment — dua terakhir
- *                                      Fase 10B) terdaftar tetapi
- *                                      MENOLAK dengan error yang jelas
- *                                      sampai env ini bernilai persis
- *                                      "1". Tool baca selalu jalan.
+ *                                      update_contact, send_message,
+ *                                      hide_comment, unhide_comment —
+ *                                      dua terakhir Fase 10B) terdaftar
+ *                                      tetapi MENOLAK dengan error yang
+ *                                      jelas sampai env ini bernilai
+ *                                      persis "1". Tool baca selalu
+ *                                      jalan — termasuk permukaan BACA
+ *                                      Fase 15A (broadcast, flow,
+ *                                      otomasi, agen, channel, template
+ *                                      WhatsApp, basis pengetahuan).
  *                                      Ini lapisan opt-in lokal di atas
  *                                      scope API key — keduanya harus
  *                                      mengizinkan agar tulis berhasil.
@@ -261,6 +265,249 @@ server.registerTool(
     writesEnabled
       ? run(() => client.unhideComment(commentId))
       : writeDisabledResult("unhide_comment"),
+);
+
+server.registerTool(
+  "update_contact",
+  {
+    description:
+      "Ubah kontak yang ada (scope contacts:write) mengikuti kontrak UpdateContactRequest: nama, tags (menggantikan seluruh daftar), pipelineStage, optInStatus, dan/atau customFields — customFields digabung per kunci di server (kunci yang dikirim menimpa, yang tidak disebut dipertahankan). [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
+    inputSchema: {
+      contactId: z.string().uuid().describe("Id kontak (dari list_contacts)"),
+      name: z.string().min(1).max(255).optional().describe("Nama baru (opsional)"),
+      tags: z
+        .array(z.string().min(1).max(64))
+        .max(50)
+        .optional()
+        .describe("Daftar tag baru — menggantikan seluruh daftar lama (opsional)"),
+      pipelineStage: z.string().min(1).max(64).optional().describe("Tahap pipeline baru (opsional)"),
+      optInStatus: z
+        .enum(["unknown", "opted_in", "opted_out"])
+        .optional()
+        .describe("Status opt-in baru (opsional)"),
+      customFields: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          "Field kustom sebagai peta string→string (opsional; kunci 1–64 karakter, nilai maks 1000 karakter, maks 50 entri)",
+        ),
+    },
+    annotations: { readOnlyHint: false },
+  },
+  async ({ contactId, name, tags, pipelineStage, optInStatus, customFields }) =>
+    writesEnabled
+      ? run(() =>
+          client.updateContact(contactId, {
+            name,
+            tags,
+            pipelineStage,
+            optInStatus,
+            customFields,
+          }),
+        )
+      : writeDisabledResult("update_contact"),
+);
+
+// ---------------------------------------------------------------------------
+// Fase 15A — permukaan BACA untuk sumber daya yang sebelumnya hanya
+// dashboard (aturan sinkronisasi kontrak). Semua tool di bawah READ-ONLY
+// (readOnlyHint: true) dan selalu jalan di tier default.
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "list_broadcasts",
+  {
+    description:
+      "Daftar broadcast workspace (scope broadcasts:read), terbaru dulu, berpaginasi kursor, beserta statistik penerima per broadcast. Hasil: { broadcasts, nextCursor }.",
+    inputSchema: {
+      status: z
+        .enum([
+          "draft",
+          "scheduled",
+          "sending",
+          "completed",
+          "partially_failed",
+          "failed",
+          "cancelled",
+        ])
+        .optional()
+        .describe("Saring status (opsional)"),
+      cursor: z.string().min(1).max(512).optional().describe("Kursor halaman berikutnya (opsional)"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maks. jumlah broadcast (opsional)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ status, cursor, limit }) =>
+    run(() => client.listBroadcasts({ status, cursor, limit })),
+);
+
+server.registerTool(
+  "get_broadcast",
+  {
+    description:
+      "Satu broadcast + statistik penerimanya (scope broadcasts:read).",
+    inputSchema: {
+      broadcastId: z.string().uuid().describe("Id broadcast (dari list_broadcasts)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ broadcastId }) => run(() => client.getBroadcast(broadcastId)),
+);
+
+server.registerTool(
+  "list_flows",
+  {
+    description:
+      "Daftar flow workspace (scope flows:read), berpaginasi kursor, graf ikut serta pada setiap flow. Hasil: { flows, nextCursor }.",
+    inputSchema: {
+      status: z.enum(["draft", "active", "archived"]).optional().describe("Saring status (opsional)"),
+      cursor: z.string().min(1).max(512).optional().describe("Kursor halaman berikutnya (opsional)"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maks. jumlah flow (opsional)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ status, cursor, limit }) =>
+    run(() => client.listFlows({ status, cursor, limit })),
+);
+
+server.registerTool(
+  "get_flow",
+  {
+    description: "Satu flow + graf lengkapnya (scope flows:read).",
+    inputSchema: {
+      flowId: z.string().uuid().describe("Id flow (dari list_flows)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ flowId }) => run(() => client.getFlow(flowId)),
+);
+
+server.registerTool(
+  "list_flow_templates",
+  {
+    description:
+      "Katalog template flow (scope flows:read): slug, kunci nama/deskripsi dwibahasa, kategori, jumlah node, dan kebutuhan yang harus dilengkapi sebelum aktivasi.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listFlowTemplates()),
+);
+
+server.registerTool(
+  "list_automations",
+  {
+    description:
+      "Daftar otomasi workspace (scope automations:read): aturan kata kunci, sequence (beserta langkahnya), dan aturan komentar. Hasil: { automations }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listAutomations()),
+);
+
+server.registerTool(
+  "get_automation",
+  {
+    description: "Satu otomasi (scope automations:read).",
+    inputSchema: {
+      automationId: z.string().uuid().describe("Id otomasi (dari list_automations)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ automationId }) => run(() => client.getAutomation(automationId)),
+);
+
+server.registerTool(
+  "list_agents",
+  {
+    description:
+      "Daftar agen AI workspace (scope agents:read): nama, model, mode auto/suggest, status aktif, dan prompt sistemnya. Hasil: { agents }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listAgents()),
+);
+
+server.registerTool(
+  "get_agent",
+  {
+    description: "Satu agen AI (scope agents:read).",
+    inputSchema: {
+      agentId: z.string().uuid().describe("Id agen (dari list_agents)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ agentId }) => run(() => client.getAgent(agentId)),
+);
+
+server.registerTool(
+  "list_channels",
+  {
+    description:
+      "Daftar akun channel terhubung (scope channels:read): provider, nama tampilan, status koneksi dan kesehatan operasional. Kredensial channel TIDAK pernah disertakan. Hasil: { channels }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listChannels()),
+);
+
+server.registerTool(
+  "get_channel",
+  {
+    description: "Satu akun channel + kesehatannya (scope channels:read).",
+    inputSchema: {
+      channelId: z.string().uuid().describe("Id akun channel (dari list_channels)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ channelId }) => run(() => client.getChannel(channelId)),
+);
+
+server.registerTool(
+  "list_whatsapp_templates",
+  {
+    description:
+      "Cermin template WhatsApp satu akun channel (scope whatsapp_templates:read): nama, bahasa, kategori, status persetujuan Meta, dan teks badan. channelAccountId wajib (dari list_channels, provider whatsapp). Hasil: { templates }.",
+    inputSchema: {
+      channelAccountId: z.string().uuid().describe("Id akun channel WhatsApp"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ channelAccountId }) =>
+    run(() => client.listWhatsAppTemplates({ channelAccountId })),
+);
+
+server.registerTool(
+  "list_knowledge_documents",
+  {
+    description:
+      "Daftar entri basis pengetahuan workspace (scope knowledge:read) beserta jumlah chunk retrieval tiap entri. Hasil: { documents }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listKnowledgeDocuments()),
+);
+
+server.registerTool(
+  "get_knowledge_document",
+  {
+    description: "Satu entri basis pengetahuan (scope knowledge:read).",
+    inputSchema: {
+      documentId: z.string().uuid().describe("Id dokumen (dari list_knowledge_documents)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ documentId }) => run(() => client.getKnowledgeDocument(documentId)),
+);
+
+server.registerTool(
+  "get_knowledge_stats",
+  {
+    description:
+      "Statistik basis pengetahuan (scope knowledge:read): total chunk, chunk yang sudah ter-embed, dan status pencarian semantik (aktif/tidak + provider/model).",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.getKnowledgeStats()),
 );
 
 await server.connect(new StdioServerTransport());

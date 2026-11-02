@@ -122,6 +122,7 @@ const EXPECTED_TOOLS = [
   "whoami",
   "list_contacts",
   "create_contact",
+  "update_contact",
   "list_conversations",
   "list_messages",
   "send_message",
@@ -130,6 +131,22 @@ const EXPECTED_TOOLS = [
   "list_comments",
   "hide_comment",
   "unhide_comment",
+  // Fase 15A: permukaan BACA baru (aturan sinkronisasi kontrak).
+  "list_broadcasts",
+  "get_broadcast",
+  "list_flows",
+  "get_flow",
+  "list_flow_templates",
+  "list_automations",
+  "get_automation",
+  "list_agents",
+  "get_agent",
+  "list_channels",
+  "get_channel",
+  "list_whatsapp_templates",
+  "list_knowledge_documents",
+  "get_knowledge_document",
+  "get_knowledge_stats",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -146,7 +163,7 @@ try {
   const tools = await client.listTools();
   const names = tools.tools.map((t) => t.name).sort();
   check(
-    "tools/list memuat 10 tools",
+    `tools/list memuat ${EXPECTED_TOOLS.length} tools`,
     JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()),
     names.join(","),
   );
@@ -159,11 +176,28 @@ try {
       hintOf("list_contacts") === true &&
       hintOf("list_products") === true &&
       hintOf("list_comments") === true &&
+      // Fase 15A: seluruh permukaan baru adalah BACA.
+      hintOf("list_broadcasts") === true &&
+      hintOf("get_broadcast") === true &&
+      hintOf("list_flows") === true &&
+      hintOf("get_flow") === true &&
+      hintOf("list_flow_templates") === true &&
+      hintOf("list_automations") === true &&
+      hintOf("get_automation") === true &&
+      hintOf("list_agents") === true &&
+      hintOf("get_agent") === true &&
+      hintOf("list_channels") === true &&
+      hintOf("get_channel") === true &&
+      hintOf("list_whatsapp_templates") === true &&
+      hintOf("list_knowledge_documents") === true &&
+      hintOf("get_knowledge_document") === true &&
+      hintOf("get_knowledge_stats") === true &&
       hintOf("create_contact") === false &&
+      hintOf("update_contact") === false &&
       hintOf("send_message") === false &&
       hintOf("hide_comment") === false &&
       hintOf("unhide_comment") === false,
-    `create_contact=${String(hintOf("create_contact"))} send_message=${String(hintOf("send_message"))} hide_comment=${String(hintOf("hide_comment"))}`,
+    `create_contact=${String(hintOf("create_contact"))} update_contact=${String(hintOf("update_contact"))} send_message=${String(hintOf("send_message"))} hide_comment=${String(hintOf("hide_comment"))}`,
   );
 
   const whoami = await call(client, "whoami");
@@ -259,6 +293,96 @@ try {
       resultText(rejectedHide).includes("MCP_ALLOW_WRITES"),
     resultText(rejectedHide).slice(0, 120),
   );
+
+  // Fase 15A: update_contact adalah tool TULIS baru — menolak di tier
+  // read-only sama seperti tool tulis lain.
+  const rejectedUpdate = await call(client, "update_contact", {
+    contactId: "00000000-0000-4000-8000-000000000000",
+    customFields: { kota: "Bandung" },
+  });
+  check(
+    "tanpa MCP_ALLOW_WRITES: update_contact DITOLAK (menyebut MCP_ALLOW_WRITES)",
+    rejectedUpdate.isError === true &&
+      resultText(rejectedUpdate).includes("MCP_ALLOW_WRITES"),
+    resultText(rejectedUpdate).slice(0, 120),
+  );
+
+  // Fase 15A: permukaan BACA baru — semua jalan di tier read-only.
+  const broadcastsResult = await call(client, "list_broadcasts", { limit: 5 });
+  const broadcastsList = resultJson<{ broadcasts: unknown[]; nextCursor: unknown }>(broadcastsResult);
+  check(
+    "list_broadcasts",
+    !broadcastsResult.isError && !!broadcastsList && Array.isArray(broadcastsList.broadcasts),
+    broadcastsList
+      ? `count=${broadcastsList.broadcasts.length}`
+      : resultText(broadcastsResult),
+  );
+
+  const flowsResult = await call(client, "list_flows", { limit: 5 });
+  const flowsList = resultJson<{ flows: unknown[]; nextCursor: unknown }>(flowsResult);
+  check(
+    "list_flows",
+    !flowsResult.isError && !!flowsList && Array.isArray(flowsList.flows),
+    flowsList ? `count=${flowsList.flows.length}` : resultText(flowsResult),
+  );
+
+  const templatesResult = await call(client, "list_flow_templates");
+  const templatesList = resultJson<{ templates: Array<{ slug: string }> }>(templatesResult);
+  check(
+    "list_flow_templates memuat katalog kontrak",
+    !templatesResult.isError &&
+      !!templatesList &&
+      templatesList.templates.some((t) => t.slug === "sambutan-tag-minat"),
+    templatesList
+      ? `count=${templatesList.templates.length}`
+      : resultText(templatesResult),
+  );
+
+  const automationsResult = await call(client, "list_automations");
+  const automationsList = resultJson<{ automations: unknown[] }>(automationsResult);
+  check(
+    "list_automations",
+    !automationsResult.isError && !!automationsList && Array.isArray(automationsList.automations),
+    automationsList
+      ? `count=${automationsList.automations.length}`
+      : resultText(automationsResult),
+  );
+
+  const agentsResult = await call(client, "list_agents");
+  const agentsList = resultJson<{ agents: unknown[] }>(agentsResult);
+  check(
+    "list_agents",
+    !agentsResult.isError && !!agentsList && Array.isArray(agentsList.agents),
+    agentsList ? `count=${agentsList.agents.length}` : resultText(agentsResult),
+  );
+
+  const channelsResult = await call(client, "list_channels");
+  const channelsList = resultJson<{ channels: unknown[] }>(channelsResult);
+  check(
+    "list_channels",
+    !channelsResult.isError && !!channelsList && Array.isArray(channelsList.channels),
+    channelsList
+      ? `count=${channelsList.channels.length}`
+      : resultText(channelsResult),
+  );
+
+  const kbDocsResult = await call(client, "list_knowledge_documents");
+  const kbDocsList = resultJson<{ documents: unknown[] }>(kbDocsResult);
+  check(
+    "list_knowledge_documents",
+    !kbDocsResult.isError && !!kbDocsList && Array.isArray(kbDocsList.documents),
+    kbDocsList ? `count=${kbDocsList.documents.length}` : resultText(kbDocsResult),
+  );
+
+  const kbStatsResult = await call(client, "get_knowledge_stats");
+  const kbStats = resultJson<{ totalChunks: number; embeddedChunks: number }>(kbStatsResult);
+  check(
+    "get_knowledge_stats",
+    !kbStatsResult.isError && !!kbStats && typeof kbStats.totalChunks === "number",
+    kbStats
+      ? `chunks=${kbStats.embeddedChunks}/${kbStats.totalChunks}`
+      : resultText(kbStatsResult),
+  );
 } finally {
   await client.close();
 }
@@ -294,6 +418,31 @@ try {
     "kontak baru muncul di list_contacts",
     !!found && !!created && found.contacts.some((c) => c.id === created.id),
   );
+
+  // Fase 15A: update_contact (tier TULIS) — customFields digabung per
+  // kunci: kota menimpa, sumber dari create_contact dipertahankan.
+  if (created) {
+    const updatedResult = await call(writer, "update_contact", {
+      contactId: created.id,
+      customFields: { kota: "Jakarta" },
+    });
+    const updated = resultJson<{
+      id: string;
+      customFields?: Record<string, unknown>;
+    }>(updatedResult);
+    check(
+      "MCP_ALLOW_WRITES=1: update_contact customFields gabung per kunci (Fase 15A)",
+      !updatedResult.isError &&
+        !!updated &&
+        updated.customFields?.kota === "Jakarta" &&
+        updated.customFields?.sumber === "verify-mcp",
+      updated
+        ? `customFields=${JSON.stringify(updated.customFields)}`
+        : resultText(updatedResult),
+    );
+  } else {
+    check("MCP_ALLOW_WRITES=1: update_contact customFields gabung per kunci (Fase 15A)", false, "create_contact gagal — tidak ada kontak untuk diubah");
+  }
 
   const convsW = resultJson<{ conversations: Array<{ id: string }> }>(
     await call(writer, "list_conversations"),
