@@ -96,6 +96,9 @@ const LogsPage = lazy(() =>
 const AuditPage = lazy(() =>
   import("./pages/AuditPage").then((m) => ({ default: m.AuditPage })),
 );
+const GrowthPage = lazy(() =>
+  import("./pages/GrowthPage").then((m) => ({ default: m.GrowthPage })),
+);
 
 // Badge navigasi berasal dari API workspace aktif — query yang sama untuk
 // desktop & mobile (§10.1), registry tidak diubah: unread Inbox dari API
@@ -333,6 +336,8 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           )
         ) : activeId === "products" ? (
           <ProductsPage t={t} locale={locale} />
+        ) : activeId === "growth" ? (
+          <GrowthPage t={t} locale={locale} />
         ) : activeId === "settings" ? (
           <SettingsPage t={t} locale={locale} />
         ) : activeId === "logs" ? (

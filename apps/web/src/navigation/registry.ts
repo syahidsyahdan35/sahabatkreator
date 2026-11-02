@@ -12,7 +12,7 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
   | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more"
-  | "list" | "audit" | "flow";
+  | "list" | "audit" | "flow" | "growth";
 
 export interface NavItem {
   id: string;
@@ -42,6 +42,10 @@ export const NAV_REGISTRY: NavItem[] = [
   // dialihkan App ke /agents?tab=knowledge. Order desktop/more item di
   // bawah ini sengaja TIDAK direnumber — celah angka tidak berpengaruh
   // pada urutan render (semua daftar di-sort).
+  // Growth Tools (Fase 13B): tautan publik per channel + landing
+  // pemilih channel + analitik — mengisi celah order peninggalan
+  // Knowledge (desktop 8 / more 4).
+  { id: "growth",      labelKey: "nav.growth",      icon: "growth",    route: "/growth",      mobile: { slot: "more" }, order: { desktop: 8,  more: 4 } },
   { id: "products",    labelKey: "nav.products",    icon: "bag",       route: "/products",    mobile: { slot: "more" }, order: { desktop: 9,  more: 5 } },
   { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
   { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },

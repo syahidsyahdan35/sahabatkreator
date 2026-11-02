@@ -18,10 +18,15 @@ interface WebchatDemoPageProps {
  * workspace bisa mencoba rantai pengunjung sungguhan dari browser.
  */
 export function WebchatDemoPage({ t, locale }: WebchatDemoPageProps) {
-  const siteKey =
+  const params =
     typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("key")
+      ? new URLSearchParams(window.location.search)
       : null;
+  const siteKey = params?.get("key") ?? null;
+  // Slug atribusi growth link (Fase 13B): /go/<slug> untuk channel
+  // webchat mengarahkan ke halaman ini dengan ?src=<slug>; teruskan ke
+  // widget agar sesi yang dibuka teratribusi ke tautan itu.
+  const src = params?.get("src") ?? null;
 
   useEffect(() => {
     if (!siteKey) return;
@@ -29,12 +34,13 @@ export function WebchatDemoPage({ t, locale }: WebchatDemoPageProps) {
     script.src = "/widget.js";
     script.dataset.siteKey = siteKey;
     script.dataset.lang = locale;
+    if (src) script.dataset.src = src;
     script.async = true;
     document.body.appendChild(script);
     return () => {
       script.remove();
     };
-  }, [siteKey, locale]);
+  }, [siteKey, locale, src]);
 
   return (
     <main className="mx-auto min-h-screen w-full max-w-2xl bg-bg px-4 py-10 text-ink">

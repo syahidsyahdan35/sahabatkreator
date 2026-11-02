@@ -50,6 +50,7 @@ const CATEGORY_VALUES = [
   "comment",
   "flow",
   "saved_reply",
+  "growth_link",
   "kb_document",
 ] as const;
 type CategoryValue = (typeof CATEGORY_VALUES)[number];
@@ -73,6 +74,7 @@ const CATEGORY_LABEL_KEYS: Record<CategoryValue, TranslationKey> = {
   comment: "audit.categoryComment",
   flow: "audit.categoryFlow",
   saved_reply: "audit.categorySavedReply",
+  growth_link: "audit.categoryGrowthLink",
   kb_document: "audit.categoryKbDocument",
 };
 
@@ -146,6 +148,9 @@ const ACTION_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   "saved_reply.created": "audit.actionSavedReplyCreated",
   "saved_reply.updated": "audit.actionSavedReplyUpdated",
   "saved_reply.deleted": "audit.actionSavedReplyDeleted",
+  "growth_link.created": "audit.actionGrowthLinkCreated",
+  "growth_link.updated": "audit.actionGrowthLinkUpdated",
+  "growth_link.deleted": "audit.actionGrowthLinkDeleted",
   "kb_document.uploaded": "audit.actionKbDocumentUploaded",
   "kb_document.deleted": "audit.actionKbDocumentDeleted",
   "conversation.assigned": "audit.actionConversationAssigned",
@@ -179,6 +184,7 @@ const TARGET_LABEL_KEYS: Partial<Record<string, TranslationKey>> = {
   flow: "audit.targetFlow",
   flow_run: "audit.targetFlowRun",
   saved_reply: "audit.targetSavedReply",
+  growth_link: "audit.targetGrowthLink",
   kb_document: "audit.targetKbDocument",
   invitation: "audit.targetInvitation",
   member: "audit.targetMember",

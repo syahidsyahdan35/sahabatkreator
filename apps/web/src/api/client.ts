@@ -48,6 +48,11 @@ import type {
   CreateAutomationRequest,
   CreateContactRequest,
   CreateFlowRequest,
+  CreateGrowthLinkRequest,
+  GrowthLinkAttributedContactsResponse,
+  GrowthLinkListResponse,
+  GrowthLinkResponse,
+  UpdateGrowthLinkRequest,
   CreateSavedReplyRequest,
   SavedReplyListResponse,
   SavedReplyResponse,
@@ -1514,6 +1519,53 @@ export const api = {
       const qs = days !== undefined ? `?days=${days}` : "";
       return request<AiUsageReportResponse>(
         `/api/tenants/${tenantId}/analytics/ai-usage${qs}`,
+        { method: "GET" },
+      );
+    },
+  },
+  growthLinks: {
+    /** GET /api/tenants/:tenantId/growth-links → tautan + statistik (Fase 13B). */
+    list(tenantId: string): Promise<GrowthLinkListResponse> {
+      return request<GrowthLinkListResponse>(
+        `/api/tenants/${tenantId}/growth-links`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/growth-links → 201 tautan baru (owner/admin). */
+    create(
+      tenantId: string,
+      input: CreateGrowthLinkRequest,
+    ): Promise<GrowthLinkResponse> {
+      return request<GrowthLinkResponse>(
+        `/api/tenants/${tenantId}/growth-links`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/growth-links/:id → edit parsial (owner/admin). */
+    update(
+      tenantId: string,
+      linkId: string,
+      input: UpdateGrowthLinkRequest,
+    ): Promise<GrowthLinkResponse> {
+      return request<GrowthLinkResponse>(
+        `/api/tenants/${tenantId}/growth-links/${linkId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/growth-links/:id → hapus + riwayat eventnya (owner/admin). */
+    async remove(tenantId: string, linkId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/growth-links/${linkId}`,
+        { method: "DELETE" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/growth-links/:id/contacts → kontak teratribusi terakhir. */
+    attributedContacts(
+      tenantId: string,
+      linkId: string,
+    ): Promise<GrowthLinkAttributedContactsResponse> {
+      return request<GrowthLinkAttributedContactsResponse>(
+        `/api/tenants/${tenantId}/growth-links/${linkId}/contacts`,
         { method: "GET" },
       );
     },

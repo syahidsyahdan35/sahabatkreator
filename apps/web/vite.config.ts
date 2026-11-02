@@ -32,6 +32,12 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      // Fase 13B: tautan growth publik /go/:slug hidup di API (302 ke
+      // platform / landing picker server-rendered) — teruskan utuh.
+      "/go": {
+        target: "http://127.0.0.1:3101",
+        changeOrigin: true,
+      },
     },
   },
   preview: {
@@ -70,6 +76,13 @@ export default defineConfig({
         target: "http://127.0.0.1:3103",
         changeOrigin: true,
         ws: true,
+      },
+      // Fase 13B: tautan growth publik /go/:slug hidup di API (302 ke
+      // platform / landing picker server-rendered) — teruskan utuh
+      // (API melayani route yang sama di root, tanpa prefix /api).
+      "/go": {
+        target: "http://127.0.0.1:3101",
+        changeOrigin: true,
       },
     },
   },

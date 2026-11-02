@@ -101,6 +101,12 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.KB_DOCUMENT_TOO_LARGE");
     case "AGENT_PROVIDER_ERROR":
       return t("errors.AGENT_PROVIDER_ERROR");
+    case "GROWTH_LINK_SLUG_TAKEN":
+      return t("errors.GROWTH_LINK_SLUG_TAKEN");
+    case "GROWTH_LINK_CHANNEL_INVALID":
+      return t("errors.GROWTH_LINK_CHANNEL_INVALID");
+    case "GROWTH_LINK_TARGET_UNAVAILABLE":
+      return t("errors.GROWTH_LINK_TARGET_UNAVAILABLE");
     case "ASSIGNEE_NOT_MEMBER":
       return t("errors.ASSIGNEE_NOT_MEMBER");
     case "INVITATION_EXPIRED":

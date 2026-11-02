@@ -127,6 +127,10 @@ interface SessionResponse {
     script.dataset.apiBase || new URL(script.src).origin
   ).replace(/\/$/, "");
   const title = script.dataset.title || t.defaultTitle;
+  // Slug atribusi growth link (Fase 13B): halaman chat yang dibuka dari
+  // tautan /go/<slug> meneruskannya sebagai data-src; widget mengirim-
+  // kannya pada pembukaan sesi agar kontak teratribusi ke tautan itu.
+  const src = script.dataset.src?.trim() || null;
 
   const storeKey = `sk_webchat_${siteKey}`;
   interface Stored {
@@ -357,7 +361,7 @@ interface SessionResponse {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ visitorId }),
+          body: JSON.stringify({ visitorId, ...(src ? { src } : {}) }),
         },
       );
       if (!res.ok) throw new Error(`session failed: ${res.status}`);
