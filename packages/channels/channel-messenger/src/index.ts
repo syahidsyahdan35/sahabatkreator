@@ -39,15 +39,23 @@ export class MetaGraphError extends Error {
   readonly status: number;
   /** Kode error numerik Graph (mis. 190 token tidak valid, 551 jendela pesan); null bila tak ada. */
   readonly graphCode: number | null;
+  /** Subkode error Graph (mis. 36003 untuk kegagalan exchange OAuth); null bila tak ada. */
+  readonly graphSubcode: number | null;
   readonly description: string;
 
-  constructor(status: number, graphCode: number | null, description: string) {
+  constructor(
+    status: number,
+    graphCode: number | null,
+    description: string,
+    graphSubcode: number | null = null,
+  ) {
     super(
       `Meta Graph API error (HTTP ${status}${graphCode !== null ? `, code ${graphCode}` : ""}): ${description}`,
     );
     this.name = "MetaGraphError";
     this.status = status;
     this.graphCode = graphCode;
+    this.graphSubcode = graphSubcode;
     this.description = description;
   }
 }
@@ -135,11 +143,20 @@ export class MetaGraphClient {
     }
     const graphCode =
       typeof body.error?.code === "number" ? body.error.code : null;
+    const graphSubcode =
+      typeof body.error?.error_subcode === "number"
+        ? body.error.error_subcode
+        : null;
     const description =
       typeof body.error?.message === "string"
         ? body.error.message.slice(0, 200)
         : "meta_graph_error";
-    return new MetaGraphError(response.status, graphCode, description);
+    return new MetaGraphError(
+      response.status,
+      graphCode,
+      description,
+      graphSubcode,
+    );
   }
 
   private async getJson<T>(path: string): Promise<T> {
@@ -251,9 +268,11 @@ export class MetaGraphClient {
   // - "Manually Build a Login Flow" + "Get Long-Lived Tokens" (Messenger):
   //   code → user token → fb_exchange_token → long-lived → /me/accounts.
   // - Instagram API with Unified Login (get-started + authentication):
-  //   exchange TANPA redirect_uri (persis contoh dokumennya) menghasilkan
-  //   Business Integration System User Access Token (SUAT); aset dari
-  //   /me/assigned_instagram_accounts; konteks portfolio dari
+  //   exchange DENGAN redirect_uri yang identik dengan dialog (Hotfix
+  //   7D.2 — asumsi awal "tanpa redirect_uri" gugur oleh bukti live:
+  //   Graph menolak code dengan error 100 bila redirect_uri absen)
+  //   menghasilkan Business Integration System User Access Token (SUAT);
+  //   aset dari /me/assigned_instagram_accounts; konteks portfolio dari
   //   /me?fields=client_business_id.
   // - WhatsApp Embedded Signup (advanced implementation): exchange yang
   //   sama menghasilkan token bisnis; WABA ter-assign ditemukan dari

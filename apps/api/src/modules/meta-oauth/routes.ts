@@ -641,8 +641,15 @@ export function createMetaOAuthRoutes(
           expiresAt: Date.now() + OAUTH_TTL_SECONDS * 1000,
         };
       } else if (state.provider === "instagram") {
-        // Unified Login: exchange TANPA redirect_uri (persis dokumen).
-        const suat = await anon.exchangeOAuthCode({ ...credentials, code });
+        // Unified Login: exchange DENGAN redirect_uri yang identik dengan
+        // dialog (Hotfix 7D.2 — asumsi 7D "config-flow tanpa redirect_uri"
+        // GUGUR oleh bukti live: Graph menolak code dengan error 100
+        // "Error validating verification code" bila redirect_uri absen).
+        const suat = await anon.exchangeOAuthCode({
+          ...credentials,
+          code,
+          redirectUri,
+        });
         const client = graphClient(suat.accessToken);
         const accounts = await client.getAssignedInstagramAccounts();
         const clientBusinessId = await client
@@ -668,9 +675,13 @@ export function createMetaOAuthRoutes(
       } else {
         // WhatsApp Embedded Signup: token bisnis → WABA ter-assign →
         // nomor per WABA (penemuan di server, bukan event JS SDK).
+        // Exchange membawa redirect_uri yang sama seperti Messenger &
+        // Instagram (Hotfix 7D.2 — dialog ketiganya ber-redirect_uri,
+        // jadi penukarannya pun wajib identik).
         const businessToken = await anon.exchangeOAuthCode({
           ...credentials,
           code,
+          redirectUri,
         });
         const client = graphClient(businessToken.accessToken);
         const wabas = await client.getAssignedWhatsAppBusinessAccounts();
@@ -699,10 +710,20 @@ export function createMetaOAuthRoutes(
         };
       }
     } catch (err) {
-      // Hanya label tahap + kode Graph yang dicatat — token tidak pernah.
+      // Hanya label tahap + kode/subkode/pesan resmi Graph yang dicatat
+      // (Hotfix 7D.2: pesan + subcode membuat kegagalan berikutnya bisa
+      // didiagnosis dari log saja). Auth code, token, dan secret TIDAK
+      // PERNAH dicatat — pesan resmi Graph tidak memuat ketiganya.
+      const detail =
+        err instanceof MetaGraphError
+          ? `graph ${err.graphCode ?? err.status}` +
+            (err.graphSubcode !== null
+              ? ` subcode ${err.graphSubcode}`
+              : "") +
+            `: ${err.description}`
+          : "non-graph error";
       console.error(
-        `[meta-oauth] exchange/discovery gagal (provider ${state.provider})`,
-        err instanceof MetaGraphError ? `graph ${err.graphCode ?? err.status}` : "",
+        `[meta-oauth] exchange/discovery gagal (provider ${state.provider}) ${detail}`,
       );
       return fail("META_OAUTH_EXCHANGE_FAILED");
     }

@@ -4652,3 +4652,39 @@ di bawah).
   (3) jendela batch adalah konstanta env per-deployment, bukan
   per-tenant; (4) spintax tanpa nesting dan tanpa bobot pilihan —
   kandidat lanjutan bila dibutuhkan.
+
+## Update Hotfix 7D.2 — Exchange OAuth Meta wajib redirect_uri (2026-11-02)
+
+Wiring live Meta oleh user menemukan kegagalan nyata: callback
+Instagram berulang berakhir `META_OAUTH_EXCHANGE_FAILED` dengan log
+`[meta-oauth] exchange/discovery gagal (provider instagram) graph 100`
+(Graph code 100 = parameter tidak valid; panel Meta terisi penuh oleh
+user 18:31–18:39 +07 hari yang sama, jadi bukan soal konfigurasi
+kosong).
+
+- **Akar masalah — asumsi 7D GUGUR.** Dokumentasi contoh Unified Login
+  yang dibaca pada Fase 7D menyiratkan exchange config-flow tanpa
+  `redirect_uri`, dan implementasi 7D mengikutinya untuk cabang
+  instagram & whatsapp (`exchangeOAuthCode` dipanggil tanpa
+  `redirectUri`), sedangkan dialog OAuth untuk KETIGA provider
+  dibangun dengan `redirect_uri` yang sama
+  (`https://botara.my.id/api/meta/oauth/callback`). Aturan Meta yang
+  terbukti live: code yang diterbitkan dialog ber-redirect_uri wajib
+  ditukar dengan redirect_uri yang identik; tanpa itu Graph menolak
+  dengan error 100 "Error validating verification code".
+- **Perilaku baru.** Ketiga provider kini menukar code DENGAN
+  `redirectUri` callback yang sama (`apps/api/src/modules/meta-oauth/
+  routes.ts` — cabang instagram + whatsapp diperbaiki; messenger
+  sudah benar sejak 7D). Komentar asumsi lama di routes.ts dan di
+  `packages/channels/channel-messenger` diperbarui agar tidak
+  menyesatkan pembaca berikutnya.
+- **Logging diagnosis.** `MetaGraphError` kini membawa `graphSubcode`
+  (ditangkap dari `error.error_subcode` pada respons Graph), dan log
+  kegagalan exchange/discovery mencatat kode + subcode + pesan resmi
+  Graph — kegagalan berikutnya terdiagnosis dari log saja. Auth code,
+  token, dan secret TIDAK PERNAH dicatat (pesan resmi Graph tidak
+  memuat ketiganya).
+- **Deploy & batas.** Hanya dist api yang dibangun ulang dan service
+  api yang direstart; service lain tidak disentuh. Pembuktian akhir
+  adalah retry connect oleh user — OAuth live dengan dialog Meta asli
+  tidak bisa dibuktikan dari mock/rantai lokal.
