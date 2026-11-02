@@ -38,6 +38,10 @@ import {
   createRealtimePublisher,
   type RealtimePublisher,
 } from "@sahabat-kreator/queue";
+import {
+  getProviderSecret,
+  type PlatformSettingsOptions,
+} from "@sahabat-kreator/core";
 
 const env = loadEnv();
 const startedAt = Date.now();
@@ -87,6 +91,24 @@ const realtimePublisher: RealtimePublisher | null = env.REDIS_URL
   : null;
 const webchatOpts = { secret: env.WEBCHAT_SECRET, publisher: realtimePublisher };
 
+// Opsi resolver Panel Admin Platform (Fase 6C) — SATU objek dipakai
+// bersama modul admin, meta, dan penanda channels: cache resolver
+// ter-bucket per identitas objek, jadi berbagi objek = berbagi semantik
+// env proses ini + invalidasi set/clear berlaku untuk semua pemakai.
+// Env hanya fallback per kunci; sumber utama nilai panel terenkripsi.
+const platformOptions: PlatformSettingsOptions = {
+  masterSecret: env.PLATFORM_SETTINGS_SECRET,
+  env: {
+    openrouter_api_key: env.OPENROUTER_API_KEY,
+    openrouter_model: env.OPENROUTER_MODEL,
+    r2_access_key_id: env.R2_ACCESS_KEY_ID,
+    r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
+    // Fase 7A.1: App Secret Meta ikut dikelola panel; env placeholder
+    // staging tetap fallback sampai pemilik mengisi panel.
+    meta_app_secret: env.META_APP_SECRET,
+  },
+};
+
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...
@@ -103,16 +125,24 @@ routes.route(
     publicBaseUrl: env.BETTER_AUTH_URL,
     metaApiBase: env.META_API_BASE,
     metaWebhookVerifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
-    metaAppSecretConfigured: Boolean(env.META_APP_SECRET),
+    // Fase 7A.1: penanda "app secret terkonfigurasi" menyelesaikan nilai
+    // efektif panel → env (bukan env semata) — boolean saja yang keluar.
+    metaAppSecretConfigured: async () => {
+      if (!authBundle) return Boolean(env.META_APP_SECRET);
+      return Boolean(
+        await getProviderSecret(authBundle.db, "meta_app_secret", platformOptions),
+      );
+    },
   }),
 );
 // Modul meta publik (Fase 7A) — webhook TUNGGAL Meta /meta/webhook untuk
 // Messenger + Instagram: handshake verify token + event bertanda tangan
 // HMAC app secret (fail-closed 503 META_NOT_CONFIGURED tanpa secret).
+// App secret diselesaikan panel → env per request (Fase 7A.1).
 routes.route(
   "/",
   createMetaRoutes(authBundle, realtimePublisher, {
-    appSecret: env.META_APP_SECRET,
+    platform: platformOptions,
     verifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
     channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
     metaApiBase: env.META_API_BASE,
@@ -158,15 +188,7 @@ routes.route(
   "/",
   createAdminRoutes(authBundle, {
     platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
-    platform: {
-      masterSecret: env.PLATFORM_SETTINGS_SECRET,
-      env: {
-        openrouter_api_key: env.OPENROUTER_API_KEY,
-        openrouter_model: env.OPENROUTER_MODEL,
-        r2_access_key_id: env.R2_ACCESS_KEY_ID,
-        r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
-      },
-    },
+    platform: platformOptions,
     r2: {
       accountId: R2_ACCOUNT_ID,
       endpoint: R2_ENDPOINT,

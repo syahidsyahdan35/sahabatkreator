@@ -1005,6 +1005,10 @@ export const PlatformSettingKeySchema = z.enum([
   "openrouter_model",
   "r2_access_key_id",
   "r2_secret_access_key",
+  // Fase 7A.1: App Secret Meta App platform — memverifikasi tanda tangan
+  // webhook Instagram/Messenger. Sengaja TANPA uji koneksi: Meta tidak
+  // menyediakan validasi app secret yang berdiri sendiri.
+  "meta_app_secret",
 ]);
 export type PlatformSettingKey = z.infer<typeof PlatformSettingKeySchema>;
 

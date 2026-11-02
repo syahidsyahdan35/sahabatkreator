@@ -2,10 +2,12 @@ import { Hono } from "hono";
 import {
   decryptChannelSecret,
   fetchAndStoreMetaContactProfile,
+  getProviderSecret,
   recordMetaInboundMessage,
   resolveMetaAccountByExternalId,
   type MetaAccountRef,
   type MetaProvider,
+  type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import {
   parseMetaWebhookEvents,
@@ -27,10 +29,13 @@ import { apiError, type AppVariables } from "../../http";
  * 1. Handshake: `hub.verify_token` harus sama persis dengan env
  *    `META_WEBHOOK_VERIFY_TOKEN` (nilai yang KITA tentukan dan ditempel
  *    pemilik platform ke Meta App). Selain itu 403.
- * 2. Event: header `X-Hub-Signature-256` = HMAC-SHA256(raw body, env
- *    `META_APP_SECRET`). App secret belum diset → 503 META_NOT_CONFIGURED
- *    (fail-closed: tanpa secret, tidak ada payload yang bisa dipercaya);
- *    tanda tangan salah → 401 META_SIGNATURE_INVALID.
+ * 2. Event: header `X-Hub-Signature-256` = HMAC-SHA256(raw body, App
+ *    Secret Meta). Secret diselesaikan panel → env (Fase 7A.1, resolver
+ *    Panel Admin 6C: panel menang, env `META_APP_SECRET` fallback, cache
+ *    ±60 dtk — perubahan panel berlaku TANPA restart). App secret belum
+ *    diset di mana pun → 503 META_NOT_CONFIGURED (fail-closed: tanpa
+ *    secret, tidak ada payload yang bisa dipercaya); tanda tangan salah
+ *    → 401 META_SIGNATURE_INVALID.
  * 3. Sesudah tanda tangan lolos, akun diselesaikan dari `entry.id`
  *    payload per (provider, external_id) lewat lengan RLS 0020;
  *    objek `page` → messenger, `instagram` → instagram. Akun tak
@@ -45,7 +50,17 @@ import { apiError, type AppVariables } from "../../http";
  * Graph kontaknya (nama + foto, pola Fase 6D) secara fire-and-forget.
  */
 export interface MetaModuleOptions {
-  /** Secret Meta App platform (env META_APP_SECRET) untuk verifikasi tanda tangan. */
+  /**
+   * Opsi resolver Panel Admin (Fase 7A.1): bila ada, App Secret untuk
+   * verifikasi tanda tangan diselesaikan per request lewat core
+   * `getProviderSecret(db, "meta_app_secret", platform)` — panel → env
+   * `META_APP_SECRET` → null, cache ±60 dtk per proses.
+   */
+  platform?: PlatformSettingsOptions;
+  /**
+   * Secret statis (env META_APP_SECRET) — hanya dipakai bila `platform`
+   * tidak diberikan (pemanggil langsung/uji lama).
+   */
   appSecret?: string;
   /** Verify token handshake (env META_WEBHOOK_VERIFY_TOKEN). */
   verifyToken?: string;
@@ -86,7 +101,13 @@ export function createMetaRoutes(
     if (!bundle) {
       return apiError(c, 503, "INTERNAL_ERROR", "Database is not configured");
     }
-    if (!opts.appSecret) {
+    // Secret efektif per request (Fase 7A.1): resolver panel → env dengan
+    // cache ±60 dtk — nilai panel terbaru dipakai tanpa restart; set/clear
+    // dari Panel Admin di proses ini membuang cache-nya seketika.
+    const appSecret = opts.platform
+      ? await getProviderSecret(bundle.db, "meta_app_secret", opts.platform)
+      : opts.appSecret;
+    if (!appSecret) {
       return apiError(
         c,
         503,
@@ -96,7 +117,7 @@ export function createMetaRoutes(
     }
     const rawBody = await c.req.text();
     const signature = c.req.header("x-hub-signature-256");
-    if (!verifyMetaWebhookSignature(rawBody, signature, opts.appSecret)) {
+    if (!verifyMetaWebhookSignature(rawBody, signature, appSecret)) {
       return apiError(
         c,
         401,

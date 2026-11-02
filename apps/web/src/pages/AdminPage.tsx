@@ -32,16 +32,19 @@ const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
   openrouter_model: "admin.openrouterModelLabel",
   r2_access_key_id: "admin.r2AccessKeyIdLabel",
   r2_secret_access_key: "admin.r2SecretAccessKeyLabel",
+  meta_app_secret: "admin.metaAppSecretLabel",
 };
 
 /**
  * Halaman Panel Admin Platform (Fase 6C) — HANYA dirender untuk user
  * ber-flag isPlatformAdmin (menu pun disembunyikan untuk yang lain, dan
  * API menjawab 404 untuk non-admin). Mengelola kredensial provider milik
- * platform per grup (OpenRouter / R2): status per kunci (chip sumber
+ * platform per grup (OpenRouter / R2 / Meta): status per kunci (chip sumber
  * Panel/Env/Belum diatur + jejak ubah), field password untuk nilai baru
  * (nilai tersimpan TIDAK PERNAH dirender kembali — field selalu mulai
  * kosong), tombol Simpan / Hapus (kembali ke env) / Uji koneksi.
+ * Grup Meta (Fase 7A.1) hanya berisi App Secret dan SENGAJA tanpa tombol
+ * Uji: Meta tidak menyediakan validasi app secret yang berdiri sendiri.
  */
 export function AdminPage({ t, locale }: AdminPageProps) {
   const [statuses, setStatuses] = useState<PlatformSettingStatus[]>([]);
@@ -159,6 +162,20 @@ export function AdminPage({ t, locale }: AdminPageProps) {
             locale={locale}
             settingKey="r2_secret_access_key"
             status={byKey("r2_secret_access_key")}
+            onStatusChanged={onStatusChanged}
+          />
+        </div>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="text-base font-semibold text-ink">{t("admin.metaTitle")}</h2>
+        <p className="mt-1 max-w-2xl text-sm text-muted">{t("admin.metaBody")}</p>
+        <div className="mt-4 space-y-3">
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="meta_app_secret"
+            status={byKey("meta_app_secret")}
             onStatusChanged={onStatusChanged}
           />
         </div>

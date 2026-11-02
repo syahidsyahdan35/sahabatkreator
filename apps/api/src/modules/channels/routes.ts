@@ -204,8 +204,13 @@ export interface ChannelsModuleOptions {
    * meta-webhook-info agar bisa ditempel ke dashboard Meta App.
    */
   metaWebhookVerifyToken?: string;
-  /** Apakah env META_APP_SECRET sudah diset (boolean saja — nilainya tidak pernah masuk modul ini). */
-  metaAppSecretConfigured?: boolean;
+  /**
+   * Apakah App Secret Meta sudah terkonfigurasi — boolean saja, nilainya
+   * tidak pernah masuk modul ini. Boleh berupa fungsi resolver async
+   * (Fase 7A.1: efektif panel → env, bukan env semata) agar panel info
+   * webhook tidak menuduh "belum diset" saat pemilik sudah mengisi panel.
+   */
+  metaAppSecretConfigured?: boolean | (() => Promise<boolean>);
 }
 
 /**
@@ -425,10 +430,14 @@ export function createChannelsRoutes(
       return apiError(c, 403, "FORBIDDEN", "Only workspace owners and admins can view Meta webhook settings");
     }
     const baseUrl = (opts.publicBaseUrl ?? "").replace(/\/+$/, "");
+    const appSecretConfigured =
+      typeof opts.metaAppSecretConfigured === "function"
+        ? await opts.metaAppSecretConfigured()
+        : opts.metaAppSecretConfigured ?? false;
     const body = MetaWebhookInfoResponseSchema.parse({
       webhookUrl: `${baseUrl}/api/meta/webhook`,
       verifyToken: opts.metaWebhookVerifyToken ?? null,
-      appSecretConfigured: opts.metaAppSecretConfigured ?? false,
+      appSecretConfigured,
     });
     return c.json(body);
   });

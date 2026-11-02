@@ -14,7 +14,7 @@ import type { DbTx } from "./tx";
 /**
  * Panel Admin Platform (Fase 6C) — kredensial provider milik PLATFORM.
  *
- * Usulan user: kunci provider (OpenRouter, R2) diisi pemilik platform
+ * Usulan user: kunci provider (OpenRouter, R2, Meta) diisi pemilik platform
  * lewat dashboard admin, env hanya fallback. Modul ini adalah satu-satunya
  * jalan aplikasi menyentuh tabel `platform_settings`:
  *
@@ -45,6 +45,10 @@ export const PLATFORM_SETTING_KEYS = [
   "openrouter_model",
   "r2_access_key_id",
   "r2_secret_access_key",
+  // Fase 7A.1: App Secret Meta App platform (verifikasi tanda tangan
+  // webhook Meta) ikut dikelola panel; env META_APP_SECRET hanya fallback
+  // (di staging saat ini placeholder acak sampai pemilik mengisi panel).
+  "meta_app_secret",
 ] as const;
 
 export type PlatformSettingKey = (typeof PLATFORM_SETTING_KEYS)[number];

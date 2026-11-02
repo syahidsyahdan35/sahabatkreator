@@ -50,9 +50,17 @@ const KEY_MAX_LENGTH: Record<PlatformSettingKey, number> = {
   openrouter_model: 128,
   r2_access_key_id: 512,
   r2_secret_access_key: 512,
+  meta_app_secret: 512,
 };
 
-/** Kunci yang punya uji koneksi (model adalah teks bebas — tidak diuji). */
+/**
+ * Kunci yang punya uji koneksi (model adalah teks bebas — tidak diuji).
+ * `meta_app_secret` SENGAJA tidak diuji (Fase 7A.1): Meta tidak menyediakan
+ * panggilan yang memvalidasi app secret secara berdiri sendiri
+ * (debug_token butuh access token), jadi tombol uji di sini hanya akan
+ * jadi uji palsu. Kebenaran nilainya terbukti dari tanda tangan webhook
+ * yang lolos/gagal — persis seperti pemakaiannya.
+ */
 const TESTABLE_KEYS: ReadonlySet<PlatformSettingKey> = new Set([
   "openrouter_api_key",
   "r2_access_key_id",
