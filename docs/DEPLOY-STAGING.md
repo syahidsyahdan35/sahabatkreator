@@ -1956,3 +1956,102 @@ bundle lokal terkonfirmasi tersaji di 127.0.0.1:5180).
 - Segmen URL inbox hanya satu tingkat (`/inbox/:conversationId`);
   sub-path lebih dalam diperlakukan sebagai inbox tanpa pilihan id
   yang valid dan akan dibersihkan lewat jalur 404 yang sama.
+
+## Update Fase 6C — Panel Admin Platform untuk kredensial provider (2026-11-02)
+
+Pemilik platform kini mengelola kunci provider (OpenRouter & Cloudflare
+R2) dari dashboard, bukan lewat chat/env manual (usulan user sendiri).
+Kunci ASLI diisi sendiri oleh pemilik lewat panel; repo & server tidak
+pernah melihatnya di luar panel.
+
+- **Siapa admin (v1)**: allowlist env `PLATFORM_ADMIN_EMAILS`
+  (koma-terpisah, case-insensitive) dicocokkan ke email user sesi.
+  Endpoint `/api/admin/*` untuk non-admin → **404** (pola non-member).
+  Respons get-session memuat flag tampilan `isPlatformAdmin` (plugin
+  customSession Better Auth); UI menyembunyikan item navigasi "Admin"
+  (path `/admin`, registry 6E) untuk non-admin. **Menambah admin =
+  edit `PLATFORM_ADMIN_EMAILS` di `.env.staging` + restart api.**
+  Allowlist staging saat ini: hanya email pemilik platform.
+- **Penyimpanan**: migrasi **0022** — tabel `platform_settings`
+  (key PK, `value_encrypted`, `updated_by`, timestamps). Nilai
+  terenkripsi AES-256-GCM envelope `v1:` yang sama dengan token channel,
+  kunci induk env BARU **`PLATFORM_SETTINGS_SECRET`** (32 byte base64,
+  digenerate DI SERVER, hanya di `.env.staging` 600 — `.env.staging`
+  kini 11 variabel). RLS aktif fail-closed; akses aplikasi hanya lewat
+  flag transaksi lokal `app.platform_settings='admin'` (pola system_relay
+  migrasi 0008) di dalam service core. `audit_logs.tenant_id` kini
+  NULLABLE + policy `platform_audit`: baris audit platform (tenant_id
+  NULL) hanya terlihat dalam transaksi ber-flag admin yang sama; konteks
+  tenant tidak pernah melihatnya. Staging kini **32 tabel / 35 policy**.
+  Kunci yang dikelola: `openrouter_api_key`, `openrouter_model`,
+  `r2_access_key_id`, `r2_secret_access_key`. Account ID, endpoint, dan
+  nama bucket R2 adalah konfigurasi publik (konstanta
+  `packages/config`) dan tampil sebagai info tetap; bucket aktif =
+  env `R2_BUCKET` bila di-set, selain itu bucket **staging** (deployment
+  production WAJIB set `R2_BUCKET=sahabat-kreator-prod`).
+- **Resolusi (persis kata user: panel dulu, env fallback)**: core
+  `getProviderSecret(key)` → nilai panel terdekripsi, else env
+  (`OPENROUTER_API_KEY`/`OPENROUTER_MODEL`/`R2_ACCESS_KEY_ID`/
+  `R2_SECRET_ACCESS_KEY`), else null. Cache per proses TTL **60 detik**
+  (`PLATFORM_SETTINGS_CACHE_TTL_MS`); set/clear menginvalidasi entri di
+  proses yang sama — perubahan panel berlaku ≤ ±60 dtk di proses lain
+  tanpa restart. GET status hanya mengembalikan
+  `{key, isSet, source: 'panel'|'env'|null, updatedAt, updatedBy}` —
+  TIDAK PERNAH nilai/potongan/panjang nilai. Tanpa
+  `PLATFORM_SETTINGS_SECRET`, resolver jatuh ke env-only dan tulis
+  panel ditolak 503.
+- **Pemakaian nyata**: worker memilih provider AI **per job**
+  agent.respond lewat resolver (kunci panel/env → OpenRouterProvider;
+  tidak ada kunci → mock). `LLM_PROVIDER=openrouter` eksplisit tanpa
+  kunci tetap gagal keras saat start. R2 belum punya konsumen (fase
+  media/KB berikutnya) — tersedia resolver + endpoint uji saja.
+- **Endpoint uji**: `POST /api/admin/settings/:key/test` — OpenRouter:
+  `GET openrouter.ai/api/v1/auth/key` dengan kunci efektif (sukses
+  melaporkan info non-rahasia label/tier/sisa limit). R2: HeadBucket
+  SigV4 tulisan tangan (tanpa AWS SDK) ke bucket konfigurasi; pada
+  status tak terpetakan, kode error S3 dibaca lewat GET bertanda tangan
+  (R2 membungkus sebagian penolakan auth sebagai 400 — mis.
+  InvalidArgument untuk access key id yang panjangnya bukan 32).
+  Semua aksi set/clear/test menulis audit `platform_settings.*` dengan
+  meta TANPA nilai.
+- **UI**: halaman `/admin` dua grup (OpenRouter, Cloudflare R2) —
+  field password selalu mulai kosong, chip sumber efektif
+  (Panel/Env/Belum diatur), tombol Simpan / Hapus (kembali ke env) /
+  Uji koneksi + hasil ringkas; dwibahasa en+id. Nilai tersimpan tidak
+  pernah dirender kembali.
+- **Verifikasi (rantai dari server, TANPA Playwright; nilai DUMMY saja,
+  akun uji)**: 39/39 PASS — non-admin semua endpoint admin 404 + flag
+  sesi false; admin-uji (allowlist SEMENTARA selama jendela uji,
+  dipulihkan sesudahnya) 200 + flag true; PUT dummy OpenRouter → status
+  source 'panel' + updatedBy benar; nilai dummy 0 kemunculan di semua
+  respons DAN di journal api+worker (grep); POST test dummy →
+  `OPENROUTER_AUTH_FAILED`; jalur agent dengan kunci panel dummy:
+  audit `agent.failed` provider **openrouter** (HTTP 401 dari
+  OpenRouter asli — terbukti BUKAN mock), setelah dummy dicabut audit
+  `agent.responded` provider **mock** dengan balasan berbasis KB
+  (fallback utuh); R2 dummy pair → test `R2_AUTH_FAILED` (endpoint R2
+  terjangkau & menolak); audit platform set×7/cleared×7/test×4 (dua run)
+  tanpa nilai. PGlite: db verify seksi [16] (RLS fail-closed tanpa flag)
+  + `verify:platform-settings` worker (urutan panel > env > null,
+  enkripsi saat diam, jalur provider). Typecheck 17 proyek hijau.
+  **Keadaan akhir: tabel platform_settings KOSONG (0 baris) menunggu
+  kunci asli diisi pemilik lewat panel; allowlist hanya email pemilik;
+  bundle web `index-CKlzCb-8.js`.**
+- Batas jujur: kunci R2 tersimpan tapi belum ada konsumen sampai fase
+  media/KB; cache TTL berarti perubahan panel berlaku ≤ ±60 dtk; R2
+  punya dua kunci terpisah (access key id & secret) yang diuji bersama
+  lewat kunci mana pun yang ditekan tombol ujinya; bila
+  `PLATFORM_SETTINGS_SECRET` hilang/berganti, nilai panel tidak bisa
+  didekripsi dan resolver jatuh ke env (bukan crash).
+
+### Rollback 6C
+
+```bash
+# env: hapus PLATFORM_SETTINGS_SECRET & PLATFORM_ADMIN_EMAILS dari
+# .env.staging lalu restart api+worker (panel nonaktif; resolver
+# env-only seperti sebelum 6C).
+# kode: kembalikan build sebelum 6C (commit 6d99852) via rsync pola
+# biasa. Migrasi 0022 bersifat aditif; tabel platform_settings boleh
+# dibiarkan (tidak dibaca kode lama). audit_logs.tenant_id yang kini
+# nullable tidak memengaruhi kode lama.
+```
