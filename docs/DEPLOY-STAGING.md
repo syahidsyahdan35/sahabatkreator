@@ -2523,3 +2523,69 @@ pengunjung anonim memang tidak punya foto, tidak ada jalur foto webchat.
   penampakan pertama); grup Telegram: foto yang tampil adalah kontak
   jangkar percakapan (pengirim pertama), atribusi per pesan tetap
   nama (`sender_name`), bukan foto per anggota.
+
+---
+
+## Update Fase 6B — Rate limit auth per IP asli (CF-Connecting-IP) (2026-11-02)
+
+**Isu pra-produksi dari catatan QA-1 ("rate limit auth di balik
+tunnel") dinyatakan TERTUTUP oleh fase ini.**
+
+### Akar masalah (terbukti dari sumber library terpasang)
+
+Better Auth 1.4.22 mengunci rate limit per (IP, jalur). IP diambil
+`getIp()` dari `advanced.ipAddress.ipAddressHeaders` (default hanya
+`["x-forwarded-for"]`, diperiksa berurutan, IP valid pertama menang).
+Di balik Cloudflare Tunnel + proxy Vite, entri pertama X-Forwarded-For
+selalu IP hop lokal → semua pengguna berbagi SATU ember. Aturan
+khusus bawaan library untuk `/sign-in|/sign-up|/change-password|
+/change-email` adalah 3 req/10 dtk per ember — itulah yang habis pada
+pendaftaran cepat ke-±9 di QA-1.
+
+### Perubahan (hanya `apps/api/src/auth.ts`, commit `5fce7f5`)
+
+- `advanced.ipAddress.ipAddressHeaders: ["cf-connecting-ip",
+  "x-forwarded-for"]` — IP pengunjung asli dari edge Cloudflare
+  didahulukan; XFF tetap fallback untuk pengembangan lokal (di dev
+  tanpa header, library jatuh ke 127.0.0.1).
+- `rateLimit: { enabled: true, window: 10, max: 100, customRules: {
+  "/sign-up/*": { window: 60, max: 10 }, "/sign-in/*": { window: 60,
+  max: 20 } } }` — customRules menimpa aturan khusus bawaan untuk
+  sign-up/sign-in; `/change-password` & `/change-email` sengaja tetap
+  pada aturan bawaan yang ketat (3/10 dtk, kini per IP asli).
+  `enabled: true` eksplisit agar tidak bergantung NODE_ENV.
+- Tanpa perubahan skema DB: penyimpanan rate limit = in-memory
+  bawaan library (satu proses API; penghitung reset saat restart).
+
+### Asumsi kepercayaan header (juga tertulis di komentar kode)
+
+`CF-Connecting-IP` hanya boleh dipercaya karena origin staging
+ter-bind 127.0.0.1 dan HANYA dapat dicapai lewat cloudflared — klien
+tidak punya jalur menyuntikkan header ini, dan edge Cloudflare selalu
+menyetelnya dari IP koneksi sebenarnya. **Bila API suatu hari
+diekspos langsung tanpa Cloudflare di depannya, header ini bisa
+dipalsukan klien dan asumsi ini wajib ditinjau ulang.** Untuk
+production, rate limiting di edge Cloudflare (di depan tunnel) tetap
+disarankan sebagai lapis pertama, dengan konfigurasi ini sebagai
+lapis kedua.
+
+### Verifikasi (dari server, tanpa Playwright; akun `fase6b-*@sk.test`)
+
+- Rantai lokal 5180 (proxy yang sama dengan trafik publik) dengan
+  header sintetis: IP 203.0.113.10 → 200 pada percobaan 1–10, **429
+  mulai percobaan ke-11**; IP 203.0.113.11 → percobaan pertamanya
+  **200** (tidak ikut terblokir) dan 429 mulai percobaan ke-11-nya
+  sendiri. Ember per IP terbukti terpisah.
+- Publik tanpa header khusus: sign-up normal 200, sign-in 200,
+  get-session 200; burst publik mencapai 429 pada percobaan ke-10 =
+  kumulatif ke-11 (1 sign-up normal sebelumnya masih dalam jendela
+  60 dtk yang sama) — konsisten dengan kunci IP pengunjung nyata.
+- Baris `auth_session.ip_address` untuk sesi publik tercatat
+  `103.186.31.46` (IP pengunjung dari sudut pandang Cloudflare —
+  dalam uji ini IP server itu sendiri), BUKAN 127.0.0.1: bukti ujung-
+  ke-ujung bahwa API kini melihat IP pengunjung asli (bonus: IP sesi
+  kini juga tercatat dengan benar).
+- Sign-in: 5× password salah → 401 semua (di bawah aturan lama
+  3/10 dtk, percobaan ke-4 sudah 429); sign-in benar sesudahnya 200.
+- Typecheck `@sahabat-kreator/api` hijau; health publik ok; API
+  di-restart (PID baru) dengan dist hasil build commit ini.
