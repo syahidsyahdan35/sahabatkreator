@@ -7,7 +7,10 @@ import {
   RealtimeNudgeSchema,
   type RealtimeNudge,
 } from "@sahabat-kreator/contracts";
-import { flushQueuedWebchatMessages } from "@sahabat-kreator/core";
+import {
+  flushQueuedWebchatMessages,
+  getWebchatChannelAccountStatus,
+} from "@sahabat-kreator/core";
 import {
   createRealtimePublisher,
   createRedisConnection,
@@ -33,7 +36,9 @@ import {
  *   Socket hanya menerima nudge tenant itu.
  * - Pengunjung webchat: `GET /realtime/webchat?token=<token HMAC>` —
  *   token pengunjung yang sama seperti endpoint REST webchat; socket
- *   terikat pada SATU percakapan dari payload token.
+ *   terikat pada SATU percakapan dari payload token. Sejak hotfix
+ *   Disconnect Gate, upgrade juga menolak (403) bila akun channel
+ *   pemilik token tidak sedang 'connected' — sejajar gerbang REST.
  *
  * Tulang punggungnya Redis pub/sub: penerbit (api/worker) mem-publish
  * nudge kecil (kontrak @sahabat-kreator/contracts) ke channel per-tenant
@@ -310,6 +315,32 @@ async function handleUpgrade(
     if (!payload) {
       rejectUpgrade(socket, "401 Unauthorized");
       return;
+    }
+    // Gerbang disconnect (hotfix Webchat Disconnect Gate), sejajar
+    // dengan gerbang REST di apps/api: token SAH saja tidak cukup —
+    // akun channel pemilik token harus sedang 'connected'. Ditolak
+    // dengan 403, BUKAN 401: tokennya sendiri tidak batal (ia berlaku
+    // lagi begitu channel dihubungkan kembali), dan klien tidak boleh
+    // menafsirkannya sebagai token kedaluwarsa/rusak. Bila bundle DB
+    // tidak terkonfigurasi (mode terdegradasi tanpa database), status
+    // memang tidak bisa diverifikasi — perilaku lama dipertahankan dan
+    // flush pun sudah no-op dalam mode itu.
+    if (authBundle) {
+      let status: string | null = null;
+      try {
+        status = await getWebchatChannelAccountStatus(
+          authBundle.db,
+          { tenantId: payload.tid },
+          payload.acc,
+        );
+      } catch (err) {
+        console.error("[realtime] cek status channel webchat gagal:", err);
+        status = null;
+      }
+      if (status !== "connected") {
+        rejectUpgrade(socket, "403 Forbidden");
+        return;
+      }
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       trackSocket(visitorSockets, payload.cv, {

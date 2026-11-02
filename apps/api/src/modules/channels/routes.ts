@@ -151,8 +151,10 @@ export function createChannelsRoutes(
    *   mencabut webhook pemilik sah. Kegagalan Bot API tidak menggagalkan
    *   disconnect lokal (hash secret dikosongkan core → webhook sisa akan
    *   ditolak 401). Hasil cek dicatat di audit sebagai `webhookDeleted`.
-   * - Webchat: cukup status — route sesi publik sudah menolak akun yang
-   *   tidak 'connected', jadi siteKey berhenti bekerja seketika.
+   * - Webchat: cukup status — sejak hotfix Disconnect Gate, status akun
+   *   digerbangi di SEMUA jalur pengunjung (sesi baru 404; kirim/daftar
+   *   pesan bertoken lama 409 CHANNEL_DISCONNECTED; upgrade socket
+   *   realtime ditolak), jadi arus masuk berhenti total seketika.
    * Kredensial tersimpan dikosongkan oleh core; riwayat percakapan dan
    * pesan TIDAK dihapus. Idempoten: memutuskan akun yang sudah putus
    * tetap 204.

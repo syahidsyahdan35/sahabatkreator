@@ -144,11 +144,13 @@ export {
 } from "./telegram";
 export {
   resolveWebchatAccountBySiteKey,
+  getWebchatChannelAccountStatus,
   openWebchatSession,
   recordWebchatInboundMessage,
   flushQueuedWebchatMessages,
   type WebchatAccountRef,
   type OpenWebchatSessionResult,
+  type RecordWebchatInboundResult,
 } from "./webchat";
 export {
   createProduct,

@@ -22,6 +22,11 @@
  *   WebSocket apps/realtime (Fase 6G — socket menerima "nudge", lalu
  *   widget memuat ulang lewat REST), dengan polling cadangan bila WS
  *   gagal.
+ * - Channel yang diputuskan pemilik workspace (hotfix Disconnect Gate):
+ *   server menolak kirim/sinkronisasi dengan 409 CHANNEL_DISCONNECTED —
+ *   widget menampilkannya sebagai keadaan error + gelembung gagal yang
+ *   bisa diketuk untuk mencoba lagi, dan pulih sendiri begitu channel
+ *   dihubungkan kembali (token lama tidak dibatalkan).
  * - Semua teks pesan dirender dengan textContent (tidak ada innerHTML dari
  *   data pengguna) — aman dari injeksi HTML.
  */
@@ -385,6 +390,18 @@ interface SessionResponse {
     void attemptSession();
   });
 
+  // Kode error kontrak dari respons gagal ({error:{code}}) — dipakai
+  // untuk membedakan penolakan yang bermakna (channel diputuskan
+  // pemilik workspace) dari kegagalan jaringan/umum yang cukup ditelan.
+  async function readApiErrorCode(res: Response): Promise<string | null> {
+    try {
+      const data = (await res.json()) as { error?: { code?: string } };
+      return data.error?.code ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async function syncMessages(): Promise<void> {
     if (!token) {
       // Polling ikut memicu pembuatan sesi — jalur pemulihan kedua
@@ -404,9 +421,20 @@ interface SessionResponse {
       void attemptSession();
       return;
     }
-    if (!res.ok) return;
+    if (!res.ok) {
+      // Channel diputuskan pemiliknya (409 CHANNEL_DISCONNECTED):
+      // tampilkan keadaan error yang jujur — JANGAN diam seolah
+      // terhubung. Token SENGAJA dipertahankan: ia berlaku lagi
+      // begitu channel dihubungkan kembali, dan sinkronisasi
+      // berikutnya yang berhasil membersihkan keadaan error ini.
+      if ((await readApiErrorCode(res)) === "CHANNEL_DISCONNECTED") {
+        setConnState("error");
+      }
+      return;
+    }
     const data = (await res.json()) as { messages: ChatMessage[] };
     for (const m of data.messages) appendMessage(m);
+    setConnState("connected");
   }
 
   // ---------- WebSocket + polling cadangan ----------
@@ -612,10 +640,19 @@ interface SessionResponse {
           body: JSON.stringify({ contentText: text }),
         });
       }
-      if (!res.ok) throw new Error(`send failed: ${res.status}`);
+      if (!res.ok) {
+        // Channel diputuskan pemiliknya: gelembung tetap menjadi
+        // gelembung gagal (ketuk-untuk-coba-lagi) lewat catch di bawah,
+        // dan panel menampilkan keadaan error — bukan diam "terhubung".
+        if ((await readApiErrorCode(res)) === "CHANNEL_DISCONNECTED") {
+          setConnState("error");
+        }
+        throw new Error(`send failed: ${res.status}`);
+      }
       const msg = (await res.json()) as ChatMessage;
       bubble.remove();
       appendMessage(msg);
+      setConnState("connected");
     } catch {
       if (!token) void attemptSession();
       markSendFailed(bubble, text);

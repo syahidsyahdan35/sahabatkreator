@@ -31,6 +31,14 @@ import { withTenantDb } from "./tx";
  *    semua dalam SATU transaksi tenant (Transactional Outbox, §2 aturan 5).
  * 4. `flushQueuedWebchatMessages` — saat pengunjung (re)connect, pesan
  *    outbound yang masih `queued` dianggap terkirim ke widget → `sent`.
+ * 5. Gerbang disconnect (hotfix Webchat Disconnect Gate): arus masuk
+ *    pengunjung berhenti TOTAL selama akun channel tidak 'connected',
+ *    bukan hanya sesi baru (yang memang sudah ditolak route sesi).
+ *    Token pengunjung lama TIDAK di-blacklist — gerbangnya murni status
+ *    akun (`getWebchatChannelAccountStatus` + pemeriksaan dalam
+ *    transaksi di jalur kirim & flush), jadi menghubungkan lagi akun
+ *    yang sama membuat token lama yang belum kedaluwarsa berfungsi
+ *    lagi persis seperti semula.
  */
 
 export type WebchatAccountRef = Pick<
@@ -65,6 +73,37 @@ export async function resolveWebchatAccountBySiteKey(
       )
       .limit(1);
     return row ?? null;
+  });
+}
+
+/**
+ * Status akun channel webchat dalam konteks tenant; null bila akun tidak
+ * ada di tenant ini. Dipakai sebagai gerbang disconnect oleh pemanggil
+ * yang sudah memegang identitas akun dari token pengunjung (route daftar
+ * pesan REST + upgrade socket di apps/realtime): hanya 'connected' yang
+ * membuka arus pengunjung. Jalur kirim pesan memakai pemeriksaan yang
+ * sama DI DALAM transaksinya sendiri (lihat
+ * `recordWebchatInboundMessage`) agar status dan penulisan pesan tidak
+ * bisa balapan.
+ */
+export async function getWebchatChannelAccountStatus(
+  db: Database,
+  ctx: { tenantId: string },
+  channelAccountId: string,
+): Promise<ChannelAccount["status"] | null> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [row] = await tx
+      .select({ status: channelAccounts.status })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+          eq(channelAccounts.provider, "webchat"),
+        ),
+      )
+      .limit(1);
+    return row?.status ?? null;
   });
 }
 
@@ -176,16 +215,29 @@ export async function openWebchatSession(
   });
 }
 
+/** Hasil upaya mencatat pesan masuk pengunjung (hotfix Disconnect Gate). */
+export type RecordWebchatInboundResult =
+  | { outcome: "recorded"; message: Message }
+  | { outcome: "conversation_not_found" }
+  | { outcome: "channel_disconnected" };
+
 /**
  * Menyimpan pesan inbound dari pengunjung webchat + menaikkan unread dan
  * menulis event outbox `message.received` dalam transaksi yang sama.
- * Null bila percakapan bukan milik tenant ini.
+ *
+ * Gerbang disconnect: status akun channel pemilik percakapan diperiksa
+ * DI DALAM transaksi ini, sebelum tulisan apa pun — selama akun tidak
+ * 'connected', hasilnya `channel_disconnected` dan TIDAK ada baris
+ * pesan, kenaikan unread, atau event outbox yang tercipta (disconnect
+ * menghentikan arus masuk secara total, termasuk bagi token pengunjung
+ * yang diterbitkan sebelum disconnect). `conversation_not_found` bila
+ * percakapan bukan milik tenant ini.
  */
 export async function recordWebchatInboundMessage(
   db: Database,
   ctx: { tenantId: string; conversationId: string },
   input: { contentText: string },
-): Promise<Message | null> {
+): Promise<RecordWebchatInboundResult> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [conv] = await tx
       .select({
@@ -200,7 +252,21 @@ export async function recordWebchatInboundMessage(
         ),
       )
       .limit(1);
-    if (!conv) return null;
+    if (!conv) return { outcome: "conversation_not_found" } as const;
+
+    const [account] = await tx
+      .select({ status: channelAccounts.status })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, conv.channelAccountId),
+        ),
+      )
+      .limit(1);
+    if (!account || account.status !== "connected") {
+      return { outcome: "channel_disconnected" } as const;
+    }
 
     const [message] = await tx
       .insert(messages)
@@ -236,7 +302,7 @@ export async function recordWebchatInboundMessage(
       },
     });
 
-    return message;
+    return { outcome: "recorded", message } as const;
   });
 }
 
@@ -244,12 +310,42 @@ export async function recordWebchatInboundMessage(
  * Menandai semua pesan outbound `queued` pada percakapan webchat sebagai
  * `sent` (mereka akan didorong ke widget yang baru connect). Mengembalikan
  * pesan-pesan itu dalam urutan kronologis menaik.
+ *
+ * Gerbang disconnect: selama akun channel pemilik percakapan tidak
+ * 'connected', fungsi ini TIDAK menandai apa pun — balasan agen tetap
+ * `queued` (tidak terkirim, tidak hilang, tanpa audit `message.sent`)
+ * dan ter-flush seperti biasa begitu channel dihubungkan lagi dan
+ * pengunjung terhubung. Mengembalikan [] juga bila percakapan tak ada.
  */
 export async function flushQueuedWebchatMessages(
   db: Database,
   ctx: { tenantId: string; conversationId: string },
 ): Promise<Message[]> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [conv] = await tx
+      .select({ channelAccountId: conversations.channelAccountId })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.tenantId, ctx.tenantId),
+          eq(conversations.id, ctx.conversationId),
+        ),
+      )
+      .limit(1);
+    if (!conv) return [];
+
+    const [account] = await tx
+      .select({ status: channelAccounts.status })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, conv.channelAccountId),
+        ),
+      )
+      .limit(1);
+    if (!account || account.status !== "connected") return [];
+
     const queued = await tx
       .select()
       .from(messages)

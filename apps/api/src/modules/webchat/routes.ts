@@ -6,6 +6,7 @@ import {
   WebchatSessionResponseSchema,
 } from "@sahabat-kreator/contracts";
 import {
+  getWebchatChannelAccountStatus,
   listMessages,
   openWebchatSession,
   recordWebchatInboundMessage,
@@ -37,6 +38,17 @@ import { serializeMessage } from "../messages-serialize";
  * ini hanya menerbitkan nudge `message.received` ke Redis setelah pesan
  * inbound ter-commit, agar dashboard agen menyegar seketika; widget
  * sendiri tetap membaca lewat REST (polling + nudge dari realtime).
+ *
+ * Gerbang disconnect (hotfix Webchat Disconnect Gate): selama akun
+ * channel tidak 'connected', arus pengunjung berhenti TOTAL — sesi baru
+ * memang sudah 404 (route sesi di bawah), dan kini jalur berbasis token
+ * juga digerbangi: kirim pesan digerbangi di dalam transaksi core, dan
+ * daftar pesan digerbangi di route ini sebelum membaca. Keduanya
+ * menjawab **409 `CHANNEL_DISCONNECTED`** — 409 mengikuti pola konflik
+ * keadaan yang sudah ada di API ini (TELEGRAM_BOT_ALREADY_CONNECTED,
+ * PRODUCT_HAS_LINKS): token pengunjung SAH dan percakapan ADA, yang
+ * berkonflik adalah keadaan channel-nya. Token TIDAK dibatalkan —
+ * menghubungkan lagi channel yang sama membuatnya berlaku lagi.
  */
 
 export interface WebchatModuleOptions {
@@ -139,6 +151,20 @@ export function createWebchatRoutes(
     if (!configured || !bundle) return notConfigured(c);
     const payload = visitorPayload(c);
     if (!payload) return apiError(c, 401, "UNAUTHORIZED", "Invalid visitor token");
+    // Gerbang disconnect (lihat komentar modul): token lama tidak cukup
+    // — akun channel pemilik token harus sedang 'connected'. Akun yang
+    // sudah tidak ada diperlakukan sama seperti percakapan tak ditemukan.
+    const accountStatus = await getWebchatChannelAccountStatus(
+      bundle.db,
+      { tenantId: payload.tid },
+      payload.acc,
+    );
+    if (accountStatus === null) {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    if (accountStatus !== "connected") {
+      return apiError(c, 409, "CHANNEL_DISCONNECTED", "Channel is disconnected");
+    }
     const rows = await listMessages(
       bundle.db,
       { tenantId: payload.tid },
@@ -166,12 +192,21 @@ export function createWebchatRoutes(
     if (!parsed.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid message payload");
     }
-    const message = await recordWebchatInboundMessage(
+    const result = await recordWebchatInboundMessage(
       bundle.db,
       { tenantId: payload.tid, conversationId: payload.cv },
       parsed.data,
     );
-    if (!message) return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    if (result.outcome === "conversation_not_found") {
+      return apiError(c, 404, "NOT_FOUND", "Conversation not found");
+    }
+    if (result.outcome === "channel_disconnected") {
+      // Gerbang disconnect di core menolak SEBELUM tulisan apa pun:
+      // tidak ada pesan/unread/outbox dari upaya ini, dan nudge tidak
+      // diterbitkan. 409 — pola konflik keadaan (lihat komentar modul).
+      return apiError(c, 409, "CHANNEL_DISCONNECTED", "Channel is disconnected");
+    }
+    const message = result.message;
     // Fase 6G: pesan sudah ter-commit — terbitkan nudge agar dashboard
     // agen menyegar seketika (fail-soft; polling dashboard menutupi
     // kegagalan Redis).
