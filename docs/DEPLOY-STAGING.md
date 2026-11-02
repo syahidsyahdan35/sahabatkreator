@@ -1852,3 +1852,107 @@ sudo systemctl disable sahabat-kreator-realtime.service
   percakapan (penyebab tidak terdiagnosis penuh), lalu lulus bersih
   10/10 pada pengulangan dengan bot mock baru; tidak ada perubahan
   kode di antaranya. Dicatat apa adanya.
+
+---
+
+## Update Fase 6E — Routing URL asli di dashboard (2026-11-02)
+
+### Masalah yang ditutup
+Di dalam shell dashboard, perpindahan menu sebelumnya berbasis state
+`activeId` (Fase 0–1C): klik Inbox tidak mengubah URL (tetap
+`botara.my.id`), Back browser tidak berpindah menu, refresh selalu
+kembali ke Dashboard, dan percakapan tidak bisa di-deep-link. Hanya
+/login, /register, /pay/:code, /webchat-demo yang punya URL sendiri.
+
+### Pilihan implementasi
+Router tangan yang sudah ada (`usePathRoute` di `apps/web/src/App.tsx`)
+diperluas secara disiplin — TANPA library router baru: fase ini murni
+perilaku URL, dan router tangan yang sama sudah menangani popstate &
+permukaan publik dengan benar. Yang berubah:
+
+- **Registry tetap satu-satunya sumber kebenaran.** Field `route` pada
+  `NAV_REGISTRY` (sudah ada sejak Fase 0, sebelumnya tak terpakai) kini
+  menjadi path URL resmi tiap item. Fungsi baru `matchNavPath(pathname)`
+  di `navigation/registry.ts` menurunkan item aktif DARI URL: kecocokan
+  persis didahulukan, lalu awalan `route + "/"` (route terpanjang
+  menang) menangkap sub-path; path tak dikenal jatuh ke Dashboard
+  (perilaku lama — tidak pernah layar kosong). Sidebar, MobileBottomBar,
+  dan MoreSheet TIDAK berubah kontrak props-nya (`activeId` kini nilai
+  turunan URL yang diteruskan ShellMain, bukan state).
+- **Navigasi nyata.** Klik menu = `history.pushState` ke `item.route`;
+  `popstate` (Back/Forward) mengubah halaman mengikuti URL; muat awal
+  membaca URL. `usePathRoute` bertambah `replaceTo` (replaceState)
+  untuk pengalihan & pembersihan URL tanpa entri riwayat baru.
+- **Deep-link inbox.** Pilihan percakapan di `InboxPage` bukan lagi
+  state lokal: props baru `conversationId` (segmen URL) +
+  `onConversationChange`. Klik daftar → push `/inbox/:conversationId`;
+  tombol kembali mobile → push `/inbox`; membuka URL langsung (termasuk
+  setelah refresh) memuat & memilih percakapan itu. Id tidak ada/bukan
+  milik workspace aktif → API messages menjawab 404 → pilihan dibersihkan
+  dengan replace ke `/inbox`, daftar tampil TANPA pesan error (jatuh
+  lembut). Pindah workspace juga membersihkan id pilihan lama dengan
+  replace — tetapi muat awal TIDAK (deep-link pada workspace pertama
+  harus tetap membuka percakapannya).
+- **Return-after-login.** Deep-link yang dibuka saat belum login:
+  Shell menyimpan path tujuan di sessionStorage (`navigation/returnTo.ts`,
+  kunci `sk-return-to`) lalu replace ke /login; `LoginPage` mengambilnya
+  sekali pakai setelah masuk berhasil. Pengguna yang baru saja KELUAR
+  secara eksplisit tidak disimpan tujuannya (dibedakan lewat penanda
+  "pernah terautentikasi" selama shell hidup). Register tetap mendarat
+  di `/` seperti sebelumnya.
+- **Tidak berubah:** /login, /register, /pay/:code, /webchat-demo persis
+  seperti sebelumnya; konteks workspace tetap state (BUKAN bagian URL —
+  non-goal yang disengaja fase ini); badge unread/pending approvals,
+  nudge realtime 6G, dan polling fallback tetap bekerja (penyegaran
+  latar InboxPage tidak disentuh selain sumber pilihan percakapan).
+
+### Pemetaan path final
+`/` Dashboard · `/inbox` (+ `/inbox/:conversationId`) · `/agents` ·
+`/contacts` · `/channels` · `/automations` · `/knowledge` ·
+`/products` · `/settings` · `/broadcasts`, `/analytics`, `/billing`
+(item registry yang halamannya masih placeholder — kini juga ber-URL).
+
+### Deploy
+Build web di VM (`index-lC69xMFL.js`) → commit `83f0f19` → push →
+rsync repo → restart `sahabat-kreator-web` (proses preview dibunuh agar
+unit `Restart=always` menghidupkannya dengan dist baru; PID berganti,
+bundle lokal terkonfirmasi tersaji di 127.0.0.1:5180).
+
+### Verifikasi (tanpa Playwright — aturan user; klik akhir oleh user)
+- Typecheck SEMUA proyek hijau; build web hijau.
+- Fallback SPA publik: GET `https://botara.my.id/inbox`, `/channels`,
+  `/contacts`, `/automations`, `/agents`, `/knowledge`, `/products`,
+  `/settings`, `/inbox/<uuid-acak>` → semua **200** HTML aplikasi
+  (882 byte, `<title>Sahabat Kreator</title>`) — Vite preview melayani
+  index untuk path tak dikenal seperti sebelumnya, tidak ada perubahan
+  konfigurasi server yang dibutuhkan. `/login`, `/register`,
+  `/webchat-demo`, `/pay/<kode-tak-ada>` tetap 200 persis sebelumnya.
+- Bundle PUBLIK (diunduh dari URL publik) memuat: kesebelas string
+  route registry, kunci `sk-return-to`, dan pembangun deep-link
+  `/inbox/${encodeURIComponent(...)}`.
+- Rantai tak berubah: `/api/health` ok; widget.js publik 200 (9.432
+  byte); POST sesi webchat key bogus dari server → 404 + ACAO `*`
+  (jalur webchat utuh; fase ini hanya menyentuh frontend web).
+- Grep bersih: tidak ada `setSelectedId`/`setActiveId` navigasi
+  tertinggal; satu-satunya daftar menu tetap registry (komponen hanya
+  memetakan `desktopItems`/`mobileTabItems`/`moreItems`).
+
+### Rollback Fase 6E
+```bash
+# kode: kembalikan build web sebelum 6E (commit 738fd19) via rsync +
+# hidupkan ulang proses preview pola biasa. Tidak ada migrasi DB.
+```
+
+### Batas jujur
+- Pembuktian perilaku klik (URL berubah saat menu diklik, refresh
+  bertahan, Back/Forward, deep-link membuka percakapan) menunggu uji
+  langsung user — sesuai pembagian kerja baru, verifikasi di sini
+  adalah typecheck + build + fallback URL + isi bundle, BUKAN klik
+  browser (Playwright dilewati atas keputusan user).
+- Workspace tetap di luar URL: deep-link `/inbox/:id` berlaku untuk
+  workspace yang sedang aktif di sesi itu; membuka tautan percakapan
+  milik workspace lain (yang sama-sama dimiliki pengguna) jatuh lembut
+  ke daftar workspace aktif, bukan berpindah workspace otomatis.
+- Segmen URL inbox hanya satu tingkat (`/inbox/:conversationId`);
+  sub-path lebih dalam diperlakukan sebagai inbox tanpa pilihan id
+  yang valid dan akan dibersihkan lewat jalur 404 yang sama.
