@@ -40,10 +40,10 @@ import {
   type MetaDiscoveryTraceEntry,
 } from "@sahabat-kreator/channel-messenger";
 import { WhatsAppCloudClient } from "@sahabat-kreator/channel-whatsapp";
-import { createRedisConnection } from "@sahabat-kreator/queue";
 import type { ChannelAccount } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppVariables } from "../../http";
+import { createOAuthKvStore, type OAuthKvStore } from "../../oauth-kv";
 import { requireAuth } from "../auth/session";
 import { channelAvatarUrl } from "../avatars/routes";
 import { resolveTenantForUser } from "../tenants/guard";
@@ -159,116 +159,6 @@ const MESSENGER_OAUTH_SCOPES = [
   "pages_manage_engagement",
   "business_management",
 ] as const;
-
-// ---------------------------------------------------------------------------
-// Penyimpanan nonce + sesi (Redis; fallback in-memory)
-// ---------------------------------------------------------------------------
-
-interface OAuthKvStore {
-  /** Klaim nonce baru; false bila nonce sudah pernah diklaim. */
-  claimNonce(nonce: string): Promise<boolean>;
-  /** Konsumsi nonce secara atomik; true hanya untuk pemakaian pertama. */
-  consumeNonce(nonce: string): Promise<boolean>;
-  putSession(id: string, encryptedPayload: string): Promise<void>;
-  getSession(id: string): Promise<string | null>;
-  deleteSession(id: string): Promise<void>;
-}
-
-/** Bentuk struktural minimum klien ioredis yang dipakai store ini. */
-interface RedisLike {
-  get(key: string): Promise<string | null>;
-  set(
-    key: string,
-    value: string,
-    ...args: Array<string | number>
-  ): Promise<unknown>;
-  del(key: string): Promise<number>;
-  getdel(key: string): Promise<string | null>;
-}
-
-async function withStoreTimeout<T>(promise: Promise<T>): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("oauth_store_timeout")), 3_000),
-    ),
-  ]);
-}
-
-function createOAuthStore(redisUrl: string | undefined): OAuthKvStore {
-  if (redisUrl) {
-    let client: RedisLike | null = null;
-    const redis = (): RedisLike => {
-      if (!client) {
-        client = createRedisConnection(redisUrl) as unknown as RedisLike;
-      }
-      return client;
-    };
-    const nonceKey = (nonce: string) => `meta-oauth:nonce:${nonce}`;
-    const sessionKey = (id: string) => `meta-oauth:session:${id}`;
-    return {
-      async claimNonce(nonce) {
-        const res = await withStoreTimeout(
-          redis().set(nonceKey(nonce), "1", "EX", OAUTH_TTL_SECONDS, "NX"),
-        );
-        return res === "OK";
-      },
-      async consumeNonce(nonce) {
-        const res = await withStoreTimeout(redis().getdel(nonceKey(nonce)));
-        return res !== null;
-      },
-      async putSession(id, encryptedPayload) {
-        await withStoreTimeout(
-          redis().set(sessionKey(id), encryptedPayload, "EX", OAUTH_TTL_SECONDS),
-        );
-      },
-      async getSession(id) {
-        return withStoreTimeout(redis().get(sessionKey(id)));
-      },
-      async deleteSession(id) {
-        await withStoreTimeout(redis().del(sessionKey(id)));
-      },
-    };
-  }
-  // Fallback tanpa Redis: Map proses dengan kedaluwarsa malas. API
-  // staging berjalan satu proses, jadi semantik sekali-pakai tetap
-  // berlaku; sesi hilang saat proses restart (pengguna mengulang login).
-  const nonces = new Map<string, number>();
-  const sessions = new Map<string, { value: string; expiresAt: number }>();
-  const alive = (expiresAt: number) => expiresAt > Date.now();
-  return {
-    async claimNonce(nonce) {
-      const existing = nonces.get(nonce);
-      if (existing !== undefined && alive(existing)) return false;
-      nonces.set(nonce, Date.now() + OAUTH_TTL_SECONDS * 1000);
-      return true;
-    },
-    async consumeNonce(nonce) {
-      const existing = nonces.get(nonce);
-      if (existing === undefined) return false;
-      nonces.delete(nonce);
-      return alive(existing);
-    },
-    async putSession(id, encryptedPayload) {
-      sessions.set(id, {
-        value: encryptedPayload,
-        expiresAt: Date.now() + OAUTH_TTL_SECONDS * 1000,
-      });
-    },
-    async getSession(id) {
-      const entry = sessions.get(id);
-      if (!entry) return null;
-      if (!alive(entry.expiresAt)) {
-        sessions.delete(id);
-        return null;
-      }
-      return entry.value;
-    },
-    async deleteSession(id) {
-      sessions.delete(id);
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // State bertanda tangan (HMAC-SHA256)
@@ -454,7 +344,10 @@ export function createMetaOAuthRoutes(
     return app;
   }
 
-  const store = createOAuthStore(opts.redisUrl);
+  const store: OAuthKvStore = createOAuthKvStore(opts.redisUrl, {
+    namespace: "meta-oauth",
+    ttlSeconds: OAUTH_TTL_SECONDS,
+  });
   const auth = requireAuth(bundle);
   app.use("/tenants/*", auth);
 

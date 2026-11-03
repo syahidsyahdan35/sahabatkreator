@@ -59,6 +59,7 @@ import type {
 } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
 import { apiError, type AppContext, type AppVariables } from "../../http";
+import { createOAuthKvStore, type OAuthKvStore } from "../../oauth-kv";
 import { requireAuth } from "../auth/session";
 import { resolveTenantForUser } from "../tenants/guard";
 
@@ -88,9 +89,11 @@ import { resolveTenantForUser } from "../tenants/guard";
  * PLATFORM (Panel Admin, resolusi panel → env): tanpa client id/secret
  * endpoint connect menjawab 422 GOOGLE_NOT_CONFIGURED secara jujur
  * (pola Resend 11B) — bukan URL dialog mati. Callback memakai state
- * HMAC sekali pakai (nonce dikonsumsi atomik di memori proses API;
- * masa berlaku 10 menit) — pola meta-oauth 7D yang disederhanakan
- * karena proses API tunggal.
+ * HMAC sekali pakai (nonce diklaim/dikonsumsi atomik lewat Redis
+ * `oauth-kv` yang sama dengan modul meta-oauth 7D; masa berlaku 10
+ * menit). Nonce disimpan di Redis, bukan memori proses, agar callback
+ * tetap sah saat API berjalan lebih dari satu replika atau baru
+ * di-restart di antara "connect" dan "callback".
  */
 
 export interface AppointmentsModuleOptions {
@@ -103,6 +106,8 @@ export interface AppointmentsModuleOptions {
   publicBaseUrl?: string;
   /** Secret penanda tangan state OAuth (env BETTER_AUTH_SECRET). */
   stateSecret?: string;
+  /** Redis platform (env REDIS_URL) untuk nonce state OAuth lintas replika. */
+  redisUrl?: string;
 }
 
 export function serializeAppointmentService(
@@ -190,23 +195,7 @@ function verifyOAuthState(
   }
 }
 
-/** Nonce sekali pakai (memori proses API — pola fallback meta-oauth). */
-const consumedNonces = new Set<string>();
-const pendingNonces = new Map<string, number>();
-function registerNonce(nonce: string): void {
-  const now = Date.now();
-  for (const [n, exp] of pendingNonces) {
-    if (exp < now) pendingNonces.delete(n);
-  }
-  pendingNonces.set(nonce, now + STATE_TTL_MS);
-}
-function consumeNonce(nonce: string): boolean {
-  const exp = pendingNonces.get(nonce);
-  if (!exp || exp < Date.now() || consumedNonces.has(nonce)) return false;
-  pendingNonces.delete(nonce);
-  consumedNonces.add(nonce);
-  return true;
-}
+const STATE_TTL_SECONDS = STATE_TTL_MS / 1000;
 
 export function createAppointmentsRoutes(
   bundle: AuthBundle | null,
@@ -220,6 +209,12 @@ export function createAppointmentsRoutes(
     tokenSecret: options.tokenSecret,
     bases: options.googleBases,
   };
+  // Nonce state OAuth sekali pakai di Redis (lintas replika) dengan
+  // fallback memori proses — store yang sama dengan modul meta-oauth.
+  const oauthState: OAuthKvStore = createOAuthKvStore(options.redisUrl, {
+    namespace: "google-oauth",
+    ttlSeconds: STATE_TTL_SECONDS,
+  });
   const webBase = (options.publicBaseUrl ?? "").replace(/\/+$/, "");
   const redirectUri = `${webBase}/api/google/oauth/callback`;
 
@@ -643,7 +638,16 @@ export function createAppointmentsRoutes(
       );
     }
     const nonce = randomBytes(16).toString("base64url");
-    registerNonce(nonce);
+    // Klaim atomik: bila Redis menolak (nonce kembar) pengguna cukup
+    // mengulang, jadi jawab jujur alih-alih menerbitkan state mati.
+    if (!(await oauthState.claimNonce(nonce))) {
+      return apiError(
+        c,
+        503,
+        "INTERNAL_ERROR",
+        "Could not start Google OAuth, please retry",
+      );
+    }
     const state = signOAuthState(options.stateSecret, {
       tenantId: g.tenant.id,
       userId: g.appUser.id,
@@ -740,7 +744,9 @@ export function createAppointmentsRoutes(
     if (!stateRaw || !code) return fail("GOOGLE_STATE_INVALID");
     const state = verifyOAuthState(options.stateSecret, stateRaw);
     if (!state) return fail("GOOGLE_STATE_INVALID");
-    if (!consumeNonce(state.nonce)) return fail("GOOGLE_STATE_INVALID");
+    if (!(await oauthState.consumeNonce(state.nonce))) {
+      return fail("GOOGLE_STATE_INVALID");
+    }
     const client = await resolveGoogleOAuthClient(
       bundle.db,
       options.platform,

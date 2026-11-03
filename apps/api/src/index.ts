@@ -225,6 +225,7 @@ routes.route(
     },
     publicBaseUrl: env.BETTER_AUTH_URL,
     stateSecret: env.BETTER_AUTH_SECRET,
+    redisUrl: env.REDIS_URL,
   }),
 );
 // Modul notes (Fase 9C) — catatan internal /tenants/:tenantId/conversations/:id/notes.
