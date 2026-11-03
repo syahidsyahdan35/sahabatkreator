@@ -294,12 +294,18 @@ export class MetaGraphClient {
   }
 
   /**
-   * Foto profil Page/akun IG (`GET /{id}/picture?type=large`): Graph
-   * menjawab redirect ke CDN atau langsung byte gambar. Mengembalikan
-   * byte + content-type, atau null bila tidak ada gambar (404). Catatan
-   * jujur: untuk Page yang belum memasang foto, Graph bisa mengembalikan
+   * Foto profil Page (`GET /{id}/picture?type=large`): Graph menjawab
+   * redirect ke CDN atau langsung byte gambar. Mengembalikan byte +
+   * content-type, atau null bila tidak ada gambar (404). Catatan jujur:
+   * untuk Page yang belum memasang foto, Graph bisa mengembalikan
    * gambar siluet bawaan Meta — dari sisi API itu tak terbedakan dari
    * foto asli.
+   *
+   * PERMUKAAN INI HANYA UNTUK PAGE. Untuk akun IG endpoint /picture
+   * TIDAK bekerja di graph.facebook.com (Hotfix R1 — terbukti live
+   * 2026-11-03: connect IG user berhasil tetapi pengambilan foto lewat
+   * /picture selalu gagal dan akun tersimpan tanpa avatar); akun IG
+   * memakai `getInstagramProfilePicture` di bawah.
    */
   async getAccountPicture(
     id: string,
@@ -327,6 +333,69 @@ export class MetaGraphClient {
         response.headers.get("content-type")?.split(";")[0]?.trim() ||
         "image/jpeg",
     };
+  }
+
+  /**
+   * Foto profil akun IG (`GET /{ig-id}?fields=profile_picture_url`
+   * lalu unduh byte dari URL CDN-nya) — permukaan yang benar untuk
+   * akun Instagram di graph.facebook.com (Hotfix R1; pola yang sama
+   * seperti foto profil bisnis WhatsApp). Field ini tersedia pada node
+   * akun IG untuk token Page maupun SUAT dengan izin instagram_basic.
+   * Mengembalikan byte + content-type, atau null bila akun tidak
+   * memasang foto / URL kosong / unduhan kosong. Penolakan Graph pada
+   * pembacaan field melempar MetaGraphError seperti getAccountPicture
+   * — pemanggil memperlakukannya best-effort (koneksi tidak pernah
+   * gagal karena foto). URL CDN bertanda tangan diunduh TANPA header
+   * Authorization (beda host; token tidak boleh bocor ke CDN).
+   */
+  async getInstagramProfilePicture(
+    igUserId: string,
+  ): Promise<{ data: Buffer; contentType: string } | null> {
+    const body = await this.getJson<{ profile_picture_url?: string }>(
+      `${encodeURIComponent(igUserId)}?fields=profile_picture_url`,
+    );
+    const url =
+      typeof body.profile_picture_url === "string" && body.profile_picture_url
+        ? body.profile_picture_url
+        : null;
+    if (!url) return null;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch {
+      throw new MetaGraphError(0, null, "network_error");
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new MetaGraphError(response.status, null, "picture_download_failed");
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length === 0) return null;
+    return {
+      data,
+      contentType:
+        response.headers.get("content-type")?.split(";")[0]?.trim() ||
+        "image/jpeg",
+    };
+  }
+
+  /**
+   * Foto profil akun channel Meta sesuai provider-nya (Hotfix R1):
+   * Messenger memakai tepi /picture milik Page; Instagram memakai
+   * field profile_picture_url milik akun IG. Satu titik dispatch agar
+   * jalur connect (manual/OAuth/SUAT) dan backfill daftar tidak bisa
+   * tertukar permukaan lagi.
+   */
+  async getChannelProfilePicture(
+    provider: "messenger" | "instagram",
+    externalId: string,
+  ): Promise<{ data: Buffer; contentType: string } | null> {
+    return provider === "instagram"
+      ? this.getInstagramProfilePicture(externalId)
+      : this.getAccountPicture(externalId);
   }
 
   // -------------------------------------------------------------------------
