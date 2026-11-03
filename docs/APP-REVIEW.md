@@ -470,8 +470,12 @@ App: **Botara Dev** · App ID: `2356364001779420` · Portfolio: SHD Store.
 ### App Review → Permissions and Features
 - [ ] The three engagement permissions exist on the app (§0 step 3):
       `pages_read_engagement`, `pages_read_user_content`,
-      `pages_manage_engagement` — the OAuth dialog requests them
-      since Fase 14B.
+      `pages_manage_engagement`. The OAuth dialog requests them
+      **only** once `META_ENGAGEMENT_SCOPES=1` is set — which happens
+      AFTER Advanced Access is granted (§0 step 3). Requesting them
+      before approval makes the dialog fail with "Invalid Scopes"
+      (the Fase 14B unconditional-scope change was reverted to this
+      opt-in for exactly that reason).
 - [ ] All 13 permissions from §2 are queued for **Advanced Access**
       with the §3 justifications and §7 screencasts attached.
 
@@ -653,12 +657,16 @@ Verified live against https://botara.my.id on 2026-11-03:
 Urutan pengerjaan (detailnya §0): **(1)** verifikasi bisnis SHD Store
 di Meta Business Settings; **(2)** cek semua nilai konsol di §6
 (URL privasi/syarat/penghapusan data, redirect URI, ikon, kategori);
-**(3)** tambahkan tiga izin engagement Page ke aplikasi
+**(3)** tiga izin engagement Page
 (`pages_read_engagement`, `pages_read_user_content`,
-`pages_manage_engagement`) **sebelum** mencoba connect Messenger lagi
-— sejak Fase 14B dialog OAuth memintanya, dan Meta menolak dialog
-dengan "Invalid Scopes" bila izinnya belum ada di aplikasi (koneksi
-yang sudah berjalan tidak terpengaruh); **(4)** lengkapi konfigurasi
+`pages_manage_engagement`) diajukan lewat App Review ini sendiri —
+JANGAN diaktifkan sebelum Advanced Access-nya disetujui: dialog
+OAuth hanya memintanya bila env `META_ENGAGEMENT_SCOPES=1`, dan env
+itu baru dinyalakan SESUDAH persetujuan (memintanya sebelum itu
+membuat dialog gagal dengan "Invalid Scopes" — itulah sebabnya
+perubahan Fase 14B yang memintanya tanpa syarat sudah dibatalkan
+menjadi opt-in; connect Messenger normal saat ini aman dan tidak
+meminta trio ini sama sekali); **(4)** lengkapi konfigurasi
 IG `30196668823256383`: tambah `business_management`, hapus
 `instagram_content_publish` bila ada; **(5)** pastikan konfigurasi
 WhatsApp membawa `whatsapp_business_messaging` +
