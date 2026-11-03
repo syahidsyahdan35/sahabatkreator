@@ -215,6 +215,35 @@ if (segmentFirstId) {
   );
 }
 
+// Fase 13F: order commerce — daftar + get pertama bila ada (pola
+// toleran yang sama; kunci tanpa orders:read menerima penolakan
+// bertipe). Order lahir dari checkout flow, jadi daftar bisa kosong.
+let orderFirstId: string | null = null;
+try {
+  const list = await client.listOrders();
+  check(
+    "listOrders() berhasil",
+    Array.isArray(list.orders),
+    `count=${list.orders.length}`,
+  );
+  orderFirstId = list.orders[0]?.id ?? null;
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listOrders() (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+if (orderFirstId) {
+  await checkRead(
+    "getOrder(id) konsisten dengan daftar",
+    () => client.getOrder(orderFirstId!),
+    (v) => v.id === orderFirstId && Array.isArray(v.items) && typeof v.totalIdr === "number",
+    (v) => `total=${v.totalIdr} status=${v.status}`,
+  );
+}
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

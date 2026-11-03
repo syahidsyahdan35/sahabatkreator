@@ -17,6 +17,7 @@ import {
   KbStatsResponseSchema,
   GrowthLinkListResponseSchema,
   SegmentListResponseSchema,
+  OrderListResponseSchema,
   MessageListResponseSchema,
   ProductListResponseSchema,
   PublicMeResponseSchema,
@@ -53,6 +54,8 @@ import {
   listGrowthLinks,
   getSegment,
   listSegments,
+  getOrder,
+  listOrders,
   listKbDocuments,
   listMessages,
   listProducts,
@@ -83,6 +86,7 @@ import { serializeContact } from "../contacts/routes";
 import { serializeFlow } from "../flows/routes";
 import { serializeGrowthLink } from "../growth/routes";
 import { serializeSegment } from "../segments/routes";
+import { serializeOrder } from "../products/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeDocument } from "../knowledge/routes";
 import { serializeMessage } from "../messages-serialize";
@@ -162,6 +166,9 @@ function extractPresentedKey(headers: Headers): string | null {
  *   --- Fase 13C: segmen — permukaan BACA ---
  *   GET  /v1/segments            (segments:read)    daftar definisi
  *   GET  /v1/segments/:id        (segments:read)    detail
+ *   --- Fase 13F: order commerce — permukaan BACA ---
+ *   GET  /v1/orders              (orders:read)      daftar order checkout
+ *   GET  /v1/orders/:id          (orders:read)      detail + item + tautan
  * Penolakan: tanpa/bukan kunci → 401 API_KEY_INVALID; kunci dicabut → 401
  * API_KEY_REVOKED; scope kurang → 403 API_KEY_SCOPE_DENIED.
  * Registry kanonis permukaan ini: PUBLIC_V1_SURFACE di
@@ -838,6 +845,34 @@ export function createPublicV1Routes(
     const row = await getSegment(bundle.db, auth.tenantId, id);
     if (!row) return apiError(c, 404, "NOT_FOUND", "Segment not found");
     return c.json(serializeSegment(row));
+  });
+
+  // --- Fase 13F: order commerce — permukaan BACA (orders:read). Order
+  // lahir dari checkout flow (node cart_checkout); keranjang sendiri
+  // SENGAJA tidak punya permukaan publik (keadaan sesi percakapan,
+  // lihat docs/COVERAGE-MATRIX.md). Serializer yang sama persis dengan
+  // modul products dashboard (url pembayaran relatif /pay/<kode>).
+  app.get("/v1/orders", async (c) => {
+    const denied = requireScope(c, "orders:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listOrders(bundle.db, auth.tenantId);
+    return c.json(
+      OrderListResponseSchema.parse({
+        orders: rows.map((r) => serializeOrder(r)),
+      }),
+    );
+  });
+
+  app.get("/v1/orders/:id", async (c) => {
+    const denied = requireScope(c, "orders:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Order not found");
+    const auth = c.get("apiKeyAuth");
+    const row = await getOrder(bundle.db, auth.tenantId, id);
+    if (!row) return apiError(c, 404, "NOT_FOUND", "Order not found");
+    return c.json(serializeOrder(row));
   });
 
   return app;

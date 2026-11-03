@@ -4,6 +4,7 @@ import {
   boolean,
   check,
   index,
+  integer,
   pgEnum,
   pgTable,
   timestamp,
@@ -35,9 +36,30 @@ import { contacts, conversations } from "./inbox";
  * 0012 — termasuk lengan SELECT sempit `app.payment_code` pada
  * payment_links agar halaman bayar publik bisa me-resolve code → tenant,
  * meniru pola siteKey webchat migrasi 0006).
+ *
+ * Fase 13F menambah kelompok Keranjang & Order di berkas yang sama
+ * (carts, cart_items, orders, order_items — lihat seksi di bawah) dan
+ * menjadikan payment_links dwivarian: tautan produk tunggal ATAU
+ * tautan order, ditegakkan CHECK eksklusif.
  */
 
 export const paymentLinkStatusEnum = pgEnum("payment_link_status", [
+  "pending",
+  "paid",
+  "expired",
+  "cancelled",
+]);
+
+/** Status keranjang (Fase 13F): open = sedang diisi; checked_out = sudah
+ * menjadi order; abandoned = ditinggalkan (lipatan merge kontak 9B). */
+export const cartStatusEnum = pgEnum("cart_status", [
+  "open",
+  "checked_out",
+  "abandoned",
+]);
+
+/** Status order (Fase 13F) — cermin status tautan bayarnya. */
+export const orderStatusEnum = pgEnum("order_status", [
   "pending",
   "paid",
   "expired",
@@ -77,9 +99,20 @@ export const paymentLinks = pgTable(
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    productId: uuid("product_id")
-      .notNull()
-      .references(() => products.id, { onDelete: "cascade" }),
+    /**
+     * Produk yang dibayar — WAJIB terisi untuk tautan produk tunggal,
+     * NULL untuk tautan order (Fase 13F). Pasangan eksklusif dengan
+     * `order_id` ditegakkan CHECK `payment_links_exactly_one_target`:
+     * tepat satu dari keduanya terisi. Nullable di sini adalah keadaan
+     * kondisional varian tautan, bukan field yang "boleh kosong".
+     */
+    productId: uuid("product_id").references(() => products.id, {
+      onDelete: "cascade",
+    }),
+    /** Order yang dibayar tautan ini (Fase 13F) — lihat `product_id`. */
+    orderId: uuid("order_id").references(() => orders.id, {
+      onDelete: "cascade",
+    }),
     /** Kontak pembeli bila tautan dibuat untuk kontak tertentu. */
     contactId: uuid("contact_id").references(() => contacts.id, {
       onDelete: "set null",
@@ -110,10 +143,15 @@ export const paymentLinks = pgTable(
     index("payment_links_tenant_id_idx").on(t.tenantId),
     index("payment_links_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("payment_links_product_idx").on(t.productId),
+    index("payment_links_order_idx").on(t.orderId),
     index("payment_links_contact_id_idx").on(t.contactId),
     index("payment_links_conversation_id_idx").on(t.conversationId),
     uniqueIndex("payment_links_code_unique").on(t.code),
     check("payment_links_amount_idr_nonnegative", sql`${t.amountIdr} >= 0`),
+    check(
+      "payment_links_exactly_one_target",
+      sql`(${t.productId} IS NOT NULL) <> (${t.orderId} IS NOT NULL)`,
+    ),
   ],
 );
 
@@ -121,3 +159,185 @@ export type Product = typeof products.$inferSelect;
 export type NewProduct = typeof products.$inferInsert;
 export type PaymentLink = typeof paymentLinks.$inferSelect;
 export type NewPaymentLink = typeof paymentLinks.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Keranjang & Order (Fase 13F — katalog + keranjang commerce)
+//
+// - carts       : keranjang belanja per (tenant, kontak). Tepat SATU
+//                 keranjang `open` per kontak ditegakkan partial unique
+//                 index `carts_one_open_per_contact`; keranjang yang
+//                 sudah checkout/ ditinggalkan tetap tersimpan sebagai
+//                 riwayat sesi (baris tidak dihapus saat checkout).
+// - cart_items  : baris item sebagai TABEL (bukan jsonb): item perlu
+//                 dirujuk per produk (gabung nama produk untuk tampilan,
+//                 lipatan merge kontak 9B, unik per produk dalam satu
+//                 keranjang). `unit_price_idr` adalah SNAPSHOT harga
+//                 produk saat item PERTAMA ditambahkan ke keranjang —
+//                 perubahan harga produk sesudahnya tidak menulis ulang
+//                 keranjang (aturan yang sama seperti snapshot
+//                 payment_links di atas).
+// - orders      : order yang lahir saat checkout. Total DIHITUNG server
+//                 dari snapshot cart_items (bukan dari harga produk
+//                 berjalan). `payment_link_id` menunjuk tautan bayar
+//                 tunggal order ini — kolom uuid TANPA FK karena arah
+//                 referensi kanonisnya adalah `payment_links.order_id`
+//                 (FK sebaliknya akan melingkar); diisi dalam transaksi
+//                 checkout yang sama. Status order mengikuti status
+//                 tautan bayarnya lewat hook penyelesaian pembayaran.
+// - order_items : snapshot item order (nama + harga + qty saat checkout)
+//                 — riwayat order tidak berubah walau produk diubah/
+//                 dihapus (`product_id` SET NULL, nama snapshot kekal).
+// Aturan NOT NULL (instruksi user 2026-11-03): semua field semantik
+// wajib NOT NULL; yang nullable hanya keadaan genuin kondisional —
+// `orders.conversation_id` (order bisa lahir di luar percakapan),
+// `orders.paid_at` (belum tentu pernah dibayar), `orders.payment_link_id`
+// (diisi sesudah tautan dibuat dalam transaksi yang sama),
+// `order_items.product_id` (produk bisa dihapus sesudah checkout),
+// dan pasangan varian `payment_links.product_id`/`order_id` di atas.
+// Semua tabel tenant-scoped + RLS (blok [K-13F] di migrasi fase ini).
+// ---------------------------------------------------------------------------
+
+export const carts = pgTable(
+  "carts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    contactId: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    status: cartStatusEnum("status").notNull().default("open"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("carts_tenant_id_idx").on(t.tenantId),
+    index("carts_contact_idx").on(t.tenantId, t.contactId),
+    uniqueIndex("carts_one_open_per_contact")
+      .on(t.tenantId, t.contactId)
+      .where(sql`${t.status} = 'open'`),
+  ],
+);
+
+export const cartItems = pgTable(
+  "cart_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    cartId: uuid("cart_id")
+      .notNull()
+      .references(() => carts.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    qty: integer("qty").notNull(),
+    /** Snapshot harga produk saat item pertama ditambahkan (Rupiah penuh). */
+    unitPriceIdr: bigint("unit_price_idr", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("cart_items_tenant_id_idx").on(t.tenantId),
+    index("cart_items_cart_idx").on(t.cartId),
+    uniqueIndex("cart_items_cart_product_unique").on(t.cartId, t.productId),
+    check("cart_items_qty_positive", sql`${t.qty} > 0`),
+    check(
+      "cart_items_unit_price_nonnegative",
+      sql`${t.unitPriceIdr} >= 0`,
+    ),
+  ],
+);
+
+export const orders = pgTable(
+  "orders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    contactId: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    /** Percakapan asal checkout; null bila order lahir di luar percakapan. */
+    conversationId: uuid("conversation_id").references(
+      () => conversations.id,
+      { onDelete: "set null" },
+    ),
+    status: orderStatusEnum("status").notNull().default("pending"),
+    /** Total snapshot keranjang saat checkout — dihitung server (Rupiah penuh). */
+    totalIdr: bigint("total_idr", { mode: "number" }).notNull(),
+    /**
+     * Tautan bayar tunggal order ini. TANPA FK (lihat catatan kelompok):
+     * arah referensi kanonis adalah payment_links.order_id.
+     */
+    paymentLinkId: uuid("payment_link_id"),
+    /** Terisi saat pembayaran order selesai; null selama belum dibayar. */
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("orders_tenant_id_idx").on(t.tenantId),
+    index("orders_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("orders_contact_idx").on(t.contactId),
+    check("orders_total_idr_nonnegative", sql`${t.totalIdr} >= 0`),
+  ],
+);
+
+export const orderItems = pgTable(
+  "order_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => orders.id, { onDelete: "cascade" }),
+    /** Produk asal; SET NULL bila produk dihapus — snapshot nama/harga kekal. */
+    productId: uuid("product_id").references(() => products.id, {
+      onDelete: "set null",
+    }),
+    /** Snapshot nama produk saat checkout. */
+    productName: varchar("product_name", { length: 255 }).notNull(),
+    qty: integer("qty").notNull(),
+    /** Snapshot harga satuan dari cart_items (Rupiah penuh). */
+    unitPriceIdr: bigint("unit_price_idr", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("order_items_tenant_id_idx").on(t.tenantId),
+    index("order_items_order_idx").on(t.orderId),
+    check("order_items_qty_positive", sql`${t.qty} > 0`),
+    check(
+      "order_items_unit_price_nonnegative",
+      sql`${t.unitPriceIdr} >= 0`,
+    ),
+  ],
+);
+
+export type Cart = typeof carts.$inferSelect;
+export type NewCart = typeof carts.$inferInsert;
+export type CartItem = typeof cartItems.$inferSelect;
+export type NewCartItem = typeof cartItems.$inferInsert;
+export type Order = typeof orders.$inferSelect;
+export type NewOrder = typeof orders.$inferInsert;
+export type OrderItem = typeof orderItems.$inferSelect;
+export type NewOrderItem = typeof orderItems.$inferInsert;

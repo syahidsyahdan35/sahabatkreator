@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import {
+  CATALOG_DEFAULT_INVALID_PROMPT,
   findFlowTemplate,
   QUESTIONNAIRE_DEFAULT_INVALID_PROMPT,
 } from "@sahabat-kreator/contracts";
@@ -36,7 +37,16 @@ import {
 import { renderMessageText } from "./render-text";
 import { normalizeContactPhone } from "./contacts";
 import { respondToInboundMessage } from "./agent-runtime";
-import { buildPaymentUrl, createPaymentLink } from "./products";
+import { buildPaymentUrl, createPaymentLink, PAYMENT_LINK_TTL_DAYS } from "./products";
+import {
+  addToCartTx,
+  checkoutCartTx,
+  getCartViewTx,
+  listActiveCatalogProductsTx,
+  parseCatalogSelection,
+  renderCartSummaryText,
+  renderCatalogText,
+} from "./commerce";
 
 /**
  * Flow Engine (Fase 8A) — eksekutor graf node di worker.
@@ -117,6 +127,25 @@ import { buildPaymentUrl, createPaymentLink } from "./products";
  * punya registri definisi field, jadi "definisi" = himpunan kunci
  * custom_fields yang dibawa kontak-kontak tenant (ditegakkan saat
  * aktivasi + diperiksa ulang setiap pertanyaan hendak dikirim).
+ *
+ * FASE 13F — node commerce `show_catalog` + `cart_checkout` (kontrak
+ * didokumentasikan penuh di packages/contracts):
+ * - show_catalog MEMAKAI ULANG mesin parkir yang sama (context.wait;
+ *   keadaan katalog di context.catalog {nodeId, productIds, attempts,
+ *   listedAt} — daftar id produk SESUAI urutan pengiriman, agar nomor
+ *   balasan selalu menunjuk produk yang dilihat kontak walau katalog
+ *   berubah di tengah parkir). Balasan diparsing parseCatalogSelection
+ *   ("N" / "NxM"); produk yang sudah nonaktif/terhapus sejak daftar
+ *   dikirim adalah percobaan tidak sah beralasan product_inactive /
+ *   product_unavailable (BUKAN penambahan diam-diam). Penambahan sah
+ *   menulis ke keranjang lewat commerce.addToCartTx (snapshot harga
+ *   saat tambah), mengirim ringkasan keranjang, lalu keluar branch
+ *   "added" — node TIDAK parkir ulang sesudah menambah; kelanjutan
+ *   belanja adalah komposisi graf (catalog → catalog / checkout).
+ * - cart_checkout TIDAK parkir: pola node khusus di executeFlowStep
+ *   seperti send_payment_link (butuh deps.publicBaseUrl untuk URL
+ *   tautan) — checkout atomik di commerce.checkoutCartTx, pesan
+ *   ringkasan + tautan antre, lalu branch checked_out / empty_cart.
  */
 
 export const FLOW_MAX_STEPS = 100;
@@ -151,7 +180,10 @@ export type FlowBranch =
   | "replied"
   | "timeout"
   | "completed"
-  | "invalid";
+  | "invalid"
+  | "added"
+  | "checked_out"
+  | "empty_cart";
 
 export interface FlowGraphEdge {
   from: string;
@@ -185,6 +217,9 @@ const NODE_TYPES = new Set([
   "wait_reply",
   // Fase 13E
   "questionnaire",
+  // Fase 13F
+  "show_catalog",
+  "cart_checkout",
 ]);
 
 const FLOW_BRANCHES: readonly FlowBranch[] = [
@@ -196,6 +231,9 @@ const FLOW_BRANCHES: readonly FlowBranch[] = [
   "timeout",
   "completed",
   "invalid",
+  "added",
+  "checked_out",
+  "empty_cart",
 ];
 
 function isValidFlowPosition(
@@ -313,6 +351,20 @@ export interface QuestionnaireRunState {
   startedAt: string;
 }
 
+/** Keadaan node show_catalog yang parkir, di `flow_runs.context` (Fase 13F). */
+export interface CatalogRunState {
+  nodeId: string;
+  /**
+   * Id produk SESUAI urutan daftar yang dikirim ke kontak — nomor
+   * balasan menunjuk daftar ini, bukan katalog berjalan, agar
+   * perubahan katalog di tengah parkir tidak menggeser arti nomor.
+   */
+  productIds: string[];
+  /** Percobaan tidak sah selama parkir ini. */
+  attempts: number;
+  listedAt: string;
+}
+
 /** Bentuk `flow_runs.context` yang dibaca eksekutor (defensif). */
 export interface FlowRunContextData {
   triggerText?: string;
@@ -324,6 +376,8 @@ export interface FlowRunContextData {
   wait?: { nodeId: string; deadline: string; parkedAt: string };
   /** Keadaan questionnaire (Fase 13E) selama node-nya parkir. */
   questionnaire?: QuestionnaireRunState;
+  /** Keadaan show_catalog (Fase 13F) selama node-nya parkir. */
+  catalog?: CatalogRunState;
   [key: string]: unknown;
 }
 
@@ -373,6 +427,26 @@ function runContextOf(run: FlowRun): FlowRunContextData {
           : 0,
       answers: q.answers as QuestionnaireAnswerRecord[],
       startedAt: typeof q.startedAt === "string" ? q.startedAt : "",
+    };
+  }
+  const cat = raw.catalog as Partial<CatalogRunState> | undefined;
+  if (
+    typeof cat !== "object" ||
+    cat === null ||
+    typeof cat.nodeId !== "string" ||
+    !Array.isArray(cat.productIds) ||
+    !cat.productIds.every((id) => typeof id === "string")
+  ) {
+    delete out.catalog;
+  } else {
+    out.catalog = {
+      nodeId: cat.nodeId,
+      productIds: cat.productIds as string[],
+      attempts:
+        typeof cat.attempts === "number" && Number.isInteger(cat.attempts)
+          ? Math.max(0, cat.attempts)
+          : 0,
+      listedAt: typeof cat.listedAt === "string" ? cat.listedAt : "",
     };
   }
   return out;
@@ -636,6 +710,70 @@ export function renderQuestionnairePrompt(
     .map((option, i) => `${i + 1}. ${option}`)
     .join("\n");
   return `${base}\n${list}`;
+}
+
+// ---------------------------------------------------------------------------
+// Katalog commerce (Fase 13F) — bentuk config node show_catalog
+// ---------------------------------------------------------------------------
+
+export interface CatalogConfig {
+  /** Teks pembuka opsional (dirender seperti send_message). */
+  introText: string | null;
+  showDescription: boolean;
+  timeoutMs: number;
+  maxInvalidAttempts: number;
+  invalidPrompt: string | null;
+  /** Teks tambahan opsional sesudah ringkasan keranjang saat item ditambahkan. */
+  addedMessage: string | null;
+}
+
+function parkTimeoutMsOf(c: Record<string, unknown>): number {
+  const amount = typeof c.amount === "number" ? c.amount : NaN;
+  const unitMs =
+    c.unit === "seconds"
+      ? 1_000
+      : c.unit === "minutes"
+        ? 60_000
+        : c.unit === "hours"
+          ? 3_600_000
+          : NaN;
+  return Number.isFinite(amount) && Number.isFinite(unitMs)
+    ? Math.max(0, Math.floor(amount * unitMs))
+    : 3_600_000;
+}
+
+/**
+ * Membaca config node show_catalog menjadi bentuk kerja (DEFENSIF —
+ * pola questionnaireConfigOf; keabsahan ditegakkan validasi aktivasi).
+ */
+export function catalogConfigOf(node: FlowGraphNode): CatalogConfig {
+  const c = node.config;
+  const attempts = c.maxInvalidAttempts;
+  return {
+    introText: isNonEmptyString(c.introText) ? c.introText : null,
+    showDescription: c.showDescription === true,
+    timeoutMs: parkTimeoutMsOf(c),
+    maxInvalidAttempts:
+      typeof attempts === "number" &&
+      Number.isInteger(attempts) &&
+      attempts >= 1 &&
+      attempts <= 5
+        ? attempts
+        : 2,
+    invalidPrompt: isNonEmptyString(c.invalidPrompt) ? c.invalidPrompt : null,
+    addedMessage: isNonEmptyString(c.addedMessage) ? c.addedMessage : null,
+  };
+}
+
+/** Membaca config node cart_checkout (Fase 13F) — DEFENSIF seperti di atas. */
+export function cartCheckoutConfigOf(node: FlowGraphNode): {
+  emptyMessage: string | null;
+} {
+  return {
+    emptyMessage: isNonEmptyString(node.config.emptyMessage)
+      ? node.config.emptyMessage
+      : null,
+  };
 }
 
 /**
@@ -1042,6 +1180,83 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
       }
       break;
     }
+    case "show_catalog": {
+      if (
+        c.introText !== undefined &&
+        (!isNonEmptyString(c.introText) || c.introText.length > 1000)
+      ) {
+        err(
+          "CATALOG_INTRO_INVALID",
+          "Node show_catalog membutuhkan introText string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      if (c.showDescription !== undefined && typeof c.showDescription !== "boolean") {
+        err(
+          "CATALOG_SHOW_DESCRIPTION_INVALID",
+          "Node show_catalog membutuhkan showDescription boolean bila diisi",
+        );
+      }
+      const amount = c.amount;
+      if (
+        typeof amount !== "number" ||
+        !Number.isInteger(amount) ||
+        amount < 0
+      ) {
+        err(
+          "CATALOG_AMOUNT_INVALID",
+          "Node show_catalog membutuhkan config.amount (tenggat per parkir) bilangan bulat ≥ 0",
+        );
+      }
+      if (c.unit !== "seconds" && c.unit !== "minutes" && c.unit !== "hours") {
+        err(
+          "CATALOG_UNIT_INVALID",
+          "Node show_catalog membutuhkan unit 'seconds'|'minutes'|'hours'",
+        );
+      }
+      const attempts = c.maxInvalidAttempts;
+      if (
+        typeof attempts !== "number" ||
+        !Number.isInteger(attempts) ||
+        attempts < 1 ||
+        attempts > 5
+      ) {
+        err(
+          "CATALOG_ATTEMPTS_INVALID",
+          "Node show_catalog membutuhkan config.maxInvalidAttempts bilangan bulat 1..5",
+        );
+      }
+      if (
+        c.invalidPrompt !== undefined &&
+        (!isNonEmptyString(c.invalidPrompt) || c.invalidPrompt.length > 1000)
+      ) {
+        err(
+          "CATALOG_INVALID_PROMPT_INVALID",
+          "Node show_catalog membutuhkan invalidPrompt string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      if (
+        c.addedMessage !== undefined &&
+        (!isNonEmptyString(c.addedMessage) || c.addedMessage.length > 1000)
+      ) {
+        err(
+          "CATALOG_ADDED_MESSAGE_INVALID",
+          "Node show_catalog membutuhkan addedMessage string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      break;
+    }
+    case "cart_checkout": {
+      if (
+        c.emptyMessage !== undefined &&
+        (!isNonEmptyString(c.emptyMessage) || c.emptyMessage.length > 1000)
+      ) {
+        err(
+          "CHECKOUT_EMPTY_MESSAGE_INVALID",
+          "Node cart_checkout membutuhkan emptyMessage string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      break;
+    }
     case "ai_response":
     case "handoff":
     case "end":
@@ -1141,6 +1356,19 @@ export async function validateFlowGraph(
         { branch: "timeout", code: "QUESTIONNAIRE_BRANCH_TIMEOUT_MISSING", label: "Node questionnaire membutuhkan edge branch 'timeout'" },
       ],
     },
+    show_catalog: {
+      required: [
+        { branch: "added", code: "CATALOG_BRANCH_ADDED_MISSING", label: "Node show_catalog membutuhkan edge branch 'added'" },
+        { branch: "invalid", code: "CATALOG_BRANCH_INVALID_MISSING", label: "Node show_catalog membutuhkan edge branch 'invalid'" },
+        { branch: "timeout", code: "CATALOG_BRANCH_TIMEOUT_MISSING", label: "Node show_catalog membutuhkan edge branch 'timeout'" },
+      ],
+    },
+    cart_checkout: {
+      required: [
+        { branch: "checked_out", code: "CHECKOUT_BRANCH_CHECKED_OUT_MISSING", label: "Node cart_checkout membutuhkan edge branch 'checked_out'" },
+        { branch: "empty_cart", code: "CHECKOUT_BRANCH_EMPTY_CART_MISSING", label: "Node cart_checkout membutuhkan edge branch 'empty_cart'" },
+      ],
+    },
   };
   for (const node of graph.nodes) {
     issues.push(...validateFlowNodeConfig(node));
@@ -1165,7 +1393,7 @@ export async function validateFlowGraph(
     } else {
       for (const e of out) {
         if (e.branch !== undefined) {
-          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, wait_reply, atau questionnaire");
+          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, wait_reply, questionnaire, show_catalog, atau cart_checkout");
         }
       }
     }
@@ -2018,6 +2246,8 @@ export interface FlowEvaluationOutcome {
   resumedRunIds: string[];
   /** Run questionnaire parkir yang memproses pesan ini sebagai jawaban (Fase 13E). */
   questionnaireResumedRunIds: string[];
+  /** Run show_catalog parkir yang memproses pesan ini sebagai pilihan (Fase 13F). */
+  catalogResumedRunIds: string[];
 }
 
 /**
@@ -2597,21 +2827,308 @@ async function processParkedQuestionnaireReply(
   );
 }
 /**
- * Melanjutkan SEMUA run parkir (wait_reply & questionnaire) di
- * percakapan ini dengan pesan masuk yang baru tiba, lalu
- * mengantrekan langkah lanjutan tiap run yang keluar dari parkirnya
- * lewat outbox. Run waiting biasa (delay) tidak disentuh —
+ * Keluar dari node show_catalog lewat satu branch (added / invalid /
+ * timeout): menulis baris langkah penutup, membersihkan context.wait
+ * + context.catalog, dan memajukan run (atau menyelesaikannya) —
+ * pasangan `exitParkedQuestionnaire` untuk node ini (Fase 13F).
+ * `run` harus keadaan segar dalam transaksi ini.
+ */
+async function exitParkedCatalog(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: {
+    branch: "added" | "invalid" | "timeout";
+    detail: Record<string, unknown>;
+  },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number }> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "show_catalog",
+    detail: { ...input.detail, branch: input.branch },
+  });
+  const nextId = nextNodeId(graph, node.id, input.branch);
+  const context = { ...runContextOf(run) };
+  delete context.wait;
+  delete context.catalog;
+  const patch: Partial<FlowRun> = {
+    stepCount: run.stepCount + 1,
+    nextStepSeq: seq + 1,
+    context,
+    updatedAt: now,
+  };
+  if (nextId === null) {
+    patch.status = "completed";
+    patch.currentNodeId = null;
+    patch.completedAt = now;
+    await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+    await flowAudit(tx, tenantId, {
+      actorType: "system",
+      actorId: `flow:${run.flowId}`,
+      action: "flow.run_completed",
+      flowId: run.flowId,
+      meta: {
+        flowRunId: run.id,
+        conversationId: run.conversationId,
+        stepCount: run.stepCount + 1,
+        reason: `show_catalog_${input.branch}`,
+      },
+    });
+    return { status: "completed", nextStepSeq: seq + 1 };
+  }
+  patch.status = "running";
+  patch.currentNodeId = nextId;
+  await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+  return { status: "running", nextStepSeq: seq + 1 };
+}
+
+/**
+ * Parkir (ulang) run pada node show_catalog sesudah prompt ulang:
+ * baris langkah + keadaan katalog + penanda parkir wait dengan
+ * tenggat BARU (semantik per-parkir wait_reply) + event tenggat.
+ * Pasangan `parkQuestionnaire` untuk node ini.
+ */
+async function parkCatalog(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  node: FlowGraphNode,
+  state: CatalogRunState,
+  timeoutMs: number,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "show_catalog",
+    detail,
+  });
+  const resumeAt = new Date(now.getTime() + timeoutMs);
+  const context: FlowRunContextData = {
+    ...runContextOf(run),
+    catalog: state,
+    wait: {
+      nodeId: node.id,
+      deadline: resumeAt.toISOString(),
+      parkedAt: now.toISOString(),
+    },
+  };
+  await tx
+    .update(flowRuns)
+    .set({
+      stepCount: run.stepCount + 1,
+      nextStepSeq: seq + 1,
+      status: "waiting",
+      currentNodeId: node.id,
+      context,
+      updatedAt: now,
+    })
+    .where(eq(flowRuns.id, run.id));
+  await tx.insert(outboxEvents).values({
+    tenantId,
+    type: "flow.step_due",
+    payload: {
+      runId: run.id,
+      stepSeq: seq + 1,
+      resumeAt: resumeAt.toISOString(),
+    },
+  });
+}
+
+/**
+ * Memproses SATU pesan masuk sebagai balasan bagi run show_catalog
+ * yang parkir (Fase 13F): parsing pilihan → tambah keranjang + keluar
+ * "added", atau prompt ulang / keluar "invalid" bila percobaan habis.
+ * Seluruhnya dalam transaksi pemanggil (jalur evaluasi pesan masuk).
+ * Mengembalikan hasil keluar-parkir bila run meninggalkan node-nya,
+ * null bila run parkir lagi (prompt ulang).
+ */
+async function processParkedCatalogReply(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: { messageId: string; messageText: string },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> {
+  const config = catalogConfigOf(node);
+  const ctxData = runContextOf(run);
+  const state = ctxData.catalog;
+  if (!state || state.nodeId !== node.id) {
+    // Keadaan parkir rusak/hilang — degrade jujur seperti questionnaire.
+    return exitParkedCatalog(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      detail: { outcome: "state_missing" },
+    });
+  }
+  const [contact] = await tx
+    .select()
+    .from(contacts)
+    .where(
+      and(eq(contacts.tenantId, tenantId), eq(contacts.id, run.contactId)),
+    )
+    .limit(1);
+  const [conversation] = await tx
+    .select()
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, tenantId),
+        eq(conversations.id, run.conversationId),
+      ),
+    )
+    .limit(1);
+  if (!contact || !conversation) {
+    return exitParkedCatalog(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      detail: { outcome: "state_missing" },
+    });
+  }
+
+  // Satu jalur kegagalan pilihan: hitung percobaan, lalu prompt ulang
+  // (daftar dirender ulang dari KEADAAN parkir — id produk yang sama,
+  // harga/nama berjalan produk yang masih ada) atau keluar "invalid".
+  const failSelection = async (
+    reason: "not_a_selection" | "product_inactive" | "product_unavailable",
+    extra: Record<string, unknown>,
+  ): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> => {
+    const attempts = state.attempts + 1;
+    if (attempts >= config.maxInvalidAttempts) {
+      return exitParkedCatalog(tx, tenantId, run, graph, node, {
+        branch: "invalid",
+        detail: {
+          outcome: "attempts_exhausted",
+          reason,
+          attempts,
+          messageId: input.messageId,
+          ...extra,
+        },
+      });
+    }
+    state.attempts = attempts;
+    const listed = await tx
+      .select()
+      .from(products)
+      .where(
+        and(
+          eq(products.tenantId, tenantId),
+          inArray(products.id, state.productIds),
+        ),
+      );
+    const byId = new Map(listed.map((p) => [p.id, p]));
+    const stillListed = state.productIds
+      .map((id) => byId.get(id))
+      .filter((p): p is NonNullable<typeof p> => p !== undefined);
+    const invalidText = renderMessageText(
+      config.invalidPrompt ?? CATALOG_DEFAULT_INVALID_PROMPT,
+      { name: contact.name },
+    );
+    const outboundId = await queueFlowOutboundText(
+      tx,
+      tenantId,
+      run,
+      conversation,
+      `${invalidText}\n${renderCatalogText(stillListed, { showDescription: config.showDescription })}`,
+    );
+    await parkCatalog(tx, tenantId, run, node, state, config.timeoutMs, {
+      outcome: "selection_invalid",
+      reason,
+      raw: input.messageText.slice(0, 200),
+      attempts,
+      messageId: input.messageId,
+      outboundMessageId: outboundId,
+      ...extra,
+    });
+    return null;
+  };
+
+  const selection = parseCatalogSelection(
+    input.messageText,
+    state.productIds.length,
+  );
+  if (!selection) {
+    return failSelection("not_a_selection", {});
+  }
+  const productId = state.productIds[selection.index];
+  const [product] = await tx
+    .select()
+    .from(products)
+    .where(
+      and(eq(products.tenantId, tenantId), eq(products.id, productId)),
+    )
+    .limit(1);
+  if (!product) {
+    return failSelection("product_unavailable", { productId });
+  }
+  if (!product.isActive) {
+    // Produk dinonaktifkan SETELAH daftar terkirim: tidak bisa
+    // ditambahkan — percobaan tidak sah, bukan penambahan diam-diam.
+    return failSelection("product_inactive", { productId });
+  }
+
+  // Pilihan sah: tulis ke keranjang (snapshot harga saat ini oleh
+  // commerce), kirim ringkasan keranjang (+ addedMessage), keluar
+  // branch "added" — kelanjutan adalah komposisi graf.
+  const view = await addToCartTx(tx, tenantId, run.contactId, product, selection.qty);
+  const summary = renderCartSummaryText(view);
+  const addedText = config.addedMessage
+    ? `\n${renderMessageText(config.addedMessage, { name: contact.name })}`
+    : "";
+  const outboundId = await queueFlowOutboundText(
+    tx,
+    tenantId,
+    run,
+    conversation,
+    `${summary}${addedText}`,
+  );
+  return exitParkedCatalog(tx, tenantId, run, graph, node, {
+    branch: "added",
+    detail: {
+      outcome: "added",
+      productId: product.id,
+      productName: product.name,
+      qty: selection.qty,
+      unitPriceIdr: product.priceIdr,
+      cartTotalIdr: view.totalIdr,
+      cartItemCount: view.itemCount,
+      messageId: input.messageId,
+      outboundMessageId: outboundId,
+    },
+  });
+}
+/**
+ * Melanjutkan SEMUA run parkir (wait_reply, questionnaire &
+ * show_catalog) di percakapan ini dengan pesan masuk yang baru tiba,
+ * lalu mengantrekan langkah lanjutan tiap run yang keluar dari
+ * parkirnya lewat outbox. Run waiting biasa (delay) tidak disentuh —
  * penandanya adalah context.wait yang nodeId-nya sama dengan
  * currentNodeId. wait_reply selesai lewat branch "replied";
  * questionnaire MEMPROSES pesan sebagai jawaban (validasi + tulis
  * field + pertanyaan berikutnya) dan hanya keluar parkir saat
  * kuesionernya selesai/gagal — lihat processParkedQuestionnaireReply.
+ * show_catalog MEMPROSES pesan sebagai pilihan katalog (tambah
+ * keranjang / prompt ulang) — lihat processParkedCatalogReply.
  */
 async function resumeParkedFlowRuns(
   tx: DbTx,
   tenantId: string,
   input: { conversationId: string; messageId: string; messageText: string },
-): Promise<{ waitReplyRunIds: string[]; questionnaireRunIds: string[] }> {
+): Promise<{
+  waitReplyRunIds: string[];
+  questionnaireRunIds: string[];
+  catalogRunIds: string[];
+}> {
   const waiting = await tx
     .select()
     .from(flowRuns)
@@ -2624,6 +3141,7 @@ async function resumeParkedFlowRuns(
     );
   const waitReplyRunIds: string[] = [];
   const questionnaireRunIds: string[] = [];
+  const catalogRunIds: string[] = [];
   for (const run of waiting) {
     const ctx = runContextOf(run);
     if (!ctx.wait || run.currentNodeId !== ctx.wait.nodeId) continue;
@@ -2665,6 +3183,35 @@ async function resumeParkedFlowRuns(
       questionnaireRunIds.push(run.id);
       continue;
     }
+    if (node.type === "show_catalog") {
+      if (!ctx.catalog || ctx.catalog.nodeId !== node.id) {
+        continue;
+      }
+      const exited = await processParkedCatalogReply(
+        tx,
+        tenantId,
+        run,
+        graph,
+        node,
+        {
+          messageId: input.messageId,
+          messageText: input.messageText,
+        },
+      );
+      if (exited && exited.status === "running") {
+        await tx.insert(outboxEvents).values({
+          tenantId,
+          type: "flow.step_due",
+          payload: {
+            runId: run.id,
+            stepSeq: exited.nextStepSeq,
+            resumeAt: new Date().toISOString(),
+          },
+        });
+      }
+      catalogRunIds.push(run.id);
+      continue;
+    }
     if (node.type !== "wait_reply") continue;
     const result = await resolveParkedWaitReply(tx, tenantId, run, graph, node, {
       branch: "replied",
@@ -2683,7 +3230,7 @@ async function resumeParkedFlowRuns(
     }
     waitReplyRunIds.push(run.id);
   }
-  return { waitReplyRunIds, questionnaireRunIds };
+  return { waitReplyRunIds, questionnaireRunIds, catalogRunIds };
 }
 
 /**
@@ -2762,6 +3309,7 @@ export async function startFlowRunsForInboundMessage(
     cancelledRunIds: [],
     resumedRunIds: [],
     questionnaireResumedRunIds: [],
+    catalogResumedRunIds: [],
   };
   if (!input.contact) return outcome;
 
@@ -2790,6 +3338,7 @@ export async function startFlowRunsForInboundMessage(
   );
   outcome.resumedRunIds = resumedParked.waitReplyRunIds;
   outcome.questionnaireResumedRunIds = resumedParked.questionnaireRunIds;
+  outcome.catalogResumedRunIds = resumedParked.catalogRunIds;
 
   const activeFlows = await withTenantDb(db, tenantId, (tx) =>
     tx
@@ -3792,6 +4341,53 @@ async function executeNodeInTx(
       };
     }
 
+    case "show_catalog": {
+      if (!ctx.contact) throw new FlowNodeError("kontak run tidak ditemukan");
+      if (!ctx.conversation) {
+        throw new FlowNodeError("percakapan run tidak ditemukan");
+      }
+      const config = catalogConfigOf(node);
+      const listed = await listActiveCatalogProductsTx(tx, tenantId);
+      if (listed.length === 0) {
+        // Katalog kosong adalah kegagalan keras yang tercatat —
+        // mengirim daftar kosong lalu parkir akan menggantung kontak.
+        throw new FlowNodeError(
+          "show_catalog tanpa produk aktif",
+          "catalog_empty",
+        );
+      }
+      const intro = config.introText
+        ? renderMessageText(config.introText, { name: ctx.contact.name })
+        : null;
+      const outboundId = await queueFlowOutboundText(
+        tx,
+        tenantId,
+        run,
+        ctx.conversation,
+        renderCatalogText(listed, {
+          introText: intro,
+          showDescription: config.showDescription,
+        }),
+      );
+      const state: CatalogRunState = {
+        nodeId: node.id,
+        productIds: listed.map((p) => p.id),
+        attempts: 0,
+        listedAt: new Date().toISOString(),
+      };
+      return {
+        detail: {
+          outcome: "catalog_shown",
+          productCount: listed.length,
+          productIds: state.productIds,
+          outboundMessageId: outboundId,
+        },
+        parkWaitReplyMs: config.timeoutMs,
+        contextPatch: { catalog: state },
+        outboundMessageId: outboundId,
+      };
+    }
+
     case "goto_flow": {
       const targetId = String(c.flowId ?? "");
       if (!targetId || !isUuidLike(targetId)) {
@@ -4074,10 +4670,16 @@ export async function executeFlowStep(
     // tenggat PERTANYAAN berjalan lewat → keluar branch "timeout"
     // dengan transkrip parsial (jawaban yang sudah masuk tetap
     // tersimpan di field kontak — ditulis saat dijawab).
+    // Fase 13F — node show_catalog parkir memakai penanda yang sama:
+    // tenggat pilihan lewat → keluar branch "timeout" (item yang
+    // sudah masuk keranjang dari parkir SEBELUMNYA tetap di keranjang
+    // — keranjang adalah keadaan kontak, bukan keadaan run).
     const parkedCtx = runContextOf(run);
     if (
       run.status === "waiting" &&
-      (node.type === "wait_reply" || node.type === "questionnaire") &&
+      (node.type === "wait_reply" ||
+        node.type === "questionnaire" ||
+        node.type === "show_catalog") &&
       parkedCtx.wait &&
       parkedCtx.wait.nodeId === node.id
     ) {
@@ -4106,6 +4708,27 @@ export async function executeFlowStep(
           const waitedMs = Number.isNaN(parkedAtMs)
             ? null
             : Math.max(0, Date.now() - parkedAtMs);
+          if (node.type === "show_catalog") {
+            const cState = freshCtx.catalog;
+            const r = await exitParkedCatalog(
+              tx,
+              tenantId,
+              fresh,
+              graph,
+              node,
+              {
+                branch: "timeout",
+                detail: {
+                  outcome: "timeout",
+                  deadline: freshCtx.wait.deadline,
+                  waitedMs,
+                  attempts: cState?.attempts ?? null,
+                  productCount: cState?.productIds.length ?? null,
+                },
+              },
+            );
+            return { applied: true, status: r.status };
+          }
           if (node.type === "questionnaire") {
             const qState = freshCtx.questionnaire;
             const currentQuestion =
@@ -4414,6 +5037,123 @@ export async function executeFlowStep(
         };
       }
       stepsExecuted += 1;
+      if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
+        return {
+          executed: true,
+          status: applied.status,
+          conversationId: run.conversationId,
+          outboundMessageId: lastOutboundMessageId,
+          stepsExecuted,
+        };
+      }
+      continue;
+    }
+
+    // Node cart_checkout (Fase 13F): checkout atomik di core commerce
+    // (order + tautan order + keranjang checked_out dalam SATU
+    // transaksi tenant di sini) + pesan ringkasan/tautan antre dalam
+    // transaksi yang sama. Berbeda dari send_payment_link, checkout
+    // yang kosong BUKAN kegagalan: ia branch empty_cart yang sah.
+    if (node.type === "cart_checkout") {
+      const checkoutConfig = cartCheckoutConfigOf(node);
+      const applied: AdvanceResult = await withTenantDb(
+        db,
+        tenantId,
+        async (tx) => {
+          const [fresh] = await tx
+            .select()
+            .from(flowRuns)
+            .where(and(eq(flowRuns.tenantId, tenantId), eq(flowRuns.id, runId)))
+            .limit(1);
+          if (!fresh || isTerminalStatus(fresh.status)) {
+            return { applied: false, reason: "run_terminal" as const };
+          }
+          if (fresh.nextStepSeq !== run.nextStepSeq) {
+            return { applied: false, reason: "stale_step" as const };
+          }
+          if (!ctxState.conversation || !ctxState.contact) {
+            await failRun(
+              tx,
+              tenantId,
+              fresh,
+              node,
+              "step_error",
+              "percakapan/kontak run tidak ditemukan",
+              { outcome: "failed" },
+            );
+            return { applied: true, status: "failed" as const };
+          }
+          const result = await checkoutCartTx(tx, tenantId, {
+            contactId: fresh.contactId,
+            conversationId: fresh.conversationId,
+            actor: { actorType: "system", actorId: `flow:${run.flowId}` },
+          });
+          if (result.kind === "empty_cart") {
+            let outboundMessageId: string | undefined;
+            if (checkoutConfig.emptyMessage) {
+              outboundMessageId = await queueFlowOutboundText(
+                tx,
+                tenantId,
+                fresh,
+                ctxState.conversation,
+                renderMessageText(checkoutConfig.emptyMessage, {
+                  name: ctxState.contact.name,
+                }),
+              );
+            }
+            const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+              detail: { outcome: "empty_cart" },
+              branch: "empty_cart",
+            });
+            return {
+              applied: true,
+              status: adv.status,
+              outboundMessageId,
+            };
+          }
+          const paymentUrl = buildPaymentUrl(
+            deps.publicBaseUrl,
+            result.link.code,
+          );
+          const checkoutText = `${renderCartSummaryText(result.view)}\nLink pembayaran: ${paymentUrl} (berlaku ${PAYMENT_LINK_TTL_DAYS} hari)`;
+          const outboundId = await queueFlowOutboundText(
+            tx,
+            tenantId,
+            fresh,
+            ctxState.conversation,
+            checkoutText,
+          );
+          const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+            detail: {
+              outcome: "checked_out",
+              orderId: result.order.id,
+              paymentLinkId: result.link.id,
+              code: result.link.code,
+              totalIdr: result.order.totalIdr,
+              itemCount: result.view.itemCount,
+            },
+            branch: "checked_out",
+          });
+          return {
+            applied: true,
+            status: adv.status,
+            outboundMessageId: outboundId,
+          };
+        },
+      );
+      if (!applied.applied) {
+        return {
+          executed: stepsExecuted > 0,
+          reason:
+            applied.reason === "stale_step" ? "stale_step" : "run_terminal",
+          conversationId: run.conversationId,
+          stepsExecuted,
+        };
+      }
+      stepsExecuted += 1;
+      if (applied.outboundMessageId) {
+        lastOutboundMessageId = applied.outboundMessageId;
+      }
       if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
         return {
           executed: true,

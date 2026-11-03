@@ -58,6 +58,9 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 | Produk — daftar | Ada | Ada | Ada — `GET /v1/products` (`products:read`) | `listProducts()` | `list_products` (baca) | `sk products list` | |
 | Produk — buat/ubah/arsip | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Katalog dikurasi pemilik di dashboard; pembacaan publik cukup untuk integrasi checkout eksternal. |
 | Tautan bayar (payment links) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Permukaan bayar masih SIMULASI berlabel; eksposur publik diputuskan saat pembayaran asli (Fase 14A, Midtrans/Xendit). Halaman `/pay/:code` adalah permukaan publik non-v1 (kode tautan, tanpa kunci). |
+| Order — daftar & detail (Fase 13F) | Ada | Ada | **Ada (baru 13F)** — `GET /v1/orders`, `GET /v1/orders/:id` (`orders:read`) | `listOrders()` / `getOrder()` | `list_orders` / `get_order` (baca) | `sk orders list` / `sk orders get` | Order lahir dari checkout flow (node `cart_checkout`): baris item adalah SNAPSHOT nama+harga saat checkout, total dihitung server dari snapshot keranjang, dan status order MENGIKUTI tautan bayarnya (pending → paid/expired/cancelled; hook sinkron idempoten di titik penyelesaian pembayaran yang sama dengan tautan produk tunggal). Serializer bersama dashboard + v1 persis sama. Pembayaran tetap SIMULASI sampai Fase 14A. |
+| Keranjang belanja (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) — tanpa rute v1/SDK/MCP | — | — | — | Keranjang adalah KEADAAN SESI efemeral per kontak di dalam percakapan: diisi node flow `show_catalog` (parkir pilihan, pola mesin parkir yang sama dengan questionnaire), dikonsumsi `cart_checkout`, dan tidak punya siklus hidup integrasi sendiri — mengeksposnya akan membekukan bentuk sesi internal menjadi kontrak publik. Yang terekspos adalah HASILNYA yang stabil: order (baris di atas) + tautan bayarnya. Inspeksi keranjang dari detail kontak disengaja tidak dibuat fase ini (bukan permukaan operator yang diminta; isi keranjang terlihat dari ringkasan chat itu sendiri). |
+| Flow — node show_catalog & cart_checkout (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Kedua node adalah bagian dari GRAF flow (pola yang sama dengan questionnaire 13E): config-nya (`introText?`, `showDescription`, tenggat per parkir, `maxInvalidAttempts`, `invalidPrompt?`, `addedMessage?` untuk katalog; `emptyMessage?` untuk checkout) hidup di dalam graf yang sudah terbaca v1 lewat baris "Flow — daftar & detail" — BUKAN permukaan baru. Balasan pilihan katalog memakai mesin parkir `wait_reply` yang sama dan TIDAK bocor ke agent (gerbang worker menghitung `flowCatalogResumed`). Agent mendapat akses BACA katalog lewat konteks prompt (daftar produk aktif di prompt sistem — runtime agent berjalan satu completion tanpa putaran hasil-tool, jadi tool baca tidak akan pernah dilihat model); tulis keranjang/checkout tetap eksklusif flow. |
 | Komentar IG/Messenger — daftar | Ada | Ada | Ada — `GET /v1/comments` (`comments:read`) | `listComments()` | `list_comments` (baca) | `sk comments list` | Sejak Fase 10B. |
 | Komentar — sembunyikan/tampilkan | Ada | Ada | Ada — `POST /v1/comments/:id/hide\|unhide` (`comments:write`) | `hideComment()` / `unhideComment()` | `hide_comment` / `unhide_comment` (tulis) | `sk comments hide` / `sk comments unhide` | Helper moderasi yang sama dengan dashboard: Graph dulu, lokal sesudahnya. |
 | Broadcast — daftar & detail + statistik | Ada | Ada | **Ada (baru 15A)** — `GET /v1/broadcasts`, `GET /v1/broadcasts/:id` (`broadcasts:read`) | `listBroadcasts()` / `getBroadcast()` | `list_broadcasts` / `get_broadcast` (baca) | `sk broadcasts list` / `sk broadcasts get` | Paginasi kursor sama seperti dashboard. |
@@ -147,3 +150,25 @@ Konsekuensi praktis untuk setiap fase berikutnya:
   keyword dua arah + konfirmasi sekali per transisi, paritas
   pratinjau↔materialisasi, evaluator 8 tipe kondisi + all/any,
   isolasi tenant, regresi 7C/10A, verify-sdk + verify-mcp hijau).
+
+## Pembaruan Fase 13F (2026-11-03) — Katalog + Keranjang Commerce
+
+- **32 rute** API publik v1 (bertambah 2: order baca).
+- **17 scope** API key: 3 tulis + 14 baca — scope baru `orders:read`
+  ikut menjadi bawaan kunci baru (preseden yang sama seperti
+  scope baca 15A/13B/13C).
+- **32 metode** publik SDK dan **32 tool** MCP: 27 baca / 5 tulis
+  (tool tulis tidak berubah; order baca saja).
+- Skema baru: `carts` + `cart_items` (keranjang terbuka unik per
+  kontak via indeks unik parsial; harga baris adalah snapshot saat
+  item PERTAMA ditambahkan) dan `orders` + `order_items` (snapshot
+  checkout; total dihitung server). `payment_links` menjadi
+  dual-varian: `product_id` nullable + `order_id` + CHECK tepat
+  satu target — halaman publik `/pay/:code` melayani kedua varian
+  tanpa perubahan permukaan.
+- Node flow baru `show_catalog` (katalog bernomor → parkir pilihan
+  "N" / "NxM" → branch added/invalid/timeout) dan `cart_checkout`
+  (ringkasan + order + satu tautan bayar → branch
+  checked_out/empty_cart); `view_cart` SENGAJA dilipat ke langkah
+  tampil checkout, bukan node ketiga.
+- `pnpm check:drift` lulus pada permukaan yang diperluas.

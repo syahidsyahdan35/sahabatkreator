@@ -122,11 +122,16 @@ const NODE_ICON_PATHS: Record<FlowNodeType, string> = {
     "M20.5 11.5a8.5 8.5 0 0 1-12.3 7.5L3.5 20.5l1.5-4.7A8.5 8.5 0 1 1 20.5 11.5zM12 7.8V12l2.8 1.8",
   questionnaire:
     "M9.5 6.5H20M9.5 12H20M9.5 17.5H20M3.8 6.5l1.1 1.1L6.8 5.4M3.8 12l1.1 1.1 1.9-2.2M3.8 17.5l1.1 1.1 1.9-2.2",
+  show_catalog:
+    "M4 5.5h16l-1.2 5H5.2L4 5.5zM5.2 10.5 6 18a1.5 1.5 0 0 0 1.5 1.2h9A1.5 1.5 0 0 0 18 18l.8-7.5M9 14.5h6",
+  cart_checkout:
+    "M3.5 4.5h2.4l2.3 11.2a1.8 1.8 0 0 0 1.8 1.4h7.6a1.8 1.8 0 0 0 1.8-1.4L20.8 8H6.2M10 20.8h.01M17.5 20.8h.01",
 };
 
 /** Warna label chip cabang: positif hijau, timeout kuning (bila ada cabang ketiga), selainnya merah. */
 function branchColorClass(branch: string, count: number): string {
   if (branch === "timeout") return count > 2 ? "text-warning" : "text-danger";
+  if (branch === "empty_cart") return "text-muted";
   if (branch === "invalid" || branch === "no" || branch === "b") {
     return "text-danger";
   }
@@ -1300,6 +1305,150 @@ function NodeConfigPanel({
             </div>
           </div>
           <p className="text-xs text-muted">{t("flows.waitReplyHint")}</p>
+        </div>
+      ) : null}
+
+      {type === "show_catalog" ? (
+        <div className="space-y-3">
+          <p className="text-xs text-muted">{t("flows.catalogHint")}</p>
+          <div>
+            <label className={labelClass} htmlFor="cfg-catalog-intro">
+              {t("flows.catalogIntroLabel")}
+            </label>
+            <textarea
+              id="cfg-catalog-intro"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.catalogIntroPlaceholder")}
+              value={str(config.introText)}
+              onChange={(e) => set({ introText: e.target.value })}
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              disabled={readOnly}
+              checked={config.showDescription === true}
+              onChange={(e) => set({ showDescription: e.target.checked })}
+            />
+            {t("flows.catalogShowDescriptionLabel")}
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass} htmlFor="cfg-catalog-amount">
+                {t("flows.waitReplyAmountLabel")}
+              </label>
+              <input
+                id="cfg-catalog-amount"
+                type="number"
+                min={0}
+                step={1}
+                className={inputClass}
+                disabled={readOnly}
+                value={numVal(config.amount, 24)}
+                onChange={(e) =>
+                  set({
+                    amount: Math.max(
+                      0,
+                      Math.floor(Number(e.target.value) || 0),
+                    ),
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="cfg-catalog-unit">
+                {t("flows.delayUnitLabel")}
+              </label>
+              <select
+                id="cfg-catalog-unit"
+                className={inputClass}
+                disabled={readOnly}
+                value={str(config.unit) || "hours"}
+                onChange={(e) => set({ unit: e.target.value })}
+              >
+                <option value="seconds">{t("flows.unitSeconds")}</option>
+                <option value="minutes">{t("flows.unitMinutes")}</option>
+                <option value="hours">{t("flows.unitHours")}</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-catalog-attempts">
+              {t("flows.questionnaireAttemptsLabel")}
+            </label>
+            <input
+              id="cfg-catalog-attempts"
+              type="number"
+              min={1}
+              max={5}
+              step={1}
+              className={inputClass}
+              disabled={readOnly}
+              value={numVal(config.maxInvalidAttempts, 2)}
+              onChange={(e) =>
+                set({
+                  maxInvalidAttempts: Math.min(
+                    5,
+                    Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                  ),
+                })
+              }
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-catalog-invalid">
+              {t("flows.catalogInvalidPromptLabel")}
+            </label>
+            <textarea
+              id="cfg-catalog-invalid"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.catalogInvalidPromptPlaceholder")}
+              value={str(config.invalidPrompt)}
+              onChange={(e) => set({ invalidPrompt: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-catalog-added">
+              {t("flows.catalogAddedMessageLabel")}
+            </label>
+            <textarea
+              id="cfg-catalog-added"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.catalogAddedMessagePlaceholder")}
+              value={str(config.addedMessage)}
+              onChange={(e) => set({ addedMessage: e.target.value })}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {type === "cart_checkout" ? (
+        <div className="space-y-3">
+          <p className="text-xs text-muted">{t("flows.checkoutHint")}</p>
+          <div>
+            <label className={labelClass} htmlFor="cfg-checkout-empty">
+              {t("flows.checkoutEmptyMessageLabel")}
+            </label>
+            <textarea
+              id="cfg-checkout-empty"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.checkoutEmptyMessagePlaceholder")}
+              value={str(config.emptyMessage)}
+              onChange={(e) => set({ emptyMessage: e.target.value })}
+            />
+          </div>
         </div>
       ) : null}
 

@@ -22,6 +22,8 @@ import type {
   GrowthLinkResponse,
   SegmentListResponse,
   SegmentResponse,
+  OrderListResponse,
+  OrderResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -83,6 +85,8 @@ export type {
   GrowthLinkResponse,
   SegmentListResponse,
   SegmentResponse,
+  OrderListResponse,
+  OrderResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -465,6 +469,25 @@ export class SahabatKreatorClient {
     return this.request<SegmentResponse>(
       "GET",
       `/segments/${encodeURIComponent(segmentId)}`,
+    );
+  }
+
+  /**
+   * GET /v1/orders (scope `orders:read`) — order commerce yang lahir
+   * dari checkout flow (node cart_checkout), terbaru dulu (Fase 13F).
+   * Status order mengikuti tautan bayarnya; pembayaran fase ini
+   * masih SIMULASI sampai gerbang merchant nyata (Fase 14A).
+   * Keranjang SENGAJA tidak diekspos: keadaan sesi percakapan.
+   */
+  async listOrders(): Promise<OrderListResponse> {
+    return this.request<OrderListResponse>("GET", "/orders");
+  }
+
+  /** GET /v1/orders/:id (scope `orders:read`) — detail + item snapshot + referensi tautan bayar. */
+  async getOrder(orderId: string): Promise<OrderResponse> {
+    return this.request<OrderResponse>(
+      "GET",
+      `/orders/${encodeURIComponent(orderId)}`,
     );
   }
 }

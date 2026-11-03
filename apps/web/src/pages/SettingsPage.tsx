@@ -50,6 +50,7 @@ const SCOPE_LABEL_KEYS: Record<ApiKeyScope, TranslationKey> = {
   "knowledge:read": "settings.scopeKnowledgeRead",
   "growth_links:read": "settings.scopeGrowthLinksRead",
   "segments:read": "settings.scopeSegmentsRead",
+  "orders:read": "settings.scopeOrdersRead",
 };
 
 /** Scope read tercentang secara bawaan di form (selaras default API). */

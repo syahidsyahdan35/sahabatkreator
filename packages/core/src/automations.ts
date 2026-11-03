@@ -485,6 +485,12 @@ export interface EvaluateInboundResult {
    * worker tidak meneruskannya ke agent.
    */
   flowQuestionnaireResumed: number;
+  /**
+   * Fase 13F: run show_catalog parkir yang memproses pesan ini
+   * sebagai pilihan katalog. Dihitung tertangani flow seperti
+   * questionnaire — worker tidak meneruskannya ke agent.
+   */
+  flowCatalogResumed: number;
 }
 
 /**
@@ -626,6 +632,7 @@ export async function evaluateInboundMessageForAutomations(
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
       flowQuestionnaireResumed: 0,
+      flowCatalogResumed: 0,
       consentAction: null,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
@@ -642,6 +649,7 @@ export async function evaluateInboundMessageForAutomations(
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
       flowQuestionnaireResumed: 0,
+      flowCatalogResumed: 0,
       consentAction: null,
     };
   const text = context.message.contentText ?? "";
@@ -720,6 +728,7 @@ export async function evaluateInboundMessageForAutomations(
           cancelledFlowRuns: 0,
           flowWaitReplyResumed: 0,
           flowQuestionnaireResumed: 0,
+      flowCatalogResumed: 0,
           consentAction: consentMatch,
         };
       }
@@ -1006,6 +1015,7 @@ export async function evaluateInboundMessageForAutomations(
     cancelledFlowRuns: flowOutcome.cancelledRunIds.length,
     flowWaitReplyResumed: flowOutcome.resumedRunIds.length,
     flowQuestionnaireResumed: flowOutcome.questionnaireResumedRunIds.length,
+    flowCatalogResumed: flowOutcome.catalogResumedRunIds.length,
     consentAction: null,
   };
 }

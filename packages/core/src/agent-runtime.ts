@@ -23,6 +23,7 @@ import {
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
 import { getActiveAgent, getAgent } from "./agents";
+import { buildAgentCatalogContext } from "./commerce";
 import { listMessages } from "./conversations";
 import { searchKbChunks, type KbSearchHit } from "./kb";
 import { embedKbQueryText } from "./kb-embeddings";
@@ -454,8 +455,20 @@ export async function generateAgentDraft(
     queryEmbedding,
   });
 
+  // Fase 13F: konteks katalog produk aktif disisipkan ke prompt
+  // sistem — akses BACA katalog agent. Runtime berjalan satu
+  // completion tanpa putaran hasil-tool, jadi tool baca tidak akan
+  // pernah dilihat model pada balasan yang sama; konteks prompt
+  // adalah jalur baca yang nyata. Kegagalan baca katalog TIDAK boleh
+  // menggagalkan balasan (ditelan → tanpa konteks katalog).
+  const catalogContext = await buildAgentCatalogContext(db, ctx).catch(
+    () => null,
+  );
+
   const result = await provider.chat({
-    system: buildAgentSystemPrompt(agent),
+    system:
+      buildAgentSystemPrompt(agent) +
+      (catalogContext ? `\n${catalogContext}` : ""),
     messages: input.messages,
     tools: AGENT_TOOLS,
     kbChunks: hits.map((h) => h.content),

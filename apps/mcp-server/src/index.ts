@@ -556,6 +556,30 @@ server.registerTool(
   async ({ segmentId }) => run(() => client.getSegment(segmentId)),
 );
 
+server.registerTool(
+  "list_orders",
+  {
+    description:
+      "Daftar order commerce workspace (scope orders:read, Fase 13F): order lahir dari node flow cart_checkout — baris item snapshot, total terhitung server, status mengikuti tautan bayar (pending/paid/expired/cancelled) + referensi tautan. Pembayaran masih SIMULASI sampai gerbang merchant nyata (Fase 14A). Keranjang SENGAJA tidak diekspos (keadaan sesi percakapan). Hasil: { orders }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listOrders()),
+);
+
+server.registerTool(
+  "get_order",
+  {
+    description:
+      "Satu order commerce: pembeli, item snapshot (nama, qty, harga satuan), total, status, kode/url/status tautan bayar, dan waktu lunas (scope orders:read).",
+    inputSchema: {
+      orderId: z.string().uuid().describe("Id order (dari list_orders)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ orderId }) => run(() => client.getOrder(orderId)),
+);
+
 await server.connect(new StdioServerTransport());
 console.error(
   `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl} — tier: ${

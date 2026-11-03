@@ -1756,7 +1756,10 @@ export type CreatePaymentLinkRequest = z.infer<
 
 export const PaymentLinkResponseSchema = z.object({
   id: z.string().uuid(),
-  productId: z.string().uuid(),
+  /** Produk yang dibayar; null untuk tautan order (Fase 13F). */
+  productId: z.string().uuid().nullable(),
+  /** Order yang dibayar; null untuk tautan produk (Fase 13F). */
+  orderId: z.string().uuid().nullable(),
   productName: z.string(),
   contactId: z.string().uuid().nullable(),
   contactName: z.string().nullable(),
@@ -1764,7 +1767,7 @@ export const PaymentLinkResponseSchema = z.object({
   code: z.string(),
   /** URL publik halaman bayar: {base}/pay/{code}. */
   url: z.string(),
-  /** Snapshot harga produk saat tautan dibuat. */
+  /** Snapshot harga produk / total order saat tautan dibuat. */
   amountIdr: z.number().int().nonnegative(),
   status: PaymentLinkStatusSchema,
   /** Fase ini selalu 'simulation' — belum ada pembayaran sungguhan. */
@@ -1830,6 +1833,10 @@ export const ApiKeyScopeSchema = z.enum([
   // — segmen adalah artefak kurasi UI dengan definisi kondisi kompleks;
   // lihat docs/COVERAGE-MATRIX.md).
   "segments:read",
+  // Fase 13F: permukaan BACA publik order (keranjang tetap internal —
+  // keadaan sesi ephemeral per kontak, bukan sumber daya integrasi;
+  // lihat docs/COVERAGE-MATRIX.md).
+  "orders:read",
   // Fase 15A: permukaan BACA publik untuk sumber daya yang sebelumnya
   // hanya dashboard (aturan sinkronisasi kontrak dijalankan retrospektif).
   // Tulis untuk sumber daya ini tetap dashboard-only — lihat
@@ -1861,6 +1868,7 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "knowledge:read",
   "growth_links:read",
   "segments:read",
+  "orders:read",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1878,11 +1886,12 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "knowledge:read",
   "growth_links:read",
   "segments:read",
+  "orders:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(16).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(17).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -2968,7 +2977,9 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  * yang wajib lengkap ditegakkan saat aktivasi (bukan di skema bentuk):
  * `condition` → "yes"+"no", `ab_split` → "a"+"b",
  * `wait_reply` → "replied"+"timeout",
- * `questionnaire` → "completed"+"invalid"+"timeout". Node lain tidak
+ * `questionnaire` → "completed"+"invalid"+"timeout",
+ * `show_catalog` → "added"+"invalid"+"timeout",
+ * `cart_checkout` → "checked_out"+"empty_cart". Node lain tidak
  * boleh membawa branch.
  *
  * Tipe node v1 dan config-nya:
@@ -3113,6 +3124,50 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *                   keluar flow tidak punya infrastruktur tombol
  *                   quick-reply per channel, jadi tidak ada tombol
  *                   yang dijanjikan; balasan angka/teks diterima.
+ *
+ * Tipe node tambahan (Fase 13F):
+ * - show_catalog  { introText?, showDescription?, amount, unit,
+ *                   maxInvalidAttempts, invalidPrompt?, addedMessage? }
+ *                   — katalog belanja: mengirim daftar produk AKTIF
+ *                   tenant sebagai daftar teks BERNOMOR (nama + harga
+ *                   Rupiah terformat; deskripsi ikut bila
+ *                   showDescription) lalu PARKIR memakai mesin parkir
+ *                   wait_reply yang sama (context.wait + keadaan di
+ *                   context.catalog; tenggat per parkir). Balasan sah:
+ *                   "N" (nomor produk, qty 1) atau "NxM" (nomor N
+ *                   sebanyak M, 1..999) — item masuk keranjang kontak
+ *                   dengan SNAPSHOT harga saat penambahan (baris yang
+ *                   sudah ada mempertahankan snapshot pertamanya;
+ *                   hanya qty yang bertambah). Sesudah penambahan,
+ *                   node mengirim ringkasan keranjang (baris + total,
+ *                   dirender server) + `addedMessage` opsional, lalu
+ *                   keluar branch "added" — kelanjutannya (katalog
+ *                   lagi / checkout) adalah komposisi graf. Balasan
+ *                   tidak sah (bukan nomor, di luar rentang, produk
+ *                   sudah nonaktif/terhapus sejak daftar dikirim)
+ *                   memicu prompt ulang (invalidPrompt atau bawaan
+ *                   dwibahasa CATALOG_DEFAULT_INVALID_PROMPT) sampai
+ *                   maxInvalidAttempts → branch "invalid". Tenggat
+ *                   lewat → branch "timeout". Produk yang dinonaktifkan
+ *                   SETELAH daftar terkirim tidak bisa ditambahkan
+ *                   (percobaan tidak sah beralasan product_inactive).
+ * - cart_checkout { emptyMessage? } — checkout keranjang: TANPA
+ *                   parkir. Keranjang terbuka kontak dirender sebagai
+ *                   ringkasan (item, qty, total baris, total besar dari
+ *                   snapshot), order dibuat dengan total yang dihitung
+ *                   SERVER dari snapshot itu, SATU tautan bayar dibuat
+ *                   untuk totalnya lewat mesin tautan yang sama
+ *                   (provider 'simulation' berlabel, sama seperti
+ *                   tautan produk), keranjang ditandai checked_out
+ *                   (keranjang terbuka berikutnya lahir malas), dan
+ *                   ringkasan + tautan dikirim sebagai pesan keluar.
+ *                   Keluar branch "checked_out". Keranjang kosong/
+ *                   tidak ada → branch "empty_cart" tanpa membuat apa
+ *                   pun (emptyMessage opsional dikirim bila diisi).
+ *                   Penyelesaian pembayaran tautan order membalik
+ *                   order menjadi paid (+ paid_at) lewat hook yang
+ *                   sama dengan tautan produk; kedaluwarsa tautan
+ *                   membalik order menjadi expired.
  */
 export const FlowStatusSchema = z.enum(["draft", "active", "archived"]);
 export type FlowStatus = z.infer<typeof FlowStatusSchema>;
@@ -3147,6 +3202,9 @@ export const FlowNodeTypeSchema = z.enum([
   "wait_reply",
   // Fase 13E
   "questionnaire",
+  // Fase 13F
+  "show_catalog",
+  "cart_checkout",
 ]);
 export type FlowNodeType = z.infer<typeof FlowNodeTypeSchema>;
 
@@ -3250,6 +3308,21 @@ export const FlowNodeConfigSchema = z.union([
     invalidPrompt: z.string().min(1).max(1000).optional(),
     completionTag: z.string().min(1).max(64).optional(),
   }),
+  // Fase 13F — show_catalog: bentuk kasar; keabsahan rinci (rentang
+  // percobaan, batas teks) ditegakkan validasi aktivasi di core.
+  z.object({
+    introText: z.string().min(1).max(1000).optional(),
+    showDescription: z.boolean().optional(),
+    amount: z.number().int().min(0).max(100_000),
+    unit: z.enum(["seconds", "minutes", "hours"]),
+    maxInvalidAttempts: z.number().int().min(1).max(5),
+    invalidPrompt: z.string().min(1).max(1000).optional(),
+    addedMessage: z.string().min(1).max(1000).optional(),
+  }),
+  // Fase 13F — cart_checkout: hanya pesan keranjang-kosong opsional.
+  z.object({
+    emptyMessage: z.string().min(1).max(1000).optional(),
+  }),
   // ai_response / handoff / end: config kosong.
   z.object({}),
 ]);
@@ -3282,6 +3355,24 @@ export const QUESTIONNAIRE_DEFAULT_INVALID_PROMPT =
   "Sorry, that answer doesn't look right yet. Please try again.\nMaaf, jawaban itu sepertinya belum tepat. Silakan coba lagi.";
 
 /**
+ * Prompt ulang bawaan produk (dwibahasa dalam satu pesan, pola
+ * questionnaire 13E) yang dipakai node `show_catalog` (Fase 13F) bila
+ * config `invalidPrompt` tidak diisi: balasan bukan pilihan katalog
+ * yang sah (bukan nomor / di luar rentang / produk sudah nonaktif).
+ */
+export const CATALOG_DEFAULT_INVALID_PROMPT =
+  "Sorry, that choice isn't on the list. Please reply with a product number.\nMaaf, pilihan itu tidak ada di daftar. Silakan balas dengan nomor produk.";
+
+/**
+ * Petunjuk balasan yang selalu menutup daftar katalog node
+ * `show_catalog` (dwibahasa, pola yang sama): sintaks "N" / "NxM"
+ * adalah kontrak balasan node ini — builder dan eksekutor membaca
+ * teks kanonis yang sama dari sini.
+ */
+export const CATALOG_REPLY_HINT =
+  "Reply with a product number to add it to your cart (e.g. \"2\", or \"2x3\" for 3 items).\nBalas nomor produk untuk menambahkannya ke keranjang (mis. \"2\", atau \"2x3\" untuk 3 buah).";
+
+/**
  * Posisi node di canvas builder (Fase 8B) — koordinat piksel relatif
  * kanvas, boleh negatif (pan bebas). Murni metadata tampilan.
  */
@@ -3301,7 +3392,9 @@ export type FlowNode = z.infer<typeof FlowNodeSchema>;
 
 /**
  * Cabang edge: condition yes/no, ab_split a/b, wait_reply
- * replied/timeout, questionnaire completed/invalid/timeout.
+ * replied/timeout, questionnaire completed/invalid/timeout,
+ * show_catalog added/invalid/timeout, cart_checkout
+ * checked_out/empty_cart.
  */
 export const FlowEdgeBranchSchema = z.enum([
   "yes",
@@ -3312,6 +3405,10 @@ export const FlowEdgeBranchSchema = z.enum([
   "timeout",
   "completed",
   "invalid",
+  // Fase 13F
+  "added",
+  "checked_out",
+  "empty_cart",
 ]);
 export type FlowEdgeBranch = z.infer<typeof FlowEdgeBranchSchema>;
 
@@ -4232,6 +4329,72 @@ export type UpdateOptInSettingsRequest = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
+// Fase 13F — Katalog + keranjang commerce: ORDER.
+//
+// Order lahir dari checkout keranjang (node flow `cart_checkout`):
+// snapshot item (nama + harga satuan + qty) yang TIDAK berubah oleh
+// perubahan produk sesudahnya, total yang dihitung server dari
+// snapshot keranjang, dan SATU tautan bayar (mesin tautan yang sama,
+// provider 'simulation' berlabel sampai pembayaran asli Fase 14A).
+// Permukaan v1 untuk order BACA saja (orders:read). KERANJANG
+// SENGAJA tidak punya skema publik di sini: keranjang adalah keadaan
+// sesi ephemeral per kontak yang hanya hidup di dalam percakapan
+// (diisi node show_catalog, dikonsumsi cart_checkout) — bukan sumber
+// daya integrasi; mengeksposnya akan membekukan bentuk sesi internal
+// menjadi kontrak publik (lihat docs/COVERAGE-MATRIX.md).
+// ---------------------------------------------------------------------------
+
+/** Status order — cermin status tautan bayarnya (hook penyelesaian). */
+export const OrderStatusSchema = z.enum([
+  "pending",
+  "paid",
+  "expired",
+  "cancelled",
+]);
+export type OrderStatus = z.infer<typeof OrderStatusSchema>;
+
+/** Satu baris snapshot item order (harga & nama saat checkout). */
+export const OrderItemResponseSchema = z.object({
+  /** Produk asal; null bila produk sudah dihapus sesudah checkout. */
+  productId: z.string().uuid().nullable(),
+  productName: z.string(),
+  qty: z.number().int().positive(),
+  unitPriceIdr: z.number().int().nonnegative(),
+  lineTotalIdr: z.number().int().nonnegative(),
+});
+export type OrderItemResponse = z.infer<typeof OrderItemResponseSchema>;
+
+export const OrderResponseSchema = z.object({
+  id: z.string().uuid(),
+  contactId: z.string().uuid(),
+  /** Nama kontak pembeli; null bila kontak sudah terhapus. */
+  contactName: z.string().nullable(),
+  /** Percakapan asal checkout; null bila lahir di luar percakapan. */
+  conversationId: z.string().uuid().nullable(),
+  status: OrderStatusSchema,
+  items: z.array(OrderItemResponseSchema),
+  /** Total server dari snapshot item (Rupiah penuh). */
+  totalIdr: z.number().int().nonnegative(),
+  /** Tautan bayar tunggal order; null hanya untuk order warisan tanpa tautan. */
+  paymentLinkId: z.string().uuid().nullable(),
+  paymentCode: z.string().nullable(),
+  /** URL publik halaman bayar: {base}/pay/{code} (relatif bila base tak dikenal). */
+  paymentUrl: z.string().nullable(),
+  paymentStatus: PaymentLinkStatusSchema.nullable(),
+  /** Fase ini selalu 'simulation' — belum ada pembayaran sungguhan. */
+  provider: z.string(),
+  paidAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type OrderResponse = z.infer<typeof OrderResponseSchema>;
+
+export const OrderListResponseSchema = z.object({
+  orders: z.array(OrderResponseSchema),
+});
+export type OrderListResponse = z.infer<typeof OrderListResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // Fase 15A — Permukaan publik v1: query tambahan + REGISTRY permukaan.
 //
 // Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
@@ -4584,6 +4747,25 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     contractSchemas: ["SegmentResponseSchema"],
     sdkMethod: "getSegment",
     mcpTool: "get_segment",
+    mcpTier: "read",
+  },
+  // --- Fase 13F: order — permukaan BACA (keranjang internal) --------
+  {
+    method: "GET",
+    path: "/v1/orders",
+    scope: "orders:read",
+    contractSchemas: ["OrderListResponseSchema"],
+    sdkMethod: "listOrders",
+    mcpTool: "list_orders",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/orders/:id",
+    scope: "orders:read",
+    contractSchemas: ["OrderResponseSchema"],
+    sdkMethod: "getOrder",
+    mcpTool: "get_order",
     mcpTier: "read",
   },
 ];

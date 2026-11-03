@@ -39,6 +39,8 @@ export const FLOW_NODE_LABEL_KEYS: Record<FlowNodeType, TranslationKey> = {
   send_payment_link: "flows.nodeSendPaymentLink",
   wait_reply: "flows.nodeWaitReply",
   questionnaire: "flows.nodeQuestionnaire",
+  show_catalog: "flows.nodeShowCatalog",
+  cart_checkout: "flows.nodeCartCheckout",
 };
 
 /** Tipe yang boleh ditambahkan dari palet (trigger dibuat otomatis & tunggal). */
@@ -60,6 +62,8 @@ export const ADDABLE_NODE_TYPES: FlowNodeType[] = [
   "send_payment_link",
   "wait_reply",
   "questionnaire",
+  "show_catalog",
+  "cart_checkout",
 ];
 
 /**
@@ -87,6 +91,15 @@ export const FLOW_BRANCHED_TYPES: Partial<
     { branch: "completed", labelKey: "flows.branchCompleted" },
     { branch: "invalid", labelKey: "flows.branchInvalid" },
     { branch: "timeout", labelKey: "flows.branchTimeout" },
+  ],
+  show_catalog: [
+    { branch: "added", labelKey: "flows.branchAdded" },
+    { branch: "invalid", labelKey: "flows.branchInvalid" },
+    { branch: "timeout", labelKey: "flows.branchTimeout" },
+  ],
+  cart_checkout: [
+    { branch: "checked_out", labelKey: "flows.branchCheckedOut" },
+    { branch: "empty_cart", labelKey: "flows.branchEmptyCart" },
   ],
 };
 
@@ -131,6 +144,10 @@ export function defaultNodeConfig(
       return { productId: "" };
     case "wait_reply":
       return { amount: 1, unit: "hours" };
+    case "show_catalog":
+      return { amount: 24, unit: "hours", maxInvalidAttempts: 2 };
+    case "cart_checkout":
+      return {};
     case "questionnaire":
       return {
         questions: [
@@ -311,6 +328,21 @@ export function summarizeNodeConfig(
       return questions.length > 0
         ? t("flows.summaryQuestionnaire", { count: questions.length })
         : t("flows.summaryNotConfigured");
+    }
+    case "show_catalog": {
+      const amount = typeof c.amount === "number" ? c.amount : null;
+      const unitKey =
+        c.unit === "seconds"
+          ? "flows.unitSeconds"
+          : c.unit === "minutes"
+            ? "flows.unitMinutes"
+            : "flows.unitHours";
+      return amount !== null
+        ? t("flows.summaryCatalog", { amount, unit: t(unitKey as TranslationKey) })
+        : t("flows.summaryNotConfigured");
+    }
+    case "cart_checkout": {
+      return t("flows.summaryCheckout");
     }
     default:
       return "";

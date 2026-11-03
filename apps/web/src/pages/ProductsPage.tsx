@@ -6,6 +6,7 @@ import {
   type FormEvent,
 } from "react";
 import type {
+  OrderResponse,
   PaymentLinkResponse,
   ProductResponse,
 } from "@sahabat-kreator/contracts";
@@ -33,6 +34,9 @@ interface ProductsPageProps {
  * bayar per produk (URL hasil + salin), dan daftar tautan bayar terbaru
  * dengan status diterjemahkan. Pembayaran fase ini SIMULASI — catatan
  * jujurnya tampil permanen di halaman (products.simulationNote).
+ * Fase 13F menambahkan seksi Order (checkout keranjang dari flow chat):
+ * daftar + modal detail (pembeli, item snapshot, total, status,
+ * referensi tautan bayar, waktu lunas).
  */
 export function ProductsPage({ t, locale }: ProductsPageProps) {
   const { status, tenants, active, reload } = useWorkspace();
@@ -40,6 +44,9 @@ export function ProductsPage({ t, locale }: ProductsPageProps) {
 
   const [products, setProducts] = useState<ProductResponse[]>([]);
   const [links, setLinks] = useState<PaymentLinkResponse[]>([]);
+  const [orders, setOrders] = useState<OrderResponse[]>([]);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
+  const [orderDetail, setOrderDetail] = useState<OrderResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [linksError, setLinksError] = useState<string | null>(null);
@@ -60,8 +67,9 @@ export function ProductsPage({ t, locale }: ProductsPageProps) {
     setLoading(true);
     setError(null);
     setLinksError(null);
+    setOrdersError(null);
     try {
-      const [productList, linkList] = await Promise.all([
+      const [productList, linkList, orderList] = await Promise.all([
         api.products.list(tenantId),
         api.paymentLinks.list(tenantId).catch((err: unknown) => {
           if (requestSeq.current === seq) {
@@ -69,10 +77,17 @@ export function ProductsPage({ t, locale }: ProductsPageProps) {
           }
           return [] as PaymentLinkResponse[];
         }),
+        api.orders.list(tenantId).catch((err: unknown) => {
+          if (requestSeq.current === seq) {
+            setOrdersError(translateApiError(t, err));
+          }
+          return [] as OrderResponse[];
+        }),
       ]);
       if (requestSeq.current !== seq) return;
       setProducts(productList);
       setLinks(linkList);
+      setOrders(orderList);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
@@ -292,6 +307,54 @@ export function ProductsPage({ t, locale }: ProductsPageProps) {
           ))}
         </ul>
       )}
+
+      <h2 className="mt-8 text-lg font-bold text-ink">
+        {t("products.ordersTitle")}
+      </h2>
+      <FieldError message={ordersError} />
+      {orders.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">{t("products.ordersEmpty")}</p>
+      ) : (
+        <ul className="mt-3 space-y-2">
+          {orders.map((order) => (
+            <li key={order.id}>
+              <button
+                type="button"
+                onClick={() => setOrderDetail(order)}
+                className="w-full rounded-xl border border-line bg-surface p-3 text-left"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">
+                    {`Order ${order.id.slice(0, 8)}`}
+                  </span>
+                  <span className="text-sm font-semibold text-ink">
+                    {formatIdr(order.totalIdr, locale)}
+                  </span>
+                  <PaymentStatusChip t={t} status={order.status} />
+                </div>
+                <p className="mt-1 text-xs text-muted">
+                  {order.contactName
+                    ? t("products.linkForLabel", { name: order.contactName })
+                    : t("products.linkGenericBuyer")}
+                  {" · "}
+                  {order.items.length} {t("products.orderItemsLabel")}
+                  {" · "}
+                  {formatDateTime(order.createdAt, locale)}
+                </p>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {orderDetail ? (
+        <OrderDetailModal
+          t={t}
+          locale={locale}
+          order={orderDetail}
+          onClose={() => setOrderDetail(null)}
+        />
+      ) : null}
 
       {formOpen ? (
         <ProductFormModal
@@ -578,6 +641,115 @@ function ProductDeleteModal({
             {t("common.cancel")}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function OrderDetailModal({
+  t,
+  locale,
+  order,
+  onClose,
+}: {
+  t: Translate;
+  locale: Locale;
+  order: OrderResponse;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-surface p-5 shadow-xl sm:rounded-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-lg font-bold text-ink">
+            {`Order ${order.id.slice(0, 8)}`}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-elevated px-3 py-1.5 text-sm font-medium text-ink"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          {t("products.orderDetailHint")}
+        </p>
+        <dl className="mt-4 space-y-2 text-sm">
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted">{t("products.orderBuyerLabel")}</dt>
+            <dd className="font-medium text-ink">
+              {order.contactName ?? t("products.linkGenericBuyer")}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted">{t("products.orderStatusLabel")}</dt>
+            <dd>
+              <PaymentStatusChip t={t} status={order.status} />
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-2 text-xs text-muted">
+          {t("products.createdLabel", {
+            date: formatDateTime(order.createdAt, locale),
+          })}
+          {order.paidAt
+            ? ` · ${t("products.orderPaidAtLabel", {
+                date: formatDateTime(order.paidAt, locale),
+              })}`
+            : ""}
+        </p>
+        <h3 className="mt-5 text-sm font-semibold text-ink">
+          {t("products.orderItemsLabel")}
+        </h3>
+        <ul className="mt-2 space-y-1">
+          {order.items.map((item, idx) => (
+            <li
+              key={`${item.productId ?? "deleted"}-${idx}`}
+              className="flex items-baseline justify-between gap-3 text-sm"
+            >
+              <span className="min-w-0 flex-1 truncate text-ink">
+                {item.qty} × {item.productName}
+              </span>
+              <span className="text-muted">
+                {formatIdr(item.unitPriceIdr, locale)}
+              </span>
+              <span className="font-medium text-ink">
+                {formatIdr(item.lineTotalIdr, locale)}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <div className="mt-3 flex items-baseline justify-between border-t border-line pt-3">
+          <span className="text-sm font-semibold text-ink">
+            {t("products.orderTotalLabel")}
+          </span>
+          <span className="text-base font-bold text-ink">
+            {formatIdr(order.totalIdr, locale)}
+          </span>
+        </div>
+        {order.paymentUrl ? (
+          <div className="mt-4">
+            <p className="text-xs font-medium text-muted">
+              {t("products.orderPaymentLinkLabel")}
+              {order.paymentStatus
+                ? ` · ${t("products.orderPaymentStatusLabel")}: ${order.paymentStatus}`
+                : ""}
+            </p>
+            <a
+              href={order.paymentUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 block truncate font-mono text-xs text-accent underline"
+            >
+              {order.paymentUrl}
+            </a>
+          </div>
+        ) : null}
       </div>
     </div>
   );

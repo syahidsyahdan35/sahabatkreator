@@ -4,10 +4,13 @@ import {
   auditLogs,
   automationRuns,
   broadcastRecipients,
+  cartItems,
+  carts,
   channelIdentities,
   contacts,
   conversations,
   flowRuns,
+  orders,
   paymentLinks,
   profilePhotos,
   sequenceEnrollments,
@@ -662,6 +665,100 @@ export async function mergeContacts(
         and(
           eq(paymentLinks.tenantId, ctx.tenantId),
           eq(paymentLinks.contactId, merged.id),
+        ),
+      );
+
+    // Fase 13F: order adalah RIWAYAT — pembelinya menjadi survivor
+    // (pola payment_links di atas). Keranjang adalah KEADAAN SESI:
+    // item keranjang terbuka kontak sumber dilipat ke keranjang
+    // terbuka survivor (qty bertambah; untuk produk yang sama
+    // snapshot harga survivor menang — snapshot pertama keranjang
+    // tujuan dipertahankan), lalu semua keranjang sumber dihapus
+    // (baris item ikut cascade).
+    await tx
+      .update(orders)
+      .set({ contactId: survivor.id, updatedAt: new Date() })
+      .where(
+        and(
+          eq(orders.tenantId, ctx.tenantId),
+          eq(orders.contactId, merged.id),
+        ),
+      );
+    const [mergedOpenCart] = await tx
+      .select()
+      .from(carts)
+      .where(
+        and(
+          eq(carts.tenantId, ctx.tenantId),
+          eq(carts.contactId, merged.id),
+          eq(carts.status, "open"),
+        ),
+      )
+      .limit(1);
+    if (mergedOpenCart) {
+      const mergedItems = await tx
+        .select()
+        .from(cartItems)
+        .where(eq(cartItems.cartId, mergedOpenCart.id));
+      if (mergedItems.length > 0) {
+        let [survivorCart] = await tx
+          .select()
+          .from(carts)
+          .where(
+            and(
+              eq(carts.tenantId, ctx.tenantId),
+              eq(carts.contactId, survivor.id),
+              eq(carts.status, "open"),
+            ),
+          )
+          .limit(1);
+        if (!survivorCart) {
+          [survivorCart] = await tx
+            .insert(carts)
+            .values({
+              tenantId: ctx.tenantId,
+              contactId: survivor.id,
+              status: "open",
+            })
+            .returning();
+        }
+        for (const item of mergedItems) {
+          const [existingLine] = await tx
+            .select()
+            .from(cartItems)
+            .where(
+              and(
+                eq(cartItems.cartId, survivorCart.id),
+                eq(cartItems.productId, item.productId),
+              ),
+            )
+            .limit(1);
+          if (existingLine) {
+            await tx
+              .update(cartItems)
+              .set({
+                qty: existingLine.qty + item.qty,
+                updatedAt: new Date(),
+              })
+              .where(eq(cartItems.id, existingLine.id));
+          } else {
+            await tx.insert(cartItems).values({
+              tenantId: ctx.tenantId,
+              cartId: survivorCart.id,
+              productId: item.productId,
+              qty: item.qty,
+              unitPriceIdr: item.unitPriceIdr,
+            });
+          }
+        }
+      }
+    }
+    await tx
+      .delete(carts)
+      .where(
+        and(
+          eq(carts.tenantId, ctx.tenantId),
+          eq(carts.contactId, merged.id),
         ),
       );
 

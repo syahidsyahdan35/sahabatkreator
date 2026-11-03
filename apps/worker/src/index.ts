@@ -310,6 +310,10 @@ const bullWorker = new Worker<MainJobData>(
         // juga tertangani flow — agent tidak ikut menjawab survei
         // yang sedang berjalan.
         result.flowQuestionnaireResumed === 0 &&
+        // Fase 13F: pesan yang menjadi pilihan katalog parkir juga
+        // tertangani flow — agent tidak ikut menjawab sesi belanja
+        // yang sedang berjalan.
+        result.flowCatalogResumed === 0 &&
         // Fase 13C: pesan consent (kata opt-in/opt-out persis) adalah
         // perintah persetujuan yang tertangani sistem — tidak pernah
         // diteruskan ke agent sebagai pertanyaan biasa.

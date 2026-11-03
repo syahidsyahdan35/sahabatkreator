@@ -153,6 +153,8 @@ const EXPECTED_TOOLS = [
   // Fase 13C: segmen — permukaan BACA.
   "list_segments",
   "get_segment",
+  "list_orders",
+  "get_order",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -204,6 +206,9 @@ try {
       // Fase 13C: segmen adalah BACA.
       hintOf("list_segments") === true &&
       hintOf("get_segment") === true &&
+      // Fase 13F: order adalah BACA.
+      hintOf("list_orders") === true &&
+      hintOf("get_order") === true &&
       hintOf("create_contact") === false &&
       hintOf("update_contact") === false &&
       hintOf("send_message") === false &&
@@ -435,6 +440,27 @@ try {
       "get_segment konsisten dengan daftar",
       !oneResult.isError && !!one && one.id === first.id && one.name === first.name,
       one ? `name=${one.name}` : resultText(oneResult),
+    );
+  }
+
+  // Fase 13F: order (BACA) — daftar + get pertama bila ada.
+  const ordersResult = await call(client, "list_orders");
+  const ordersList = resultJson<{
+    orders: Array<{ id: string; totalIdr: number; status: string }>;
+  }>(ordersResult);
+  check(
+    "list_orders",
+    !ordersResult.isError && !!ordersList && Array.isArray(ordersList.orders),
+    ordersList ? `count=${ordersList.orders.length}` : resultText(ordersResult),
+  );
+  if (ordersList && ordersList.orders.length > 0) {
+    const first = ordersList.orders[0]!;
+    const oneResult = await call(client, "get_order", { orderId: first.id });
+    const one = resultJson<{ id: string; totalIdr: number }>(oneResult);
+    check(
+      "get_order konsisten dengan daftar",
+      !oneResult.isError && !!one && one.id === first.id && one.totalIdr === first.totalIdr,
+      one ? `total=${one.totalIdr}` : resultText(oneResult),
     );
   }
 } finally {

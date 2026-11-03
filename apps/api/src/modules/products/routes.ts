@@ -3,11 +3,14 @@ import { z } from "zod";
 import {
   CreatePaymentLinkRequestSchema,
   CreateProductRequestSchema,
+  OrderListResponseSchema,
+  OrderResponseSchema,
   PaymentLinkListResponseSchema,
   PaymentLinkResponseSchema,
   ProductListResponseSchema,
   ProductResponseSchema,
   UpdateProductRequestSchema,
+  type OrderResponse,
   type PaymentLinkResponse,
   type ProductResponse,
 } from "@sahabat-kreator/contracts";
@@ -17,10 +20,13 @@ import {
   createProduct,
   deleteProduct,
   getContact,
+  getOrder,
   getProduct,
+  listOrders,
   listPaymentLinks,
   listProducts,
   updateProduct,
+  type OrderWithDetails,
   type PaymentLinkWithNames,
 } from "@sahabat-kreator/core";
 import type { Product } from "@sahabat-kreator/db";
@@ -47,6 +53,44 @@ export function serializeProduct(row: Product): ProductResponse {
 }
 
 /**
+ * Serializer order (Fase 13F) — dipakai rute dashboard di modul ini
+ * DAN rute publik /v1/orders (baseUrl kosong → url relatif /pay/…).
+ * Baris item membawa snapshot nama+harga checkout; lineTotalIdr
+ * dihitung dari snapshot yang sama.
+ */
+export function serializeOrder(
+  detailed: OrderWithDetails,
+  baseUrl?: string,
+): OrderResponse {
+  const { order, items, contactName, paymentLink } = detailed;
+  return OrderResponseSchema.parse({
+    id: order.id,
+    contactId: order.contactId,
+    contactName,
+    conversationId: order.conversationId,
+    status: order.status,
+    items: items.map((i) => ({
+      productId: i.productId,
+      productName: i.productName,
+      qty: i.qty,
+      unitPriceIdr: i.unitPriceIdr,
+      lineTotalIdr: i.qty * i.unitPriceIdr,
+    })),
+    totalIdr: order.totalIdr,
+    paymentLinkId: paymentLink?.id ?? null,
+    paymentCode: paymentLink?.code ?? null,
+    paymentUrl: paymentLink
+      ? buildPaymentUrl(baseUrl, paymentLink.code)
+      : null,
+    paymentStatus: paymentLink?.status ?? null,
+    provider: order.provider,
+    paidAt: order.paidAt?.toISOString() ?? null,
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+  });
+}
+
+/**
  * Modul products (Fase 4A) — katalog produk + tautan bayar per workspace:
  *   POST   /tenants/:tenantId/products          buat produk → 201
  *   GET    /tenants/:tenantId/products          daftar produk
@@ -55,6 +99,8 @@ export function serializeProduct(row: Product): ProductResponse {
  *          PRODUCT_HAS_LINKS bila produk sudah punya tautan bayar
  *   POST   /tenants/:tenantId/payment-links     buat tautan bayar → 201
  *   GET    /tenants/:tenantId/payment-links     daftar tautan terbaru
+ *   GET    /tenants/:tenantId/orders            daftar order (Fase 13F)
+ *   GET    /tenants/:tenantId/orders/:id        detail order (Fase 13F)
  * Wajib sesi + membership workspace (non-member → 404 TENANT_NOT_FOUND).
  * Tautan bayar fase ini ber-provider 'simulation' — halaman publiknya di
  * modul `pay`. Logika domain di @sahabat-kreator/core (products.ts).
@@ -66,6 +112,7 @@ export function createProductsRoutes(
   const app = new Hono<{ Variables: AppVariables }>();
   const productsBase = "/tenants/:tenantId/products";
   const linksBase = "/tenants/:tenantId/payment-links";
+  const ordersBase = "/tenants/:tenantId/orders";
 
   if (!bundle) {
     const notConfigured = (c: Parameters<typeof apiError>[0]) =>
@@ -76,6 +123,8 @@ export function createProductsRoutes(
     app.delete(`${productsBase}/:id`, notConfigured);
     app.post(linksBase, notConfigured);
     app.get(linksBase, notConfigured);
+    app.get(ordersBase, notConfigured);
+    app.get(`${ordersBase}/:id`, notConfigured);
     return app;
   }
 
@@ -83,6 +132,10 @@ export function createProductsRoutes(
     PaymentLinkResponseSchema.parse({
       id: row.id,
       productId: row.productId,
+      // Fase 13F: tautan order (varian checkout keranjang) — null
+      // untuk tautan produk tunggal; tautan milik order punya
+      // productId null dan orderId terisi (CHECK tepat satu target).
+      orderId: row.orderId,
       productName: row.productName,
       contactId: row.contactId,
       contactName: row.contactName,
@@ -217,7 +270,11 @@ export function createProductsRoutes(
       return apiError(c, 404, "NOT_FOUND", "Contact not found");
     }
     // Rangkai respons dari baris yang baru dibuat + nama produk/kontak.
-    const product = await getProduct(bundle.db, { tenantId: tenant.id }, result.link.productId);
+    // Jalur buat-selalu-produk: productId terisi (varian order hanya
+    // lahir dari checkout flow — Fase 13F).
+    const product = result.link.productId
+      ? await getProduct(bundle.db, { tenantId: tenant.id }, result.link.productId)
+      : null;
     const contact = result.link.contactId
       ? await getContact(bundle.db, { tenantId: tenant.id }, result.link.contactId)
       : null;
@@ -240,6 +297,30 @@ export function createProductsRoutes(
         paymentLinks: rows.map(serializeLink),
       }),
     );
+  });
+
+  // ---------------------------------------------------------------- orders
+  app.get(ordersBase, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const rows = await listOrders(bundle.db, { tenantId: tenant.id });
+    return c.json(
+      OrderListResponseSchema.parse({
+        orders: rows.map((r) => serializeOrder(r, opts.publicBaseUrl)),
+      }),
+    );
+  });
+
+  app.get(`${ordersBase}/:id`, async (c) => {
+    const tenant = await resolveTenant(c);
+    if (!tenant) return apiError(c, 404, "TENANT_NOT_FOUND", "Tenant not found");
+    const id = c.req.param("id");
+    if (!z.string().uuid().safeParse(id).success) {
+      return apiError(c, 404, "NOT_FOUND", "Order not found");
+    }
+    const detailed = await getOrder(bundle.db, { tenantId: tenant.id }, id);
+    if (!detailed) return apiError(c, 404, "NOT_FOUND", "Order not found");
+    return c.json(serializeOrder(detailed, opts.publicBaseUrl));
   });
 
   return app;

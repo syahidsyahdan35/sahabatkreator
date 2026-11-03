@@ -66,7 +66,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 2 tabel Fase 13B (growth_links, growth_link_events)
 // + 2 tabel Fase 13C (segments, tenant_opt_in_settings)
 // + 1 tabel Fase 13D (flow_experiment_assignments)
-assert.equal(Number(tablesRes.rows[0].count), 49);
+// + 4 tabel Fase 13F (carts, cart_items, orders, order_items)
+assert.equal(Number(tablesRes.rows[0].count), 53);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -165,7 +166,9 @@ const policies = await db.query<{ count: string }>(
 //   (Fase 13C, migrasi 0003) = 62.
 // + tenant_isolation pada flow_experiment_assignments
 //   (Fase 13D, migrasi 0004) = 63.
-assert.equal(Number(policies.rows[0].count), 63);
+// + tenant_isolation pada carts, cart_items, orders, order_items
+//   (Fase 13F, migrasi 0005) = 67.
+assert.equal(Number(policies.rows[0].count), 67);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -189,7 +192,8 @@ await db.exec(`
     kb_source_documents,
     growth_links, growth_link_events,
     segments, tenant_opt_in_settings,
-    flow_experiment_assignments
+    flow_experiment_assignments,
+    carts, cart_items, orders, order_items
   TO app_user;
 `);
 
@@ -2270,7 +2274,9 @@ function oneHotVector(index: number): string {
   // 3 policy (2 tenant_isolation + 1 lengan lookup publik) → 46 / 60;
   // Fase 13C menambah 2 tabel (segments, tenant_opt_in_settings) +
   // 2 policy tenant_isolation → 48 / 62; Fase 13D menambah 1 tabel
-  // (flow_experiment_assignments) + 1 policy → 49 / 63.
+  // (flow_experiment_assignments) + 1 policy → 49 / 63; Fase 13F
+  // menambah 4 tabel commerce (carts, cart_items, orders,
+  // order_items) + 4 policy tenant_isolation → 53 / 67.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2278,8 +2284,8 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "49");
-  assert.equal(counts.rows[0].policies, "63");
+  assert.equal(counts.rows[0].tables, "53");
+  assert.equal(counts.rows[0].policies, "67");
   console.log(
     "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel & policy global sesuai hitungan berjalan: OK",
   );
@@ -2679,6 +2685,136 @@ function oneHotVector(index: number): string {
   assert.equal(views.crossBlocked, true);
   console.log(
     "[38] Fase 13D: flow_experiment_assignments terisolasi tenant + unik lengket (flow,node,kontak); kolom A/B broadcasts ada (nullable kondisional); broadcast_recipients.variant NOT NULL default 'a': OK",
+  );
+}
+
+// ---------- 39. Fase 13F: carts/orders + payment_links dual-varian ----------
+{
+  // Kolom varian: payment_links.product_id sekarang NULLABLE dan
+  // order_id ada (NULLABLE — varian kondisional yang ditegakkan CHECK
+  // tepat-satu-target, bukan dua-duanya wajib).
+  const cols = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'payment_links'
+        AND column_name IN ('product_id', 'order_id')
+        AND is_nullable = 'YES'`,
+  );
+  assert.equal(cols.rows[0].n, "2");
+
+  // Seed mandiri tenant A: produk + kontak + order.
+  const PROD_13F = "13f00000-0000-4000-8000-0000000000a1";
+  const CONTACT_13F = "13f00000-0000-4000-8000-0000000000c1";
+  const ORDER_13F = "13f00000-0000-4000-8000-0000000000d1";
+  await db.query(
+    `INSERT INTO products (id, tenant_id, name, price_idr)
+     VALUES ($1, $2, 'Produk 13F', 150000)`,
+    [PROD_13F, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kontak 13F')`,
+    [CONTACT_13F, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO orders (id, tenant_id, contact_id, total_idr)
+     VALUES ($1, $2, $3, 300000)`,
+    [ORDER_13F, TENANT_A, CONTACT_13F],
+  );
+  await db.query(
+    `INSERT INTO order_items (tenant_id, order_id, product_id, product_name, qty, unit_price_idr)
+     VALUES ($1, $2, $3, 'Produk 13F', 2, 150000)`,
+    [TENANT_A, ORDER_13F, PROD_13F],
+  );
+
+  // Varian tautan: produk saja OK; order saja OK.
+  await db.query(
+    `INSERT INTO payment_links (tenant_id, product_id, code, amount_idr, expires_at)
+     VALUES ($1, $2, 'link13fprod', 150000, now() + interval '7 days')`,
+    [TENANT_A, PROD_13F],
+  );
+  await db.query(
+    `INSERT INTO payment_links (tenant_id, order_id, contact_id, code, amount_idr, expires_at)
+     VALUES ($1, $2, $3, 'link13forder', 300000, now() + interval '7 days')`,
+    [TENANT_A, ORDER_13F, CONTACT_13F],
+  );
+  // Keduanya terisi → CHECK menolak; keduanya kosong → CHECK menolak.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO payment_links (tenant_id, product_id, order_id, code, amount_idr, expires_at)
+       VALUES ($1, $2, $3, 'link13fboth', 1, now() + interval '7 days')`,
+      [TENANT_A, PROD_13F, ORDER_13F],
+    ),
+    /check constraint|payment_links_exactly_one_target/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO payment_links (tenant_id, code, amount_idr, expires_at)
+       VALUES ($1, 'link13fnone', 1, now() + interval '7 days')`,
+      [TENANT_A],
+    ),
+    /check constraint|payment_links_exactly_one_target/i,
+  );
+
+  // Keranjang: satu keranjang TERBUKA per kontak (unik parsial).
+  const CART_13F = "13f00000-0000-4000-8000-0000000000e1";
+  await db.query(
+    `INSERT INTO carts (id, tenant_id, contact_id) VALUES ($1, $2, $3)`,
+    [CART_13F, TENANT_A, CONTACT_13F],
+  );
+  await db.query(
+    `INSERT INTO cart_items (tenant_id, cart_id, product_id, qty, unit_price_idr)
+     VALUES ($1, $2, $3, 2, 150000)`,
+    [TENANT_A, CART_13F, PROD_13F],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO carts (tenant_id, contact_id) VALUES ($1, $2)`,
+      [TENANT_A, CONTACT_13F],
+    ),
+    /duplicate key|carts_one_open_per_contact/i,
+  );
+  // Keranjang checked_out kedua untuk kontak yang sama DIIZINKAN
+  // (riwayat checkout tidak menghalangi keranjang terbuka baru).
+  await db.query(
+    `INSERT INTO carts (tenant_id, contact_id, status) VALUES ($1, $2, 'checked_out')`,
+    [TENANT_A, CONTACT_13F],
+  );
+
+  // Isolasi RLS sebagai app_user: tenant A melihat keranjang+ordernya;
+  // konteks B melihat 0; sisip lintas tenant ditolak.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const ownCarts = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM carts`,
+    );
+    const ownOrders = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM orders`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const otherCarts = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM carts`,
+    );
+    const otherOrders = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM orders`,
+    );
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO carts (tenant_id, contact_id) VALUES ($1, $2)`,
+        [TENANT_A, CONTACT_13F],
+      );
+    } catch {
+      crossBlocked = true;
+    }
+    return { ownCarts, ownOrders, otherCarts, otherOrders, crossBlocked };
+  });
+  assert.equal(views.ownCarts.rows[0].n, "2");
+  assert.equal(views.ownOrders.rows[0].n, "1");
+  assert.equal(views.otherCarts.rows[0].n, "0");
+  assert.equal(views.otherOrders.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+  console.log(
+    "[39] Fase 13F: payment_links dual-varian (CHECK tepat satu target); carts/cart_items/orders/order_items terisolasi tenant; satu keranjang terbuka per kontak (unik parsial): OK",
   );
 }
 

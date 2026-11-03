@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import {
   auditLogs,
   contacts,
+  orderItems,
+  orders,
   paymentLinks,
   products,
   tenants,
@@ -281,6 +283,47 @@ export interface PaymentLinkWithNames extends PaymentLink {
   contactName: string | null;
 }
 
+/** Label tampil tautan varian order (Fase 13F): "Order <id pendek>". */
+export function orderLinkLabel(orderId: string): string {
+  return `Order ${orderId.slice(0, 8)}`;
+}
+
+/**
+ * HOOK PENYELESAIAN ORDER (Fase 13F): status order mengikuti status
+ * tautan bayarnya — dipanggil di SEMUA titik tempat status tautan
+ * berubah (pembayaran selesai di simulatePayByCode, penegakan expired
+ * malas di markExpiredIfDue). Penjaga `status = 'pending'` membuatnya
+ * idempoten: peristiwa penyelesaian yang berulang (klik bayar ganda,
+ * baca ulang tautan kedaluwarsa) tidak pernah membalik order yang
+ * sudah final, dan paid_at hanya tertulis pada transisi pertama.
+ */
+export async function syncOrderStatusFromLink(
+  tx: DbTx,
+  link: PaymentLink,
+): Promise<void> {
+  if (!link.orderId) return;
+  const now = new Date();
+  if (link.status === "paid") {
+    await tx
+      .update(orders)
+      .set({
+        status: "paid",
+        paidAt: link.paidAt ?? now,
+        updatedAt: now,
+      })
+      .where(
+        and(eq(orders.id, link.orderId), eq(orders.status, "pending")),
+      );
+  } else if (link.status === "expired" || link.status === "cancelled") {
+    await tx
+      .update(orders)
+      .set({ status: link.status, updatedAt: now })
+      .where(
+        and(eq(orders.id, link.orderId), eq(orders.status, "pending")),
+      );
+  }
+}
+
 /**
  * Daftar tautan bayar terbaru tenant (dengan nama produk & kontak untuk
  * tampilan dashboard). Baris pending yang sudah lewat expires_at ditandai
@@ -293,6 +336,19 @@ export async function listPaymentLinks(
 ): Promise<PaymentLinkWithNames[]> {
   const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
   return withTenantDb(db, ctx.tenantId, async (tx) => {
+    // Fase 13F: order di balik tautan pending yang kedaluwarsa ikut
+    // dibalik expired bersama tautannya (hook penyelesaian order).
+    const dueOrderIds = await tx
+      .select({ orderId: paymentLinks.orderId })
+      .from(paymentLinks)
+      .where(
+        and(
+          eq(paymentLinks.tenantId, ctx.tenantId),
+          eq(paymentLinks.status, "pending"),
+          lt(paymentLinks.expiresAt, new Date()),
+          isNotNull(paymentLinks.orderId),
+        ),
+      );
     await tx
       .update(paymentLinks)
       .set({ status: "expired", updatedAt: new Date() })
@@ -303,6 +359,20 @@ export async function listPaymentLinks(
           lt(paymentLinks.expiresAt, new Date()),
         ),
       );
+    const expiredOrderIds = dueOrderIds
+      .map((r) => r.orderId)
+      .filter((id): id is string => id !== null);
+    if (expiredOrderIds.length > 0) {
+      await tx
+        .update(orders)
+        .set({ status: "expired", updatedAt: new Date() })
+        .where(
+          and(
+            inArray(orders.id, expiredOrderIds),
+            eq(orders.status, "pending"),
+          ),
+        );
+    }
     const rows = await tx
       .select({
         link: paymentLinks,
@@ -310,14 +380,18 @@ export async function listPaymentLinks(
         contactName: contacts.name,
       })
       .from(paymentLinks)
-      .innerJoin(products, eq(products.id, paymentLinks.productId))
+      // LEFT join sejak Fase 13F: tautan order tidak punya produk —
+      // nama tampilnya adalah label order.
+      .leftJoin(products, eq(products.id, paymentLinks.productId))
       .leftJoin(contacts, eq(contacts.id, paymentLinks.contactId))
       .where(eq(paymentLinks.tenantId, ctx.tenantId))
       .orderBy(desc(paymentLinks.createdAt))
       .limit(limit);
     return rows.map((r) => ({
       ...r.link,
-      productName: r.productName,
+      productName:
+        r.productName ??
+        (r.link.orderId ? orderLinkLabel(r.link.orderId) : ""),
       contactName: r.contactName,
     }));
   });
@@ -372,7 +446,60 @@ async function markExpiredIfDue(tx: DbTx, link: PaymentLink): Promise<PaymentLin
     .set({ status: "expired", updatedAt: new Date() })
     .where(eq(paymentLinks.id, link.id))
     .returning();
-  return updated ?? link;
+  const expired = updated ?? link;
+  // Fase 13F: order di balik tautan ikut expired (hook penyelesaian).
+  await syncOrderStatusFromLink(tx, expired);
+  return expired;
+}
+
+/**
+ * Isi tampilan publik dari satu baris tautan (konteks tenant pemilik).
+ * Varian produk: nama + deskripsi produk. Varian order (Fase 13F):
+ * label order + ringkasan item snapshot sebagai deskripsi — pembeli
+ * melihat persis apa yang ia bayar, tanpa data pribadi kontak.
+ */
+async function buildPublicView(
+  tx: DbTx,
+  tenantId: string,
+  link: PaymentLink,
+): Promise<PublicPaymentView> {
+  let productName = "";
+  let description: string | null = null;
+  if (link.productId) {
+    const product = await getProductRow(tx, tenantId, link.productId);
+    productName = product?.name ?? "";
+    description = product?.description ?? null;
+  } else if (link.orderId) {
+    productName = orderLinkLabel(link.orderId);
+    const items = await tx
+      .select()
+      .from(orderItems)
+      .where(
+        and(
+          eq(orderItems.tenantId, tenantId),
+          eq(orderItems.orderId, link.orderId),
+        ),
+      )
+      .orderBy(asc(orderItems.createdAt));
+    description =
+      items.map((i) => `${i.qty} × ${i.productName}`).join(", ") || null;
+  }
+  const [tenant] = await tx
+    .select({ name: tenants.name })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
+  return {
+    code: link.code,
+    productName,
+    description,
+    amountIdr: link.amountIdr,
+    status: link.status,
+    tenantName: tenant?.name ?? "",
+    provider: link.provider,
+    paidAt: link.paidAt,
+    expiresAt: link.expiresAt,
+  };
 }
 
 /** Isi halaman /pay/:code. Null bila code tidak dikenal (API → 404). */
@@ -384,23 +511,7 @@ export async function getPublicPaymentByCode(
   if (!resolved) return null;
   return withTenantDb(db, resolved.tenantId, async (tx) => {
     const link = await markExpiredIfDue(tx, resolved);
-    const product = await getProductRow(tx, resolved.tenantId, link.productId);
-    const [tenant] = await tx
-      .select({ name: tenants.name })
-      .from(tenants)
-      .where(eq(tenants.id, resolved.tenantId))
-      .limit(1);
-    return {
-      code: link.code,
-      productName: product?.name ?? "",
-      description: product?.description ?? null,
-      amountIdr: link.amountIdr,
-      status: link.status,
-      tenantName: tenant?.name ?? "",
-      provider: link.provider,
-      paidAt: link.paidAt,
-      expiresAt: link.expiresAt,
-    };
+    return buildPublicView(tx, resolved.tenantId, link);
   });
 }
 
@@ -430,6 +541,10 @@ export async function simulatePayByCode(
         .where(eq(paymentLinks.id, link.id))
         .returning();
       link = updated ?? link;
+      // Fase 13F: order di balik tautan (bila ada) ikut menjadi paid
+      // + paid_at — tepat satu kali berkat penjaga status pending di
+      // hook, walau penyelesaian ini dipanggil berulang.
+      await syncOrderStatusFromLink(tx, link);
       await tx.insert(auditLogs).values({
         tenantId: resolved.tenantId,
         actorType: "system",
@@ -439,29 +554,14 @@ export async function simulatePayByCode(
           paymentLinkId: link.id,
           code: link.code,
           productId: link.productId,
+          orderId: link.orderId,
           amountIdr: link.amountIdr,
           provider: link.provider,
           simulation: true,
         },
       });
     }
-    const product = await getProductRow(tx, resolved.tenantId, link.productId);
-    const [tenant] = await tx
-      .select({ name: tenants.name })
-      .from(tenants)
-      .where(eq(tenants.id, resolved.tenantId))
-      .limit(1);
-    const view: PublicPaymentView = {
-      code: link.code,
-      productName: product?.name ?? "",
-      description: product?.description ?? null,
-      amountIdr: link.amountIdr,
-      status: link.status,
-      tenantName: tenant?.name ?? "",
-      provider: link.provider,
-      paidAt: link.paidAt,
-      expiresAt: link.expiresAt,
-    };
+    const view = await buildPublicView(tx, resolved.tenantId, link);
     return link.status === "paid"
       ? ({ kind: "paid", view } as const)
       : ({ kind: "not_payable", view } as const);

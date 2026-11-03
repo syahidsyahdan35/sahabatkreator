@@ -99,6 +99,8 @@ import type {
   MetaWebhookInfoResponse,
   PaymentLinkListResponse,
   PaymentLinkResponse,
+  OrderListResponse,
+  OrderResponse,
   PlatformSettingKey,
   PlatformSettingsResponse,
   PlatformSettingStatus,
@@ -959,6 +961,23 @@ export const api = {
       return request<PaymentLinkResponse>(
         `/api/tenants/${tenantId}/payment-links`,
         { method: "POST", body: JSON.stringify(input) },
+      );
+    },
+  },
+  orders: {
+    /** GET /api/tenants/:tenantId/orders → order commerce terbaru workspace (Fase 13F). */
+    async list(tenantId: string): Promise<OrderResponse[]> {
+      const body = await request<OrderListResponse>(
+        `/api/tenants/${tenantId}/orders`,
+        { method: "GET" },
+      );
+      return body.orders;
+    },
+    /** GET /api/tenants/:tenantId/orders/:id → detail order + item. */
+    get(tenantId: string, orderId: string): Promise<OrderResponse> {
+      return request<OrderResponse>(
+        `/api/tenants/${tenantId}/orders/${orderId}`,
+        { method: "GET" },
       );
     },
   },
