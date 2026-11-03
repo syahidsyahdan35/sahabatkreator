@@ -6956,3 +6956,52 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   kunci yang berlaku `~/.ssh/id_ed25519_botara_vps` di port 19228.
   Build web lokal gagal bila `apps/web/dist` masih berisi >50 berkas
   (penjaga hapus-massal sandbox) — hapus direktori `dist` lebih dulu.
+
+## Konversi VPS ke Mode Pull — 2026-11-03 (malam)
+
+- **Latar**: salinan repo di server selama ini BUKAN mode pull — clone
+  git tertinggal di HEAD `2fa37f5` (era 14B) yang working tree-nya
+  ditimpa rsync (agen utama) / tar-over-SSH (instans kontributor),
+  sehingga `git status` menunjukkan 452 berkas "berubah" (mayoritas
+  churn CRLF dari penyalinan sisi Windows). Analisa byte-level
+  membuktikan isi tree identik dengan `origin/main`; user menyetujui
+  konversi ke mode pull sejati (2026-11-03 18:29).
+- **Yang dilakukan**: (1) backup paranoia working tree (termasuk
+  `.git`, tanpa `node_modules`/`dist`) ke
+  `/home/ubuntu/backups/sahabat-kreator-tree-pre-pullmode-20261103.tar.gz`
+  (19.177.154 byte); (2) deploy key repo
+  (`~/.ssh/id_ed25519_sahabat_kreator_repo`, privat 600 / publik 644)
+  dipasang di server + blok `Host github.com` di `~/.ssh/config`
+  server; egress langsung server→GitHub bekerja (tanpa proxy);
+  fingerprint host key ed25519 yang tersimpan terverifikasi sama
+  dengan fingerprint resmi GitHub
+  `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`;
+  `git ls-remote origin HEAD` dari server =
+  `b9d35035aec86db9318a36dccadd5499135cc182`; (3) `git config
+  core.autocrlf false` → `git fetch origin` → `git reset --hard
+  origin/main` → HEAD `b9d3503`, **`git status --porcelain` KOSONG**
+  (bukti mode pull); (4) build: server TIDAK memiliki toolchain
+  Node/pnpm (hanya runtime Bun `~/.bun/bin/bun`), jadi jalur fallback
+  terdokumentasi dipakai — build semua dist di VM pengembangan
+  (tree `b9d3503`, node_modules sesuai lockfile), aturan bundle
+  terverifikasi (api/worker/realtime masing-masing tepat 1 impor
+  eksternal `from "pg"`; penanda `META_ENGAGEMENT_SCOPES` +
+  `claimed_at` ada di bundle), lalu rsync HANYA keluaran `dist`
+  (api/worker/realtime/web; hash `dist/index.js` server =
+  byte-identik dengan build lokal); (5) restart 4 unit via kill
+  MainPID eksplisit (PID lama 3821972–3821975 → PID baru
+  3836835–3836838, aktif 11:32:53 UTC).
+- **Verifikasi pasca-konversi**: `https://botara.my.id/api/health`
+  `ok`; halaman publik menyajikan bundle web baru
+  `index-DNm4mgH4.js`; jurnal migrasi tetap 10 dan hitungan live
+  tidak berubah (2 tenant / 3 user / 2 channel connected / 0 kontak)
+  — tanpa tulisan DB sama sekali; `.env.staging` byte-identik
+  sebelum & sesudah (sha256 `9c1ded2a5a69f09e…`, mode 600).
+- **URUTAN DEPLOY KANONIK BARU** (menggantikan rsync/tar sumber —
+  DITETAPKAN sejak entri ini): di server —
+  `cd /home/ubuntu/sahabat-kreator && git fetch origin && git reset
+  --hard origin/main` → build semua dist (di VM pengembangan selama
+  server belum punya toolchain Node/pnpm; rsync hanya `dist`) →
+  restart 4 unit via kill MainPID eksplisit → verifikasi health
+  publik + grep bundle + sha `.env.staging` + `git status` kosong.
+  Deploy sumber via rsync/tar-over-SSH RESMI PENSIUN.
