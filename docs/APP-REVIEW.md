@@ -1,6 +1,13 @@
 # Meta App Review — Submission Package (Fase 14B)
 
-App: **Botara Dev** — App ID `2356364001779420` (business portfolio: SHD Store)
+App: **Botara** — App ID `1141276711971314` (business portfolio: SHD Store)
+> 2026-11-03: the previous app **Botara Dev** (`2356364001779420`) was
+> **deleted** by the owner after its submission was rejected; this
+> package now targets the fresh app **Botara** (`1141276711971314`),
+> which has **no submission history** (`UNSUBMITTED`) and a clean
+> compliance record. Its 4 use cases (Facebook Messaging, Instagram
+> Business, Pages API, WhatsApp Business Messaging) are already
+> configured.
 Product: **Sahabat Kreator** — multi-tenant chat-marketing SaaS for creators
 and SMBs (unified inbox + automations + AI agents + broadcasts over
 WhatsApp, Instagram, Messenger, Telegram, Webchat).
@@ -49,20 +56,19 @@ server logs/code.
    `.env.production`), rebuild + restart API, then verify a fresh
    Messenger connect shows all 7 scopes in the dialog URL.
 4. **[USER] Finish the IG config item** — in the Instagram FLB
-   configuration `30196668823256383`, set the permission list to exactly
+   configuration (new one on app `1141276711971314`), set the permission list to exactly
    `instagram_basic`, `instagram_manage_messages`,
-   `instagram_manage_comments`, `business_management` (add
-   `business_management`; **remove `instagram_content_publish` if it is
-   present** — the product never publishes media, see §2.4). If Meta
-   does not allow editing an existing configuration, create a new one
-   with the same settings and put the new ID in Panel Admin →
-   `meta_ig_config_id`. After reconnecting Instagram, **[MUSE]** can
-   confirm from the discovery log (`businesses_instagram_accounts`
-   stops returning `ERR:graph_100`).
-5. **[USER] Confirm the WhatsApp FLB config** — the Embedded Signup
-   configuration (ID stored in Panel Admin → `meta_wa_config_id`) must
-   carry `whatsapp_business_messaging` + `whatsapp_business_management`
-   (+ `business_management`). 
+   `instagram_manage_comments`, `business_management` (**never add
+   `instagram_content_publish`** — the product never publishes media,
+   see §2.4). On app `1141276711971314` this configuration must be
+   **created fresh** (the old app's configs died with it); put the new
+   config ID in Panel Admin → `meta_ig_config_id`. After reconnecting
+   Instagram, **[MUSE]** can confirm from the discovery log
+   (`businesses_instagram_accounts` stops returning `ERR:graph_100`).
+5. **[USER] Create the WhatsApp FLB config** — the Embedded Signup
+   configuration (new ID stored in Panel Admin → `meta_wa_config_id`)
+   must carry `whatsapp_business_messaging` +
+   `whatsapp_business_management` (+ `business_management`).
 6. **[USER] Create the reviewer demo account** — register one account
    on https://botara.my.id/register (e.g. a dedicated review mailbox),
    create a workspace, and connect your own test Page, Instagram
@@ -143,7 +149,7 @@ Access** (this submission) or the listed calls fail or return empty.
 | `pages_show_list` | `GET /me/accounts` (Page list + Page tokens), Page backfill `GET /{page-id}?fields=id,name,username,access_token,instagram_business_account{...}` during discovery | Advanced Access required for other businesses' Pages |
 | `pages_messaging` | `POST /{page-id}/messages` (Send API, `messaging_type: RESPONSE`); private replies via `recipient: { comment_id }`; sender profile `GET /{psid}?fields=first_name,last_name,profile_pic`; inbound via `messages` webhook field | Advanced Access required; also the permission Meta reviews most strictly — screencast 1 shows it end-to-end |
 | `pages_manage_metadata` | `POST /{page-id}/subscribed_apps?subscribed_fields=messages,feed` at connect time | Advanced Access required |
-| `pages_read_engagement` | Page `feed` webhook subscription + receiving comment events (comment id, text, post id) from that feed | Advanced Access required. **Was missing from the dialog before Fase 14B** — added to `MESSENGER_OAUTH_SCOPES` |
+| `pages_read_engagement` | Page `feed` webhook subscription + receiving comment events (comment id, text, post id) from that feed | Advanced Access required. **Was missing from the dialog before Fase 14B** — added to the dialog scope list (`MESSENGER_ENGAGEMENT_SCOPES`, opt-in via `META_ENGAGEMENT_SCOPES`) |
 | `pages_read_user_content` | Commenter identity (`from.id`, `from.name`) carried in the `feed` comment payloads, shown in the inbox and used for comment-to-DM | Advanced Access required. **Added in Fase 14B** (same gap as above) |
 | `pages_manage_engagement` | `POST /{comment-id}/comments` (public reply as the Page); `POST /{comment-id}?is_hidden=true\|false` (hide/unhide) — worker comment actions | Advanced Access required. **Added in Fase 14B** (same gap as above) |
 | `business_management` | `GET /me/assigned_pages`; `GET /me/businesses?fields=...,owned_pages,client_pages` (Page discovery); shared with the IG/WA discovery edges below | Advanced Access required. Added to the dialog in Hotfix R1 after live logs proved Pages visible only through a business portfolio never appeared (`graph_10`/`graph_100`) without it |
@@ -441,29 +447,36 @@ payment providers), retention, and user rights.
 
 ## §6 — Console pre-flight checklist (exact expected values)
 
-App: **Botara Dev** · App ID: `2356364001779420` · Portfolio: SHD Store.
+App: **Botara** · App ID: `1141276711971314` · Portfolio: SHD Store.
 
 ### App Settings → Basic
-- [ ] Privacy Policy URL: `https://botara.my.id/privacy`
-- [ ] Terms of Service URL: `https://botara.my.id/terms`
-- [ ] Data Deletion Instructions URL: `https://botara.my.id/data-deletion`
+- [x] Privacy Policy URL: `https://botara.my.id/privacy` (verified via API 2026-11-03)
+- [x] Terms of Service URL: `https://botara.my.id/terms` (verified)
+- [x] Data Deletion Instructions URL: `https://botara.my.id/data-deletion` (verified)
 - [ ] App icon: 1024×1024 image uploaded (the SK monogram artwork the
-      user has on file).
-- [ ] Category: **Business**.
-- [ ] App Domains / website: `botara.my.id` (staging; the production
+      user has on file) — a 48px default icon is present; confirm the
+      full-size artwork is uploaded.
+- [ ] Category: currently `MESSENGER_BOT` — acceptable for this
+      product (Messenger is the core surface); switching to
+      **Business** is optional.
+- [x] App Domains / website: `botara.my.id` (verified; the production
       domain is added in Fase 14C before public launch — reviewers
       test on the staging domain above).
-- [ ] Contact email: `support@botara.my.id`.
+- [ ] Contact email: still `syahidsyahdan35@gmail.com` and
+      **unverified** — change to `support@botara.my.id` (or verify the
+      current one) before submit.
 
 ### Facebook Login → Settings
 - [ ] Valid OAuth Redirect URIs contains exactly:
       `https://botara.my.id/api/meta/oauth/callback`
-- [ ] Login for Business configurations:
-  - Instagram config `30196668823256383` — permissions exactly:
+- [ ] Login for Business configurations (the old app's configs are
+      gone — create fresh ones on this app, then store each new ID in
+      Panel Admin → `meta_ig_config_id` / `meta_wa_config_id`):
+  - Instagram config (new ID) — permissions exactly:
     `instagram_basic`, `instagram_manage_messages`,
     `instagram_manage_comments`, `business_management`
-    (remove `instagram_content_publish` if present; §0 step 4).
-  - WhatsApp config (ID in Panel Admin → `meta_wa_config_id`) —
+    (never add `instagram_content_publish`; §0 step 4).
+  - WhatsApp config (new ID) —
     permissions: `whatsapp_business_messaging`,
     `whatsapp_business_management`, `business_management`.
 
@@ -490,9 +503,19 @@ App: **Botara Dev** · App ID: `2356364001779420` · Portfolio: SHD Store.
       the app at connect time; both layers are expected.)
 
 ### Business verification & roles
-- [ ] Business Verification for SHD Store: **Verified** (§0 step 1).
+- [x] Business Verification for SHD Store: **Verified**
+      (`business_verification_passes: true`, verified via API 2026-11-03).
 - [ ] App Roles: reviewer demo assets owned by the portfolio;
       team members who test have Tester/Admin roles as needed.
+
+### Compliance (verified via API 2026-11-03)
+- [x] Compliance status: **compliant** — no open violations, no
+      required actions. Data Use Checkup URL:
+      https://developers.facebook.com/apps/1141276711971314/data-use-checkup/
+      (fill it in as part of the submission; `data_use_checkup` is the
+      one step every permission row still lists as incomplete).
+- [x] No prior submission on this app (`UNSUBMITTED`, clean history) —
+      the old app's rejection history does NOT carry over.
 
 ---
 
@@ -503,7 +526,7 @@ App: **Botara Dev** · App ID: `2356364001779420` · Portfolio: SHD Store.
   dialog and the connected state**; Meta rejects stitched flows.
 - Keep the browser address bar visible: reviewers must see
   `botara.my.id` and the `facebook.com` dialog with the app name
-  **Botara Dev** and the permission list.
+  **Botara** and the permission list.
 - Use the reviewer demo account (§0 step 6); never show real customer
   data, tokens, or passwords (log in before pressing record, or mask
   the password field — but do not cut the connect flow itself).
@@ -517,7 +540,7 @@ App: **Botara Dev** · App ID: `2356364001779420` · Portfolio: SHD Store.
 ### Screencast 1 — Messenger (covers pages_show_list, business_management, pages_manage_metadata, pages_messaging, pages_read_engagement, pages_read_user_content, pages_manage_engagement)
 1. Open `https://botara.my.id/channels` (demo account already signed
    in). Hover the Messenger card; click **Continue with Facebook**.
-2. The Meta dialog appears showing **Botara Dev** and its permission
+2. The Meta dialog appears showing **Botara** and its permission
    list — pause 2 seconds so the list is readable.
 3. In the asset picker, show at least one Page that lives in the
    **Business portfolio** (call it out in narration —
@@ -627,7 +650,7 @@ Verified live against https://botara.my.id on 2026-11-03:
    dialog** (feed comment events + public reply + hide are
    `pages_read_engagement` / `pages_read_user_content` /
    `pages_manage_engagement` per Meta's Pages API docs, none of which
-   were in `MESSENGER_OAUTH_SCOPES`). In Development mode with mock
+   were in the Messenger dialog scope list). In Development mode with mock
    chains this was invisible; for other businesses the comment
    features would have failed even after a successful review of the
    old list. **Fixed in Fase 14B**: the three scopes were added to
@@ -644,11 +667,30 @@ Verified live against https://botara.my.id on 2026-11-03:
    future code item **only if** the console demands it for this app;
    flagged here so it is a decision, not a surprise.
 4. App display name during consent is the Meta app name
-   (**Botara Dev**), while the product brand is Sahabat Kreator.
-   Renaming the app is a user console decision; it does not block
-   review, but reviewers will see "Botara Dev" in dialogs and
+   (**Botara** on app `1141276711971314`), while the product brand is
+   Sahabat Kreator. Renaming the app is a user console decision; it does not block
+   review, but reviewers will see "Botara" in dialogs and
    screencasts — the §1 description names both so the mismatch reads
    as intentional.
+
+5. **2026-11-03, app migration:** the original app **Botara Dev**
+   (`2356364001779420`) was deleted after a rejected submission; all
+   console-side state must be rebuilt on **Botara**
+   (`1141276711971314`): FLB configurations for Instagram and WhatsApp
+   (new config IDs → Panel Admin `meta_ig_config_id` / `meta_wa_config_id`),
+   webhook subscription (same callback URL and verify token), Valid
+   OAuth Redirect URI, app roles/assets for testing, and the contact
+   email. Verified live via API on 2026-11-03: the new app is
+   compliant (no violations), business verification passes (SHD
+   Store), privacy/terms/data-deletion URLs already point to
+   botara.my.id, category `MESSENGER_BOT`, Development mode, **no
+   submission yet**. Contact email is still a personal Gmail address
+   and unverified — change to `support@botara.my.id` before submit.
+   Staging must also learn the new IDs: set them in Panel Admin
+   (`meta_app_id`, `meta_ig_config_id`, `meta_wa_config_id`) — the
+   staging `platform_settings` table is empty and `.env.staging` has
+   no `META_APP_ID` fallback, so OAuth dialogs currently have no
+   `client_id`.
 
 ---
 
@@ -666,20 +708,33 @@ itu baru dinyalakan SESUDAH persetujuan (memintanya sebelum itu
 membuat dialog gagal dengan "Invalid Scopes" — itulah sebabnya
 perubahan Fase 14B yang memintanya tanpa syarat sudah dibatalkan
 menjadi opt-in; connect Messenger normal saat ini aman dan tidak
-meminta trio ini sama sekali); **(4)** lengkapi konfigurasi
-IG `30196668823256383`: tambah `business_management`, hapus
-`instagram_content_publish` bila ada; **(5)** pastikan konfigurasi
-WhatsApp membawa `whatsapp_business_messaging` +
-`whatsapp_business_management`; **(6)** buat satu akun demo khusus
-reviewer, hubungkan Page + IG + nomor WA milik sendiri, biarkan
-terhubung, dan taruh kredensialnya di kolom test credentials saat
-submit; **(7)** rekam tiga screencast mengikuti naskah §7 (tanpa
-potongan antara dialog izin dan status terhubung); **(8)** submit
-App Review dengan teks §3/§4/§5 yang tinggal tempel; **(9)** sesudah
-disetujui, pindahkan aplikasi ke mode Live dan minta Muse
-menjalankan baterai smoke ulang.
+meminta trio ini sama sekali); **(4)** buat konfigurasi IG baru di app
+`1141276711971314` (app lama dihapus): `instagram_basic` +
+`instagram_manage_messages` + `instagram_manage_comments` +
+`business_management` — TANPA `instagram_content_publish`; masukkan ID
+config barunya ke Panel Admin → `meta_ig_config_id`; **(5)** buat
+konfigurasi WhatsApp (Embedded Signup) baru dengan
+`whatsapp_business_messaging` +
+`whatsapp_business_management` + `business_management`; masukkan ID-nya
+ke Panel Admin → `meta_wa_config_id`; **(5b)** pasang nilai
+`meta_app_id` = `1141276711971314` di Panel Admin (saat ini staging
+belum punya client_id sama sekali — platform_settings kosong);
+**(6)** langganan webhook di app baru: callback
+`https://botara.my.id/api/meta/webhook` + verify token yang sama
+dengan server; **(7)** buat satu akun demo khusus reviewer, hubungkan
+Page + IG + nomor WA milik sendiri, biarkan terhubung, dan taruh
+kredensialnya di kolom test credentials saat submit; **(8)** rekam
+tiga screencast mengikuti naskah §7 (tanpa potongan antara dialog
+izin dan status terhubung); **(9)** isi Data Use Checkup + ganti
+email kontak ke `support@botara.my.id` (yang sekarang gmail pribadi
+dan belum terverifikasi); **(10)** submit App Review dengan teks
+§3/§4/§5 yang tinggal tempel; **(11)** sesudah disetujui, pindahkan
+aplikasi ke mode Live dan minta Muse menjalankan baterai smoke ulang.
 
 Yang sudah disiapkan Muse: seluruh teks pengajuan berbahasa Inggris
 (§1, §3, §4, §5), daftar izin final hasil inventaris kode (§2),
-checklist konsol (§6), naskah screencast (§7), dan perbaikan kode
-Fase 14B (trio izin engagement kini diminta dialog Messenger).
+checklist konsol (§6), naskah screencast (§7), perbaikan kode
+Fase 14B (trio izin engagement kini diminta dialog Messenger), dan
+paket ini kini menunjuk app baru **Botara** `1141276711971314`
+(2026-11-03; kondisi konsolnya diverifikasi via API: compliant,
+bisnis terverifikasi, URL legal benar, belum ada submission).

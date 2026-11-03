@@ -11,3 +11,5 @@ playwright-report/
 .turbo/
 .DS_Store
 .workbuddy-ai/
+.claude/
+.cursor/

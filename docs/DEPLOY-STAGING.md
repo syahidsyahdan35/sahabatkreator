@@ -4892,7 +4892,7 @@ dipertahankan: biaya provider disimpan di `meta.costUsd`, BUKAN kolom
 
 ## Fase 7D.3 — Koneksi Instagram via System User Token + Rantai Penemuan OAuth Multi-Tepi (2026-11-02)
 
-Konteks: wiring live membuktikan aplikasi Meta user ("Botara Dev") dan
+Konteks: wiring live membuktikan aplikasi Meta user (kala itu "Botara Dev", kini app "Botara" `1141276711971314`) dan
 akun IG user (@syahidsyahdansaja) berada di portofolio bisnis yang SAMA
 (SHD Store). Untuk kasus satu-portofolio, wizard Unified Login
 menciptakan "business integration system user" tersembunyi yang tidak
@@ -6651,9 +6651,11 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
 ## Update Fase 14B — Paket App Review Meta (2026-11-03)
 
 - **Isi**: fase dokumentasi + verifikasi — deliverable utamanya
-  `docs/APP-REVIEW.md` (paket pengajuan Advanced Access aplikasi
-  "Botara Dev" `2356364001779420`, BELUM pernah diajukan; klik submit
-  tetap milik user): urutan go-live per peran (verifikasi bisnis →
+  `docs/APP-REVIEW.md` (paket pengajuan Advanced Access; app target
+  kini **"Botara" `1141276711971314`** — app lama "Botara Dev"
+  `2356364001779420` DIHAPUS pemiliknya setelah submission-nya
+  ditolak, sehingga seluruh state konsol dibangun ulang di app baru;
+  klik submit tetap milik user): urutan go-live per peran (verifikasi bisnis →
   pra-terbang konsol → screencast → submit), ringkasan aplikasi,
   **inventaris izin yang diturunkan dari kode** (seluruh panggilan
   Graph di channel-messenger/channel-whatsapp/core meta/meta-oauth/
@@ -6712,7 +6714,8 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   verifikasi bisnis SHD Store; menambahkan trio engagement ke daftar
   izin aplikasi di konsol SEBELUM connect Messenger berikutnya
   (dialog kini memintanya — tanpa itu Meta menjawab "Invalid
-  Scopes"); melengkapi konfigurasi IG `30196668823256383` dengan
+  Scopes"); konfigurasi IG FLB dibuat ulang di app baru
+  (`1141276711971314`) dengan
   `business_management` (bukti log: tepi businesses masih
   `ERR:graph_100`) + membuang `instagram_content_publish` bila ada;
   membuat akun demo reviewer + merekam 3 screencast + klik submit.
