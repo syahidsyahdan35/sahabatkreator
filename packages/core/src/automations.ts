@@ -479,6 +479,12 @@ export interface EvaluateInboundResult {
    * flow yang sedang menunggu, dan cabang replied adalah responsnya.
    */
   flowWaitReplyResumed: number;
+  /**
+   * Fase 13E: run questionnaire parkir yang memproses pesan ini
+   * sebagai jawaban. Dihitung tertangani flow seperti wait_reply —
+   * worker tidak meneruskannya ke agent.
+   */
+  flowQuestionnaireResumed: number;
 }
 
 /**
@@ -619,6 +625,7 @@ export async function evaluateInboundMessageForAutomations(
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
+      flowQuestionnaireResumed: 0,
       consentAction: null,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
@@ -634,6 +641,7 @@ export async function evaluateInboundMessageForAutomations(
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
+      flowQuestionnaireResumed: 0,
       consentAction: null,
     };
   const text = context.message.contentText ?? "";
@@ -711,6 +719,7 @@ export async function evaluateInboundMessageForAutomations(
           flowDuplicateStarts: 0,
           cancelledFlowRuns: 0,
           flowWaitReplyResumed: 0,
+          flowQuestionnaireResumed: 0,
           consentAction: consentMatch,
         };
       }
@@ -996,6 +1005,7 @@ export async function evaluateInboundMessageForAutomations(
     flowDuplicateStarts: flowOutcome.duplicateStarts,
     cancelledFlowRuns: flowOutcome.cancelledRunIds.length,
     flowWaitReplyResumed: flowOutcome.resumedRunIds.length,
+    flowQuestionnaireResumed: flowOutcome.questionnaireResumedRunIds.length,
     consentAction: null,
   };
 }

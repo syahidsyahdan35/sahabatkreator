@@ -306,6 +306,10 @@ const bullWorker = new Worker<MainJobData>(
         // Fase 12A: pesan yang melanjutkan run wait_reply parkir juga
         // tertangani flow — cabang replied adalah responsnya.
         result.flowWaitReplyResumed === 0 &&
+        // Fase 13E: pesan yang menjadi jawaban questionnaire parkir
+        // juga tertangani flow — agent tidak ikut menjawab survei
+        // yang sedang berjalan.
+        result.flowQuestionnaireResumed === 0 &&
         // Fase 13C: pesan consent (kata opt-in/opt-out persis) adalah
         // perintah persetujuan yang tertangani sistem — tidak pernah
         // diteruskan ke agent sebagai pertanyaan biasa.

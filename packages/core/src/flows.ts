@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, lt, or, sql } from "drizzle-orm";
-import { findFlowTemplate } from "@sahabat-kreator/contracts";
+import {
+  findFlowTemplate,
+  QUESTIONNAIRE_DEFAULT_INVALID_PROMPT,
+} from "@sahabat-kreator/contracts";
 import {
   auditLogs,
   automationRuns,
@@ -31,6 +34,7 @@ import {
   flowExperimentKey,
 } from "./experiments";
 import { renderMessageText } from "./render-text";
+import { normalizeContactPhone } from "./contacts";
 import { respondToInboundMessage } from "./agent-runtime";
 import { buildPaymentUrl, createPaymentLink } from "./products";
 
@@ -96,6 +100,23 @@ import { buildPaymentUrl, createPaymentLink } from "./products";
  *   dari jalur evaluasi pesan masuk (pesan yang sama TETAP diproses
  *   pemicu lain seperti biasa), tenggat lewat → job resume yang sama
  *   menjalankan branch "timeout". Opt-out membatalkan seperti delay.
+ *
+ * FASE 13E — node `questionnaire` (kontrak didokumentasikan penuh di
+ * packages/contracts): daftar pertanyaan berurutan dalam satu node
+ * yang MEMAKAI ULANG mesin parkir wait_reply — penanda parkirnya
+ * tetap context.wait, keadaan kuesionernya hidup di
+ * context.questionnaire {nodeId, qIndex, attempts, answers,
+ * startedAt}. Bedanya dari wait_reply: (1) tenggat berlaku PER
+ * PERTANYAAN (setiap parkir — pertanyaan baru maupun prompt ulang —
+ * memasang tenggat baru, persis semantik per-parkir wait_reply);
+ * (2) resolusi balasan BUKAN sekadar memilih branch: balasan
+ * divalidasi menurut tipe jawaban, jawaban sah langsung ditulis ke
+ * field target kontak, lalu run parkir lagi untuk pertanyaan
+ * berikutnya atau keluar lewat branch completed/invalid; (3) target
+ * `custom:<key>` harus kunci yang dikenal tenant — produk tidak
+ * punya registri definisi field, jadi "definisi" = himpunan kunci
+ * custom_fields yang dibawa kontak-kontak tenant (ditegakkan saat
+ * aktivasi + diperiksa ulang setiap pertanyaan hendak dikirim).
  */
 
 export const FLOW_MAX_STEPS = 100;
@@ -122,7 +143,15 @@ export interface FlowGraphNode {
 }
 
 /** Cabang edge — selaras FlowEdgeBranchSchema di kontrak. */
-export type FlowBranch = "yes" | "no" | "a" | "b" | "replied" | "timeout";
+export type FlowBranch =
+  | "yes"
+  | "no"
+  | "a"
+  | "b"
+  | "replied"
+  | "timeout"
+  | "completed"
+  | "invalid";
 
 export interface FlowGraphEdge {
   from: string;
@@ -154,6 +183,8 @@ const NODE_TYPES = new Set([
   "ab_split",
   "send_payment_link",
   "wait_reply",
+  // Fase 13E
+  "questionnaire",
 ]);
 
 const FLOW_BRANCHES: readonly FlowBranch[] = [
@@ -163,6 +194,8 @@ const FLOW_BRANCHES: readonly FlowBranch[] = [
   "b",
   "replied",
   "timeout",
+  "completed",
+  "invalid",
 ];
 
 function isValidFlowPosition(
@@ -254,6 +287,32 @@ function nextNodeId(
   return picked ? picked.to : null;
 }
 
+/** Satu jawaban tercatat di transkrip kuesioner (Fase 13E). */
+export interface QuestionnaireAnswerRecord {
+  questionId: string;
+  prompt: string;
+  target: string;
+  answerType: string;
+  outcome: "answered" | "skipped" | "failed" | "target_missing";
+  /** Balasan mentah terakhir untuk pertanyaan ini (null bila tak pernah dijawab). */
+  raw: string | null;
+  /** Nilai yang benar-benar ditulis ke field target (null bila tidak ada). */
+  stored: unknown;
+  /** Percobaan tidak sah yang terpakai untuk pertanyaan ini. */
+  attempts: number;
+}
+
+/** Keadaan node questionnaire yang parkir, di `flow_runs.context`. */
+export interface QuestionnaireRunState {
+  nodeId: string;
+  /** Indeks pertanyaan yang sedang menunggu jawaban. */
+  qIndex: number;
+  /** Percobaan tidak sah pada pertanyaan berjalan. */
+  attempts: number;
+  answers: QuestionnaireAnswerRecord[];
+  startedAt: string;
+}
+
 /** Bentuk `flow_runs.context` yang dibaca eksekutor (defensif). */
 export interface FlowRunContextData {
   triggerText?: string;
@@ -263,6 +322,8 @@ export interface FlowRunContextData {
   rootTriggerMessageId?: string;
   /** Parkir wait_reply: node yang menunggu + tenggatnya. */
   wait?: { nodeId: string; deadline: string; parkedAt: string };
+  /** Keadaan questionnaire (Fase 13E) selama node-nya parkir. */
+  questionnaire?: QuestionnaireRunState;
   [key: string]: unknown;
 }
 
@@ -289,6 +350,29 @@ function runContextOf(run: FlowRun): FlowRunContextData {
       nodeId: w.nodeId,
       deadline: w.deadline,
       parkedAt: typeof w.parkedAt === "string" ? w.parkedAt : w.deadline,
+    };
+  }
+  const q = raw.questionnaire as Partial<QuestionnaireRunState> | undefined;
+  if (
+    typeof q !== "object" ||
+    q === null ||
+    typeof q.nodeId !== "string" ||
+    typeof q.qIndex !== "number" ||
+    !Number.isInteger(q.qIndex) ||
+    q.qIndex < 0 ||
+    !Array.isArray(q.answers)
+  ) {
+    delete out.questionnaire;
+  } else {
+    out.questionnaire = {
+      nodeId: q.nodeId,
+      qIndex: q.qIndex,
+      attempts:
+        typeof q.attempts === "number" && Number.isInteger(q.attempts)
+          ? Math.max(0, q.attempts)
+          : 0,
+      answers: q.answers as QuestionnaireAnswerRecord[],
+      startedAt: typeof q.startedAt === "string" ? q.startedAt : "",
     };
   }
   return out;
@@ -345,6 +429,236 @@ const UUID_LIKE_RE =
 /** Id rujukan yang bukan UUID pasti tidak ditemukan (menghindari error PG). */
 function isUuidLike(v: string): boolean {
   return UUID_LIKE_RE.test(v);
+}
+
+// ---------------------------------------------------------------------------
+// Questionnaire (Fase 13E) — bentuk config + validasi jawaban
+// ---------------------------------------------------------------------------
+
+export type QuestionnaireAnswerType =
+  | "text"
+  | "number"
+  | "email"
+  | "phone"
+  | "choice";
+
+export interface QuestionnaireQuestion {
+  id: string;
+  prompt: string;
+  answerType: QuestionnaireAnswerType;
+  target: string;
+  required: boolean;
+  options: string[];
+}
+
+export interface QuestionnaireConfig {
+  questions: QuestionnaireQuestion[];
+  timeoutMs: number;
+  maxInvalidAttempts: number;
+  invalidPrompt: string | null;
+  completionTag: string | null;
+}
+
+const QUESTIONNAIRE_ANSWER_TYPES: readonly string[] = [
+  "text",
+  "number",
+  "email",
+  "phone",
+  "choice",
+];
+
+/** Target sah: kolom standar atau `custom:<key>` non-kosong ≤ 128 char total. */
+export function isQuestionnaireTarget(value: unknown): value is string {
+  if (value === "name" || value === "email" || value === "phone") return true;
+  return (
+    typeof value === "string" &&
+    value.startsWith("custom:") &&
+    value.slice("custom:".length).trim().length > 0 &&
+    value.length <= 128
+  );
+}
+
+function questionnaireTargetKey(target: string): string | null {
+  return target.startsWith("custom:")
+    ? target.slice("custom:".length)
+    : null;
+}
+
+/**
+ * Membaca config node questionnaire menjadi bentuk kerja (DEFENSIF —
+ * graf aktif lama/rusak tidak boleh meledakkan eksekutor; keabsahan
+ * ditegakkan validasi aktivasi). Pertanyaan yang bentuknya rusak
+ * dibuang; daftar kosong ditangani pemanggil sebagai kegagalan node.
+ */
+export function questionnaireConfigOf(
+  node: FlowGraphNode,
+): QuestionnaireConfig {
+  const c = node.config;
+  const rawQuestions = Array.isArray(c.questions) ? c.questions : [];
+  const questions: QuestionnaireQuestion[] = [];
+  for (const raw of rawQuestions) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const q = raw as Record<string, unknown>;
+    if (
+      typeof q.id !== "string" ||
+      !q.id ||
+      typeof q.prompt !== "string" ||
+      !q.prompt.trim() ||
+      typeof q.answerType !== "string" ||
+      !QUESTIONNAIRE_ANSWER_TYPES.includes(q.answerType) ||
+      !isQuestionnaireTarget(q.target)
+    ) {
+      continue;
+    }
+    questions.push({
+      id: q.id,
+      prompt: q.prompt,
+      answerType: q.answerType as QuestionnaireAnswerType,
+      target: q.target,
+      required: q.required !== false,
+      options: Array.isArray(q.options)
+        ? q.options.filter(isNonEmptyString)
+        : [],
+    });
+  }
+  const amount = typeof c.amount === "number" ? c.amount : NaN;
+  const unitMs =
+    c.unit === "seconds"
+      ? 1_000
+      : c.unit === "minutes"
+        ? 60_000
+        : c.unit === "hours"
+          ? 3_600_000
+          : NaN;
+  const timeoutMs =
+    Number.isFinite(amount) && Number.isFinite(unitMs)
+      ? Math.max(0, Math.floor(amount * unitMs))
+      : 3_600_000;
+  const attempts = c.maxInvalidAttempts;
+  return {
+    questions,
+    timeoutMs,
+    maxInvalidAttempts:
+      typeof attempts === "number" &&
+      Number.isInteger(attempts) &&
+      attempts >= 1 &&
+      attempts <= 5
+        ? attempts
+        : 2,
+    invalidPrompt: isNonEmptyString(c.invalidPrompt) ? c.invalidPrompt : null,
+    completionTag: isNonEmptyString(c.completionTag)
+      ? c.completionTag.trim()
+      : null,
+  };
+}
+
+export type QuestionnaireAnswerValidation =
+  | { ok: true; value: string | number }
+  | { ok: false; reason: "empty" | "not_a_number" | "not_an_email" | "not_a_phone" | "not_a_choice" };
+
+const QUESTIONNAIRE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/**
+ * Validasi SATU balasan terhadap tipe pertanyaannya. Nilai hasil
+ * adalah nilai yang ditulis ke field target: text/email/phone/choice
+ * string (email dilowercase, phone digit ternormalisasi dedup,
+ * choice = teks opsi kanonis), number angka (target standar menerima
+ * bentuk stringnya di penulis field). Koma desimal Indonesia
+ * ("12,5") diterima untuk number bila tidak ada titik.
+ */
+export function validateQuestionnaireAnswer(
+  question: QuestionnaireQuestion,
+  rawText: string,
+): QuestionnaireAnswerValidation {
+  const text = rawText.trim();
+  switch (question.answerType) {
+    case "text":
+      return text
+        ? { ok: true, value: text }
+        : { ok: false, reason: "empty" };
+    case "email": {
+      const email = text.toLowerCase();
+      return QUESTIONNAIRE_EMAIL_RE.test(email)
+        ? { ok: true, value: email }
+        : { ok: false, reason: "not_an_email" };
+    }
+    case "phone": {
+      const normalized = normalizeContactPhone(text);
+      return normalized
+        ? { ok: true, value: normalized }
+        : { ok: false, reason: "not_a_phone" };
+    }
+    case "number": {
+      if (!text) return { ok: false, reason: "empty" };
+      const candidate =
+        text.includes(",") && !text.includes(".")
+          ? text.replace(",", ".")
+          : text;
+      const value = Number(candidate);
+      return Number.isFinite(value)
+        ? { ok: true, value }
+        : { ok: false, reason: "not_a_number" };
+    }
+    case "choice": {
+      if (/^\d+$/.test(text)) {
+        const idx = Number.parseInt(text, 10);
+        if (idx >= 1 && idx <= question.options.length) {
+          return { ok: true, value: question.options[idx - 1] };
+        }
+      }
+      const match = question.options.find(
+        (o) => o.trim().toLowerCase() === text.toLowerCase(),
+      );
+      return match
+        ? { ok: true, value: match }
+        : { ok: false, reason: "not_a_choice" };
+    }
+  }
+}
+
+/**
+ * Render teks pertanyaan yang dikirim ke kontak: prompt dirender
+ * seperti send_message ({name} + spintax); choice menambahkan daftar
+ * opsi BERNOMOR — render seragam di semua channel karena lapisan
+ * keluar flow tidak punya tombol quick-reply (lihat kontrak).
+ */
+export function renderQuestionnairePrompt(
+  question: QuestionnaireQuestion,
+  contact: Contact | null,
+): string {
+  const base = renderMessageText(question.prompt, {
+    name: contact?.name,
+  });
+  if (question.answerType !== "choice" || question.options.length === 0) {
+    return base;
+  }
+  const list = question.options
+    .map((option, i) => `${i + 1}. ${option}`)
+    .join("\n");
+  return `${base}\n${list}`;
+}
+
+/**
+ * Himpunan kunci custom_fields yang DIKENAL tenant = union kunci pada
+ * custom_fields seluruh kontak tenant. Produk tidak memiliki registri
+ * definisi field terpisah (set_field/segment/API v1 semuanya memakai
+ * kunci bebas), jadi himpunan inilah "definisi" yang dirujuk kontrak
+ * questionnaire. Dipakai validasi aktivasi + pemeriksaan runtime.
+ */
+export async function tenantCustomFieldKeys(
+  tx: DbTx,
+  tenantId: string,
+): Promise<Set<string>> {
+  const rows = await tx.execute(sql`
+    select distinct jsonb_object_keys(${contacts.customFields}) as key
+    from ${contacts}
+    where ${contacts.tenantId} = ${tenantId}
+  `);
+  const keys = new Set<string>();
+  for (const row of rows as unknown as Array<{ key?: unknown }>) {
+    if (typeof row.key === "string" && row.key) keys.add(row.key);
+  }
+  return keys;
 }
 
 /**
@@ -598,6 +912,132 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
       }
       break;
     }
+    case "questionnaire": {
+      const rawQuestions = c.questions;
+      if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+        err(
+          "QUESTIONNAIRE_QUESTIONS_REQUIRED",
+          "Node questionnaire membutuhkan minimal satu pertanyaan",
+        );
+      } else if (rawQuestions.length > 20) {
+        err(
+          "QUESTIONNAIRE_QUESTIONS_REQUIRED",
+          "Node questionnaire maksimal 20 pertanyaan",
+        );
+      } else {
+        const seenIds = new Set<string>();
+        rawQuestions.forEach((raw, idx) => {
+          const q = (
+            typeof raw === "object" && raw !== null ? raw : {}
+          ) as Record<string, unknown>;
+          const label = `pertanyaan #${idx + 1}`;
+          if (!isNonEmptyString(q.id) || q.id.length > 64) {
+            err(
+              "QUESTIONNAIRE_QUESTION_ID_INVALID",
+              `Node questionnaire: ${label} membutuhkan id non-kosong ≤ 64 karakter`,
+            );
+          } else if (seenIds.has(q.id)) {
+            err(
+              "QUESTIONNAIRE_QUESTION_ID_INVALID",
+              `Node questionnaire: id pertanyaan ganda: ${q.id}`,
+            );
+          } else {
+            seenIds.add(q.id);
+          }
+          if (!isNonEmptyString(q.prompt) || q.prompt.length > 1000) {
+            err(
+              "QUESTIONNAIRE_PROMPT_REQUIRED",
+              `Node questionnaire: ${label} membutuhkan prompt non-kosong ≤ 1000 karakter`,
+            );
+          }
+          if (
+            typeof q.answerType !== "string" ||
+            !QUESTIONNAIRE_ANSWER_TYPES.includes(q.answerType)
+          ) {
+            err(
+              "QUESTIONNAIRE_ANSWER_TYPE_INVALID",
+              `Node questionnaire: ${label} membutuhkan answerType text|number|email|phone|choice`,
+            );
+          }
+          if (!isQuestionnaireTarget(q.target)) {
+            err(
+              "QUESTIONNAIRE_TARGET_INVALID",
+              `Node questionnaire: ${label} membutuhkan target 'name'|'email'|'phone'|'custom:<key>'`,
+            );
+          }
+          if (q.required !== undefined && typeof q.required !== "boolean") {
+            err(
+              "QUESTIONNAIRE_REQUIRED_INVALID",
+              `Node questionnaire: ${label} membutuhkan required boolean bila diisi`,
+            );
+          }
+          if (q.answerType === "choice") {
+            const options = q.options;
+            if (
+              !Array.isArray(options) ||
+              options.length < 2 ||
+              options.length > 10 ||
+              !options.every(
+                (o) => isNonEmptyString(o) && o.length <= 200,
+              )
+            ) {
+              err(
+                "QUESTIONNAIRE_OPTIONS_REQUIRED",
+                `Node questionnaire: ${label} choice membutuhkan 2..10 opsi non-kosong`,
+              );
+            }
+          }
+        });
+      }
+      const amount = c.amount;
+      if (
+        typeof amount !== "number" ||
+        !Number.isInteger(amount) ||
+        amount < 0
+      ) {
+        err(
+          "QUESTIONNAIRE_AMOUNT_INVALID",
+          "Node questionnaire membutuhkan config.amount (tenggat per pertanyaan) bilangan bulat ≥ 0",
+        );
+      }
+      if (c.unit !== "seconds" && c.unit !== "minutes" && c.unit !== "hours") {
+        err(
+          "QUESTIONNAIRE_UNIT_INVALID",
+          "Node questionnaire membutuhkan unit 'seconds'|'minutes'|'hours'",
+        );
+      }
+      const attempts = c.maxInvalidAttempts;
+      if (
+        typeof attempts !== "number" ||
+        !Number.isInteger(attempts) ||
+        attempts < 1 ||
+        attempts > 5
+      ) {
+        err(
+          "QUESTIONNAIRE_ATTEMPTS_INVALID",
+          "Node questionnaire membutuhkan config.maxInvalidAttempts bilangan bulat 1..5",
+        );
+      }
+      if (
+        c.invalidPrompt !== undefined &&
+        (!isNonEmptyString(c.invalidPrompt) || c.invalidPrompt.length > 1000)
+      ) {
+        err(
+          "QUESTIONNAIRE_INVALID_PROMPT_INVALID",
+          "Node questionnaire membutuhkan invalidPrompt string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      if (
+        c.completionTag !== undefined &&
+        (!isNonEmptyString(c.completionTag) || c.completionTag.length > 64)
+      ) {
+        err(
+          "QUESTIONNAIRE_TAG_INVALID",
+          "Node questionnaire membutuhkan completionTag string non-kosong ≤ 64 karakter bila diisi",
+        );
+      }
+      break;
+    }
     case "ai_response":
     case "handoff":
     case "end":
@@ -690,6 +1130,13 @@ export async function validateFlowGraph(
         { branch: "timeout", code: "WAIT_BRANCH_TIMEOUT_MISSING", label: "Node wait_reply membutuhkan edge branch 'timeout'" },
       ],
     },
+    questionnaire: {
+      required: [
+        { branch: "completed", code: "QUESTIONNAIRE_BRANCH_COMPLETED_MISSING", label: "Node questionnaire membutuhkan edge branch 'completed'" },
+        { branch: "invalid", code: "QUESTIONNAIRE_BRANCH_INVALID_MISSING", label: "Node questionnaire membutuhkan edge branch 'invalid'" },
+        { branch: "timeout", code: "QUESTIONNAIRE_BRANCH_TIMEOUT_MISSING", label: "Node questionnaire membutuhkan edge branch 'timeout'" },
+      ],
+    },
   };
   for (const node of graph.nodes) {
     issues.push(...validateFlowNodeConfig(node));
@@ -714,7 +1161,7 @@ export async function validateFlowGraph(
     } else {
       for (const e of out) {
         if (e.branch !== undefined) {
-          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, atau wait_reply");
+          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, wait_reply, atau questionnaire");
         }
       }
     }
@@ -825,6 +1272,33 @@ export async function validateFlowGraph(
           err("PAYMENT_PRODUCT_NOT_FOUND", node.id, "Produk rujukan tidak ada di workspace ini");
         } else if (!target.isActive) {
           err("PAYMENT_PRODUCT_INACTIVE", node.id, "Produk rujukan tidak aktif (diarsipkan)");
+        }
+      }
+    });
+  }
+
+  // Fase 13E: target custom questionnaire harus kunci yang DIKENAL
+  // tenant (dibawa ≥ 1 kontak) — "definisi" field custom produk ini
+  // adalah himpunan kunci pada kontak (lihat tenantCustomFieldKeys).
+  // Target yang tidak dikenal hampir pasti salah ketik yang akan
+  // menulis kunci sampah selamanya, jadi ditolak saat aktivasi.
+  const questionnaireNodes = graph.nodes.filter(
+    (n) => n.type === "questionnaire",
+  );
+  if (questionnaireNodes.length > 0) {
+    await withTenantDb(db, tenantId, async (tx) => {
+      const knownKeys = await tenantCustomFieldKeys(tx, tenantId);
+      for (const node of questionnaireNodes) {
+        const config = questionnaireConfigOf(node);
+        for (const question of config.questions) {
+          const key = questionnaireTargetKey(question.target);
+          if (key !== null && !knownKeys.has(key)) {
+            err(
+              "QUESTIONNAIRE_TARGET_UNKNOWN",
+              node.id,
+              `Target custom '${key}' untuk pertanyaan '${question.id}' belum dikenal workspace ini (belum ada kontak yang membawa field itu)`,
+            );
+          }
         }
       }
     });
@@ -1538,6 +2012,8 @@ export interface FlowEvaluationOutcome {
   cancelledRunIds: string[];
   /** Run wait_reply parkir yang dilanjutkan pesan ini (branch replied). */
   resumedRunIds: string[];
+  /** Run questionnaire parkir yang memproses pesan ini sebagai jawaban (Fase 13E). */
+  questionnaireResumedRunIds: string[];
 }
 
 /**
@@ -1601,17 +2077,537 @@ async function resolveParkedWaitReply(
 }
 
 /**
- * Melanjutkan SEMUA run wait_reply yang parkir di percakapan ini
- * dengan pesan masuk yang baru tiba (branch "replied"), lalu
- * mengantrekan langkah lanjutan tiap run lewat outbox. Run waiting
- * biasa (delay) tidak disentuh — penanda parkirnya adalah
- * context.wait yang nodeId-nya sama dengan currentNodeId.
+ * Mengantrekan SATU pesan keluar flow pada percakapan run (pola
+ * send_message: baris messages `queued` + sentuhan percakapan +
+ * event outbox message.queued via "flow"). Dipakai node questionnaire
+ * untuk pertanyaan, prompt ulang, dan konfirmasi.
  */
-async function resumeParkedWaitReplyRuns(
+async function queueFlowOutboundText(
   tx: DbTx,
   tenantId: string,
-  input: { conversationId: string; messageId: string },
-): Promise<string[]> {
+  run: FlowRun,
+  conversation: Conversation,
+  text: string,
+): Promise<string> {
+  const [outbound] = await tx
+    .insert(messages)
+    .values({
+      tenantId,
+      conversationId: run.conversationId,
+      direction: "outbound",
+      senderType: "system",
+      type: "text",
+      contentText: text,
+      status: "queued",
+    })
+    .returning();
+  const now = new Date();
+  await tx
+    .update(conversations)
+    .set({ lastMessageAt: now, updatedAt: now })
+    .where(eq(conversations.id, run.conversationId));
+  await tx.insert(outboxEvents).values({
+    tenantId,
+    type: "message.queued",
+    payload: {
+      provider: conversation.provider,
+      conversationId: run.conversationId,
+      messageId: outbound.id,
+      via: "flow",
+      flowId: run.flowId,
+      runId: run.id,
+    },
+  });
+  return outbound.id;
+}
+
+/**
+ * Menulis jawaban sah ke field target kontak (pola set_field: kolom
+ * standar atau custom_fields yang digabung). Mengembalikan nilai yang
+ * BENAR-BENAR tersimpan (target standar menerima bentuk string dari
+ * nilai number; target custom menyimpan nilai apa adanya).
+ */
+async function writeQuestionnaireAnswer(
+  tx: DbTx,
+  contact: Contact,
+  question: QuestionnaireQuestion,
+  value: string | number,
+): Promise<unknown> {
+  const patch: Partial<Contact> = { updatedAt: new Date() };
+  let stored: unknown = value;
+  if (question.target === "name") {
+    stored = String(value);
+    patch.name = String(value);
+  } else if (question.target === "phone") {
+    stored = String(value);
+    patch.phone = String(value);
+  } else if (question.target === "email") {
+    stored = String(value);
+    patch.email = String(value);
+  } else {
+    const key = questionnaireTargetKey(question.target)!;
+    patch.customFields = {
+      ...(contact.customFields as Record<string, unknown>),
+      [key]: value,
+    };
+  }
+  await tx
+    .update(contacts)
+    .set(patch)
+    .where(eq(contacts.id, contact.id));
+  return stored;
+}
+
+/**
+ * Gerbang "pertanyaan hendak dikirim": mulai dari state.qIndex,
+ * lewati pertanyaan yang target custom-nya TIDAK lagi dikenal tenant
+ * (kunci hilang dari semua kontak sesudah aktivasi) — tercatat di
+ * transkrip sebagai `target_missing`. Pertanyaan WAJIB yang targetnya
+ * hilang menghentikan kuesioner (pemanggil keluar branch "invalid");
+ * pertanyaan opsional dilewati. Mengembalikan posisi pertanyaan yang
+ * siap dikirim, atau penanda selesai/berhenti.
+ */
+function skipMissingQuestionnaireTargets(
+  state: QuestionnaireRunState,
+  config: QuestionnaireConfig,
+  knownKeys: Set<string>,
+):
+  | { kind: "ask"; index: number }
+  | { kind: "finished" }
+  | { kind: "missing_required"; question: QuestionnaireQuestion } {
+  while (state.qIndex < config.questions.length) {
+    const question = config.questions[state.qIndex];
+    const key = questionnaireTargetKey(question.target);
+    if (key === null || knownKeys.has(key)) {
+      return { kind: "ask", index: state.qIndex };
+    }
+    state.answers.push({
+      questionId: question.id,
+      prompt: question.prompt,
+      target: question.target,
+      answerType: question.answerType,
+      outcome: "target_missing",
+      raw: null,
+      stored: null,
+      attempts: state.attempts,
+    });
+    if (question.required) {
+      return { kind: "missing_required", question };
+    }
+    state.qIndex += 1;
+    state.attempts = 0;
+  }
+  return { kind: "finished" };
+}
+
+/**
+ * Keluar dari node questionnaire lewat satu branch (completed /
+ * invalid / timeout): menulis baris langkah penutup dengan detail
+ * yang diberikan pemanggil, membersihkan context.wait +
+ * context.questionnaire, menerapkan completionTag pada branch
+ * completed bila dikonfigurasi, dan memajukan run (atau
+ * menyelesaikannya) — pasangan `resolveParkedWaitReply` untuk node
+ * ini. `run` harus keadaan segar dalam transaksi ini.
+ */
+async function exitParkedQuestionnaire(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: {
+    branch: "completed" | "invalid" | "timeout";
+    detail: Record<string, unknown>;
+    config: QuestionnaireConfig;
+  },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number }> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "questionnaire",
+    detail: { ...input.detail, branch: input.branch },
+  });
+  if (input.branch === "completed" && input.config.completionTag) {
+    const [contact] = await tx
+      .select()
+      .from(contacts)
+      .where(
+        and(eq(contacts.tenantId, tenantId), eq(contacts.id, run.contactId)),
+      )
+      .limit(1);
+    if (contact && !contact.tags.includes(input.config.completionTag)) {
+      await tx
+        .update(contacts)
+        .set({
+          tags: [...contact.tags, input.config.completionTag],
+          updatedAt: now,
+        })
+        .where(eq(contacts.id, contact.id));
+    }
+  }
+  const nextId = nextNodeId(graph, node.id, input.branch);
+  const context = { ...runContextOf(run) };
+  delete context.wait;
+  delete context.questionnaire;
+  const patch: Partial<FlowRun> = {
+    stepCount: run.stepCount + 1,
+    nextStepSeq: seq + 1,
+    context,
+    updatedAt: now,
+  };
+  if (nextId === null) {
+    patch.status = "completed";
+    patch.currentNodeId = null;
+    patch.completedAt = now;
+    await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+    await flowAudit(tx, tenantId, {
+      actorType: "system",
+      actorId: `flow:${run.flowId}`,
+      action: "flow.run_completed",
+      flowId: run.flowId,
+      meta: {
+        flowRunId: run.id,
+        conversationId: run.conversationId,
+        stepCount: run.stepCount + 1,
+        reason: `questionnaire_${input.branch}`,
+      },
+    });
+    return { status: "completed", nextStepSeq: seq + 1 };
+  }
+  patch.status = "running";
+  patch.currentNodeId = nextId;
+  await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+  return { status: "running", nextStepSeq: seq + 1 };
+}
+
+/**
+ * Parkir (ulang) run pada node questionnaire sesudah satu langkah
+ * balasan diproses: menulis baris langkah, menyimpan keadaan
+ * kuesioner + penanda parkir wait dengan tenggat BARU (semantik
+ * per-parkir wait_reply diterapkan per pertanyaan), dan menulis
+ * event tenggat flow.step_due.
+ */
+async function parkQuestionnaire(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  node: FlowGraphNode,
+  state: QuestionnaireRunState,
+  timeoutMs: number,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "questionnaire",
+    detail,
+  });
+  const resumeAt = new Date(now.getTime() + timeoutMs);
+  const context: FlowRunContextData = {
+    ...runContextOf(run),
+    questionnaire: state,
+    wait: {
+      nodeId: node.id,
+      deadline: resumeAt.toISOString(),
+      parkedAt: now.toISOString(),
+    },
+  };
+  await tx
+    .update(flowRuns)
+    .set({
+      stepCount: run.stepCount + 1,
+      nextStepSeq: seq + 1,
+      status: "waiting",
+      currentNodeId: node.id,
+      context,
+      updatedAt: now,
+    })
+    .where(eq(flowRuns.id, run.id));
+  await tx.insert(outboxEvents).values({
+    tenantId,
+    type: "flow.step_due",
+    payload: {
+      runId: run.id,
+      stepSeq: seq + 1,
+      resumeAt: resumeAt.toISOString(),
+    },
+  });
+}
+
+/**
+ * Sesudah satu pertanyaan terjawab (sah) atau habis percobaannya
+ * (opsional): majukan kuesioner — gerbang target-hilang, lalu kirim
+ * pertanyaan berikutnya dan parkir lagi, atau keluar lewat branch
+ * yang sesuai. `stepBase` membawa detail peristiwa pemicu (jawaban
+ * tercatat / percobaan habis) ke baris langkah yang ditulis di sini.
+ */
+async function advanceQuestionnaireAfterAnswer(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  config: QuestionnaireConfig,
+  state: QuestionnaireRunState,
+  contact: Contact,
+  conversation: Conversation,
+  stepBase: Record<string, unknown>,
+  exhausted: boolean,
+): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> {
+  const hasCustomTargets = config.questions.some(
+    (q) => questionnaireTargetKey(q.target) !== null,
+  );
+  const knownKeys = hasCustomTargets
+    ? await tenantCustomFieldKeys(tx, tenantId)
+    : new Set<string>();
+  const gate = skipMissingQuestionnaireTargets(state, config, knownKeys);
+  if (gate.kind === "missing_required") {
+    return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      config,
+      detail: {
+        ...stepBase,
+        outcome: "target_missing",
+        questionId: gate.question.id,
+        target: gate.question.target,
+        answers: state.answers,
+      },
+    });
+  }
+  if (gate.kind === "finished") {
+    return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+      branch: "completed",
+      config,
+      detail: {
+        ...stepBase,
+        outcome: exhausted ? "attempts_exhausted" : "completed",
+        answers: state.answers,
+      },
+    });
+  }
+  const nextQuestion = config.questions[gate.index];
+  const outboundId = await queueFlowOutboundText(
+    tx,
+    tenantId,
+    run,
+    conversation,
+    renderQuestionnairePrompt(nextQuestion, contact),
+  );
+  await parkQuestionnaire(tx, tenantId, run, node, state, config.timeoutMs, {
+    ...stepBase,
+    nextQuestionIndex: gate.index,
+    nextQuestionId: nextQuestion.id,
+    outboundMessageId: outboundId,
+  });
+  return null;
+}
+
+/**
+ * Memproses SATU pesan masuk sebagai balasan bagi run questionnaire
+ * yang parkir: validasi jawaban → tulis field / prompt ulang / lewati
+ * / keluar branch. Seluruhnya dalam transaksi pemanggil (jalur
+ * evaluasi pesan masuk, pasangan resumeParkedFlowRuns). Mengembalikan
+ * hasil keluar-parkir bila run meninggalkan node-nya (pemanggil
+ * mengantrekan langkah lanjutannya), null bila run parkir lagi.
+ */
+async function processParkedQuestionnaireReply(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: { messageId: string; messageText: string },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> {
+  const config = questionnaireConfigOf(node);
+  const ctxData = runContextOf(run);
+  const state = ctxData.questionnaire;
+  if (!state || state.nodeId !== node.id) {
+    // Keadaan parkir rusak/hilang — degrade jujur: keluar lewat
+    // branch invalid dengan langkah yang mencatat alasannya, bukan
+    // menggantungkan run selamanya.
+    return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      config,
+      detail: { outcome: "state_missing", answers: [] },
+    });
+  }
+  const [contact] = await tx
+    .select()
+    .from(contacts)
+    .where(
+      and(eq(contacts.tenantId, tenantId), eq(contacts.id, run.contactId)),
+    )
+    .limit(1);
+  const [conversation] = await tx
+    .select()
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, tenantId),
+        eq(conversations.id, run.conversationId),
+      ),
+    )
+    .limit(1);
+  if (!contact || !conversation) {
+    return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      config,
+      detail: { outcome: "state_missing", answers: state.answers },
+    });
+  }
+  const question = config.questions[state.qIndex];
+  if (!question) {
+    return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+      branch: "completed",
+      config,
+      detail: { outcome: "completed", answers: state.answers },
+    });
+  }
+  const validation = validateQuestionnaireAnswer(question, input.messageText);
+  if (!validation.ok) {
+    const attempts = state.attempts + 1;
+    if (attempts >= config.maxInvalidAttempts) {
+      state.answers.push({
+        questionId: question.id,
+        prompt: question.prompt,
+        target: question.target,
+        answerType: question.answerType,
+        outcome: question.required ? "failed" : "skipped",
+        raw: input.messageText.slice(0, 500),
+        stored: null,
+        attempts,
+      });
+      const answeredIndex = state.qIndex;
+      state.qIndex += 1;
+      state.attempts = 0;
+      if (question.required) {
+        return exitParkedQuestionnaire(tx, tenantId, run, graph, node, {
+          branch: "invalid",
+          config,
+          detail: {
+            outcome: "attempts_exhausted",
+            questionIndex: answeredIndex,
+            questionId: question.id,
+            reason: validation.reason,
+            attempts,
+            messageId: input.messageId,
+            answers: state.answers,
+          },
+        });
+      }
+      return advanceQuestionnaireAfterAnswer(
+        tx,
+        tenantId,
+        run,
+        graph,
+        node,
+        config,
+        state,
+        contact,
+        conversation,
+        {
+          outcome: "attempts_exhausted",
+          questionIndex: answeredIndex,
+          questionId: question.id,
+          reason: validation.reason,
+          attempts,
+          messageId: input.messageId,
+        },
+        true,
+      );
+    }
+    // Prompt ulang: teks tidak-valid (config atau bawaan dwibahasa
+    // kontrak) + pertanyaan yang sama dirender ulang, lalu parkir
+    // lagi dengan tenggat baru.
+    state.attempts = attempts;
+    const invalidText = renderMessageText(
+      config.invalidPrompt ?? QUESTIONNAIRE_DEFAULT_INVALID_PROMPT,
+      { name: contact.name },
+    );
+    const outboundId = await queueFlowOutboundText(
+      tx,
+      tenantId,
+      run,
+      conversation,
+      `${invalidText}\n${renderQuestionnairePrompt(question, contact)}`,
+    );
+    await parkQuestionnaire(tx, tenantId, run, node, state, config.timeoutMs, {
+      outcome: "answer_invalid",
+      questionIndex: state.qIndex,
+      questionId: question.id,
+      raw: input.messageText.slice(0, 200),
+      reason: validation.reason,
+      attempts,
+      messageId: input.messageId,
+      outboundMessageId: outboundId,
+    });
+    return null;
+  }
+  // Jawaban sah: tulis SEKARANG (progres parsial selamat), catat,
+  // lalu majukan ke pertanyaan berikutnya / selesai.
+  const stored = await writeQuestionnaireAnswer(
+    tx,
+    contact,
+    question,
+    validation.value,
+  );
+  state.answers.push({
+    questionId: question.id,
+    prompt: question.prompt,
+    target: question.target,
+    answerType: question.answerType,
+    outcome: "answered",
+    raw: input.messageText.slice(0, 500),
+    stored,
+    attempts: state.attempts,
+  });
+  const answeredIndex = state.qIndex;
+  state.qIndex += 1;
+  state.attempts = 0;
+  return advanceQuestionnaireAfterAnswer(
+    tx,
+    tenantId,
+    run,
+    graph,
+    node,
+    config,
+    state,
+    contact,
+    conversation,
+    {
+      outcome: "answer_recorded",
+      questionIndex: answeredIndex,
+      questionId: question.id,
+      storedValue: stored,
+      messageId: input.messageId,
+    },
+    false,
+  );
+}
+/**
+ * Melanjutkan SEMUA run parkir (wait_reply & questionnaire) di
+ * percakapan ini dengan pesan masuk yang baru tiba, lalu
+ * mengantrekan langkah lanjutan tiap run yang keluar dari parkirnya
+ * lewat outbox. Run waiting biasa (delay) tidak disentuh —
+ * penandanya adalah context.wait yang nodeId-nya sama dengan
+ * currentNodeId. wait_reply selesai lewat branch "replied";
+ * questionnaire MEMPROSES pesan sebagai jawaban (validasi + tulis
+ * field + pertanyaan berikutnya) dan hanya keluar parkir saat
+ * kuesionernya selesai/gagal — lihat processParkedQuestionnaireReply.
+ */
+async function resumeParkedFlowRuns(
+  tx: DbTx,
+  tenantId: string,
+  input: { conversationId: string; messageId: string; messageText: string },
+): Promise<{ waitReplyRunIds: string[]; questionnaireRunIds: string[] }> {
   const waiting = await tx
     .select()
     .from(flowRuns)
@@ -1622,7 +2618,8 @@ async function resumeParkedWaitReplyRuns(
         eq(flowRuns.status, "waiting"),
       ),
     );
-  const resumed: string[] = [];
+  const waitReplyRunIds: string[] = [];
+  const questionnaireRunIds: string[] = [];
   for (const run of waiting) {
     const ctx = runContextOf(run);
     if (!ctx.wait || run.currentNodeId !== ctx.wait.nodeId) continue;
@@ -1634,7 +2631,37 @@ async function resumeParkedWaitReplyRuns(
     if (!flow) continue;
     const graph = normalizeFlowGraph(flow.graph);
     const node = graph.nodes.find((n) => n.id === ctx.wait!.nodeId);
-    if (!node || node.type !== "wait_reply") continue;
+    if (!node) continue;
+    if (node.type === "questionnaire") {
+      if (!ctx.questionnaire || ctx.questionnaire.nodeId !== node.id) {
+        continue;
+      }
+      const exited = await processParkedQuestionnaireReply(
+        tx,
+        tenantId,
+        run,
+        graph,
+        node,
+        {
+          messageId: input.messageId,
+          messageText: input.messageText,
+        },
+      );
+      if (exited && exited.status === "running") {
+        await tx.insert(outboxEvents).values({
+          tenantId,
+          type: "flow.step_due",
+          payload: {
+            runId: run.id,
+            stepSeq: exited.nextStepSeq,
+            resumeAt: new Date().toISOString(),
+          },
+        });
+      }
+      questionnaireRunIds.push(run.id);
+      continue;
+    }
+    if (node.type !== "wait_reply") continue;
     const result = await resolveParkedWaitReply(tx, tenantId, run, graph, node, {
       branch: "replied",
       extraDetail: { messageId: input.messageId, deadline: ctx.wait.deadline },
@@ -1650,9 +2677,9 @@ async function resumeParkedWaitReplyRuns(
         },
       });
     }
-    resumed.push(run.id);
+    waitReplyRunIds.push(run.id);
   }
-  return resumed;
+  return { waitReplyRunIds, questionnaireRunIds };
 }
 
 /**
@@ -1730,6 +2757,7 @@ export async function startFlowRunsForInboundMessage(
     duplicateStarts: 0,
     cancelledRunIds: [],
     resumedRunIds: [],
+    questionnaireResumedRunIds: [],
   };
   if (!input.contact) return outcome;
 
@@ -1747,12 +2775,17 @@ export async function startFlowRunsForInboundMessage(
   // SEBELUM pemicu flow biasa dievaluasi. Pesan yang sama tetap
   // diproses pemicu lain seperti biasa (keputusan desain terdokumentasi
   // di kontrak): melanjutkan wait_reply tidak menekan trigger lain.
-  outcome.resumedRunIds = await withTenantDb(db, tenantId, (tx) =>
-    resumeParkedWaitReplyRuns(tx, tenantId, {
+  // Fase 13E: run questionnaire yang parkir memproses pesan yang sama
+  // sebagai JAWABAN (bukan sekadar resume) lewat jalur yang sama.
+  const resumedParked = await withTenantDb(db, tenantId, (tx) =>
+    resumeParkedFlowRuns(tx, tenantId, {
       conversationId,
       messageId,
+      messageText: input.messageText,
     }),
   );
+  outcome.resumedRunIds = resumedParked.waitReplyRunIds;
+  outcome.questionnaireResumedRunIds = resumedParked.questionnaireRunIds;
 
   const activeFlows = await withTenantDb(db, tenantId, (tx) =>
     tx
@@ -1976,6 +3009,13 @@ async function advanceRun(
     parkWaitReplyMs?: number;
     /** Node end: selesaikan walau ada edge keluar. */
     forceComplete?: boolean;
+    /**
+     * Fase 13E: tambalan konteks run yang ditulis bersama langkah ini
+     * (keadaan questionnaire saat parkir) + kunci konteks yang
+     * dibersihkan (keadaan questionnaire saat keluar node).
+     */
+    contextPatch?: Record<string, unknown>;
+    contextClear?: string[];
   },
 ): Promise<{ status: FlowRunStatus }> {
   const now = new Date();
@@ -1989,10 +3029,23 @@ async function advanceRun(
     detail: input.detail,
   });
 
+  const patchedContext = (): FlowRunContextData => {
+    const context: FlowRunContextData = {
+      ...runContextOf(run),
+      ...(input.contextPatch ?? {}),
+    };
+    for (const key of input.contextClear ?? []) {
+      delete context[key];
+    }
+    return context;
+  };
+  const hasContextChange =
+    input.contextPatch !== undefined || input.contextClear !== undefined;
+
   if (input.parkWaitReplyMs !== undefined) {
     const resumeAt = new Date(now.getTime() + input.parkWaitReplyMs);
     const context: FlowRunContextData = {
-      ...runContextOf(run),
+      ...patchedContext(),
       wait: {
         nodeId: node.id,
         deadline: resumeAt.toISOString(),
@@ -2032,6 +3085,7 @@ async function advanceRun(
     stepCount: run.stepCount + 1,
     nextStepSeq: seq + 1,
     updatedAt: now,
+    ...(hasContextChange ? { context: patchedContext() } : {}),
   };
 
   if (input.waitMs !== undefined) {
@@ -2138,6 +3192,9 @@ interface NodeEffects {
   parkWaitReplyMs?: number;
   forceComplete?: boolean;
   outboundMessageId?: string;
+  /** Fase 13E: tambalan/pembersihan context run (keadaan questionnaire). */
+  contextPatch?: Record<string, unknown>;
+  contextClear?: string[];
 }
 
 /**
@@ -2655,6 +3712,82 @@ async function executeNodeInTx(
       };
     }
 
+    case "questionnaire": {
+      if (!ctx.contact) throw new FlowNodeError("kontak run tidak ditemukan");
+      if (!ctx.conversation) {
+        throw new FlowNodeError("percakapan run tidak ditemukan");
+      }
+      const config = questionnaireConfigOf(node);
+      if (config.questions.length === 0) {
+        throw new FlowNodeError("questionnaire tanpa pertanyaan yang sah");
+      }
+      const state: QuestionnaireRunState = {
+        nodeId: node.id,
+        qIndex: 0,
+        attempts: 0,
+        answers: [],
+        startedAt: new Date().toISOString(),
+      };
+      const hasCustomTargets = config.questions.some(
+        (q) => questionnaireTargetKey(q.target) !== null,
+      );
+      const knownKeys = hasCustomTargets
+        ? await tenantCustomFieldKeys(tx, tenantId)
+        : new Set<string>();
+      const gate = skipMissingQuestionnaireTargets(state, config, knownKeys);
+      if (gate.kind === "missing_required") {
+        // Target wajib sudah hilang sebelum pertanyaan pertama
+        // sempat dikirim → keluar invalid tanpa mengirim apa pun.
+        return {
+          detail: {
+            outcome: "target_missing",
+            questionId: gate.question.id,
+            target: gate.question.target,
+            answers: state.answers,
+          },
+          branch: "invalid" as const,
+        };
+      }
+      if (gate.kind === "finished") {
+        // Semua pertanyaan opsional yang targetnya hilang: kuesioner
+        // selesai tanpa satu pun pertanyaan terkirim.
+        if (config.completionTag && !ctx.contact.tags.includes(config.completionTag)) {
+          await tx
+            .update(contacts)
+            .set({
+              tags: [...ctx.contact.tags, config.completionTag],
+              updatedAt: new Date(),
+            })
+            .where(eq(contacts.id, ctx.contact.id));
+        }
+        return {
+          detail: { outcome: "completed", answers: state.answers },
+          branch: "completed" as const,
+        };
+      }
+      const question = config.questions[gate.index];
+      const outboundId = await queueFlowOutboundText(
+        tx,
+        tenantId,
+        run,
+        ctx.conversation,
+        renderQuestionnairePrompt(question, ctx.contact),
+      );
+      return {
+        detail: {
+          outcome: "question_asked",
+          questionIndex: gate.index,
+          questionId: question.id,
+          questionCount: config.questions.length,
+          ...(state.answers.length > 0 ? { answers: state.answers } : {}),
+          outboundMessageId: outboundId,
+        },
+        parkWaitReplyMs: config.timeoutMs,
+        contextPatch: { questionnaire: state },
+        outboundMessageId: outboundId,
+      };
+    }
+
     case "goto_flow": {
       const targetId = String(c.flowId ?? "");
       if (!targetId || !isUuidLike(targetId)) {
@@ -2933,10 +4066,14 @@ export async function executeFlowStep(
     // node cabang seperti langkah biasa. Balasan yang datang lebih
     // dulu sudah menyelesaikan parkir (context.wait hilang / status
     // berubah) sehingga pemeriksaan segar di dalam transaksi menolak.
+    // Fase 13E — node questionnaire parkir memakai penanda yang sama:
+    // tenggat PERTANYAAN berjalan lewat → keluar branch "timeout"
+    // dengan transkrip parsial (jawaban yang sudah masuk tetap
+    // tersimpan di field kontak — ditulis saat dijawab).
     const parkedCtx = runContextOf(run);
     if (
       run.status === "waiting" &&
-      node.type === "wait_reply" &&
+      (node.type === "wait_reply" || node.type === "questionnaire") &&
       parkedCtx.wait &&
       parkedCtx.wait.nodeId === node.id
     ) {
@@ -2962,6 +4099,36 @@ export async function executeFlowStep(
             return { applied: false, reason: "stale_step" as const };
           }
           const parkedAtMs = Date.parse(freshCtx.wait.parkedAt);
+          const waitedMs = Number.isNaN(parkedAtMs)
+            ? null
+            : Math.max(0, Date.now() - parkedAtMs);
+          if (node.type === "questionnaire") {
+            const qState = freshCtx.questionnaire;
+            const currentQuestion =
+              qState && qState.nodeId === node.id
+                ? questionnaireConfigOf(node).questions[qState.qIndex]
+                : undefined;
+            const r = await exitParkedQuestionnaire(
+              tx,
+              tenantId,
+              fresh,
+              graph,
+              node,
+              {
+                branch: "timeout",
+                config: questionnaireConfigOf(node),
+                detail: {
+                  outcome: "timeout",
+                  deadline: freshCtx.wait.deadline,
+                  waitedMs,
+                  questionIndex: qState?.qIndex ?? null,
+                  questionId: currentQuestion?.id ?? null,
+                  answers: qState?.answers ?? [],
+                },
+              },
+            );
+            return { applied: true, status: r.status };
+          }
           const r = await resolveParkedWaitReply(
             tx,
             tenantId,
@@ -2972,9 +4139,7 @@ export async function executeFlowStep(
               branch: "timeout",
               extraDetail: {
                 deadline: freshCtx.wait.deadline,
-                waitedMs: Number.isNaN(parkedAtMs)
-                  ? null
-                  : Math.max(0, Date.now() - parkedAtMs),
+                waitedMs,
               },
             },
           );
@@ -3478,6 +4643,8 @@ export async function executeFlowStep(
         waitMs: effects.waitMs,
         parkWaitReplyMs: effects.parkWaitReplyMs,
         forceComplete: effects.forceComplete,
+        contextPatch: effects.contextPatch,
+        contextClear: effects.contextClear,
       });
       return {
         applied: true,
