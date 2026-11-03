@@ -596,6 +596,20 @@ export async function syncBookingToGoogle(
       return { serviceName: svc?.name ?? null, contactName: ctc?.name ?? null };
     }).catch(() => ({ serviceName: null, contactName: null }));
     try {
+      // ID event DETERMINISTIK dari id booking (UUID tanpa tanda
+      // hubung = 32 karakter hex, seluruhnya di dalam abjad yang
+      // diizinkan Google Calendar: base32hex `0-9a-v`).
+      //
+      // Ini satu-satunya idempotensi yang tersedia di Calendar API
+      // (tidak ada Idempotency-Key seperti di jalur pembayaran).
+      // Tanpa ini ada jendela duplikat nyata: worker sempat membuat
+      // event di Google lalu mati sebelum `patchBookingSync` mencatat
+      // `googleEventId`. BullMQ mengulang job yang stalled, percobaan
+      // kedua tidak menemukan jejak apa pun dan membuat event KEDUA —
+      // janji yang sama muncul dua kali di kalender. Dengan id tetap,
+      // percobaan ulang ditolak Google (409 duplicate) dan kita
+      // menyimpulkan event-nya memang sudah ada.
+      const eventId = snapshot.id.replace(/-/g, "");
       const res = await fetch(
         `${apiBase(deps)}/calendar/v3/calendars/${calendarId}/events`,
         {
@@ -603,6 +617,7 @@ export async function syncBookingToGoogle(
           signal: AbortSignal.timeout(GOOGLE_TIMEOUT_MS),
           headers,
           body: JSON.stringify({
+            id: eventId,
             summary:
               `Sahabat Kreator — ${detail.serviceName ?? "Appointment"}` +
               (detail.contactName ? ` — ${detail.contactName}` : ""),
@@ -612,18 +627,26 @@ export async function syncBookingToGoogle(
           }),
         },
       );
+      // 409 = event dengan id itu sudah ada (percobaan sebelumnya
+      // berhasil tetapi jejaknya belum tercatat). Sukses, bukan gagal.
+      const alreadyExists = res.status === 409;
       const body = (await res.json().catch(() => ({}))) as { id?: unknown };
-      if (!res.ok || typeof body.id !== "string") {
+      const createdId = alreadyExists
+        ? eventId
+        : typeof body.id === "string"
+          ? body.id
+          : null;
+      if (!createdId) {
         throw new Error(`GOOGLE_EVENT_CREATE_FAILED: http_${res.status}`);
       }
       await withTenantDb(db, tenantId, (tx) =>
         patchBookingSync(tx, tenantId, bookingId, {
-          googleEventId: body.id as string,
+          googleEventId: createdId,
           googleSyncStatus: "synced",
           googleSyncError: null,
         }),
       );
-      return { kind: "synced", eventId: body.id as string };
+      return { kind: "synced", eventId: createdId };
     } catch (err) {
       const error = syncErrorText(err);
       await withTenantDb(db, tenantId, (tx) =>
