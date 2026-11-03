@@ -260,11 +260,38 @@ export const PRODUCTION_REQUIRED_KEYS = [
 ] as const satisfies readonly (keyof Env)[];
 
 /**
+ * Buang kunci yang nilainya string kosong SEBELUM validasi.
+ *
+ * Alasannya: `.env` gaya shell (`set -a; . ./.env`) dan systemd
+ * `EnvironmentFile` sama-sama mengekspor `KUNCI=` sebagai string kosong,
+ * bukan menghilangkannya. Bagi zod itu nilai yang HADIR — sehingga
+ * `.optional()` tidak berlaku dan `z.string().url()` / `.min(1)` menolak
+ * `""`. Akibatnya berkas yang menyalin `.env.example` apa adanya (banyak
+ * kunci sengaja dibiarkan kosong) membuat API gagal boot dengan puluhan
+ * error yang membingungkan, padahal maksudnya "tidak diset".
+ *
+ * Konvensi yang dipakai di sini: kosong = tidak diset. Untuk kunci wajib,
+ * `PRODUCTION_REQUIRED_KEYS` tetap menolak boot — jadi fail-closed tidak
+ * berubah, hanya pesannya yang lebih jujur.
+ */
+function stripEmptyValues(
+  source: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== "string") continue;
+    if (value.trim() === "") continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
  * Parse & validasi env; gagal cepat (throw) bila ada nilai yang tidak valid.
  * Di produksi juga menolak boot bila kunci kritikal belum diisi.
  */
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const parsed = EnvSchema.parse(source);
+  const parsed = EnvSchema.parse(stripEmptyValues(source));
   if (parsed.NODE_ENV === "production") {
     const missing = PRODUCTION_REQUIRED_KEYS.filter((key) => !parsed[key]);
     if (missing.length > 0) {

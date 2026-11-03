@@ -36,6 +36,11 @@ export default defineConfig({
     // Tunnel uji lokal: daftarkan host tunnel agar dev server tidak 403.
     // Kosong (default) = hanya localhost, alur dev biasa tidak berubah.
     allowedHosts: devTunnelHost ? [devTunnelHost] : undefined,
+    // HMR lewat tunnel: klien Vite menyambung balik ke port dev server
+    // (5173) yang TIDAK di-proxy Cloudflare, jadi hot reload gagal dan
+    // konsol browser dipenuhi "WebSocket connection failed". Arahkan ke
+    // 443/wss — jalur yang sama dengan trafik halaman.
+    hmr: devTunnelHost ? { protocol: "wss", clientPort: 443 } : undefined,
     // Dev lokal: teruskan /api ke API lokal dan /realtime ke gateway
     // WebSocket apps/realtime lokal (Fase 6G).
     proxy: {

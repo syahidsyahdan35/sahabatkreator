@@ -169,6 +169,17 @@ membuat dashboard tidak bisa memanggil API).
 `${BETTER_AUTH_URL}/api/meta/oauth/callback`. Karena itu ia harus URL
 tunnel, bukan `localhost`.
 
+> **Kutip nilai yang mengandung `&`.** URL Neon biasanya berakhir
+> `?sslmode=require&channel_binding=require`. Kalau `.env` di-*source*
+> shell, `&` dibaca sebagai operator background: assignment terpotong dan
+> variabelnya **hilang tanpa error**, sementara variabel lain tetap masuk.
+> Gejalanya membingungkan — API hidup tapi `/api/ready` menjawab
+> `database: not_configured`. Tulis:
+>
+> ```
+> DATABASE_URL="postgres://sk_app:...@...neon.tech/neondb?sslmode=require&channel_binding=require"
+> ```
+
 ---
 
 ## 6. Menjalankan
@@ -247,6 +258,8 @@ Di UI:
 | Gejala | Sebab |
 |---|---|
 | Semua request tunnel dijawab **403** | Vite ≥5.4.12 menolak Host tak dikenal. Isi `DEV_TUNNEL_HOST`. |
+| `/api/ready` → `database: not_configured` padahal `.env` berisi | Nilai mengandung `&` (Neon `channel_binding`) dan tidak dikutip — shell memotong assignment-nya. |
+| API gagal boot: puluhan `Invalid url` / `too small` | Kunci opsional dibiarkan kosong (`KUNCI=`). Sejak `stripEmptyValues` di `packages/config`, kosong = tidak diset — kalau masih muncul, kuncinya benar-benar wajib. |
 | `/api/*` 502 / koneksi ditolak | `API_PORT` bukan `3101`, proxy Vite menunjuk port kosong. |
 | Login "berhasil" tapi sesi hilang | `BETTER_AUTH_URL` tidak sama dengan origin browser → cookie tidak terkirim. |
 | Query "permission denied" | Migrasi dijalankan tapi `db:grant` belum; atau `DATABASE_URL` memakai owner sementara grant untuk `sk_app`. |
