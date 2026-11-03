@@ -7047,3 +7047,54 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   aktivitas lain di staging, BUKAN akibat deploy ulang ini.
 - Server tertinggal satu commit dokumen ini sampai deploy berikutnya
   (pola yang sama seperti entri konversi).
+
+## Reset Total DB Staging — 2026-11-04 (dini hari, perintah user)
+
+- **Pemicu**: perintah langsung user — reset total DB, ujicoba lagi
+  dari awal dengan app Meta baru "Botara" `1141276711971314` (lihat
+  entri deploy ulang di atas untuk perpindahan app dari "Botara Dev"
+  lama).
+- **Sensus pra-reset**: 1 tenant / 1 user / 1 auth_user / 2 channel
+  connected / 0 kontak / `platform_settings` 4 baris / jurnal 10.
+- **Backup pengaman** (satu arah, TIDAK di-restore):
+  `/home/ubuntu/backups/sahabat-kreator-pre-reset-20261104.sql.gz`
+  (40.479 byte, `gzip -t` OK, sha256
+  `6f3c91c5250998990d591d81326c564a78cf2aee4aaad95df431bde25b4ad524`).
+  Backup lama tidak ada yang dihapus.
+- **Jalur reset**: skrip repo `db:reset`
+  (`packages/db/scripts/provision.ts`, dijalankan di server via
+  runtime Bun dengan `MIGRATION_DATABASE_URL` dari `.env.staging` —
+  nilainya tidak pernah dicetak): jatuhkan skema `public` +
+  `drizzle`, migrasi penuh `0000`–`0009` dari kosong, grant ulang
+  eksplisit, diakhiri `db:doctor`. Jalur manual tidak dipakai karena
+  skrip repo mengenkode seluruh alur termasuk pelajaran 0009.
+- **Hasil doctor: SEMUA OK** — 59 tabel / 73 policy / 52 tabel
+  ber-RLS / migrasi 10 dari 10 / grant `sk_app` 236 / default
+  privileges 2 / probe SELECT+INSERT (tenants, contacts, messages)
+  lulus. Jebakan historis "reset → sk_app permission denied" tidak
+  berulang (log API pasca-restart: 0 "permission denied").
+- **Redis proyek** (`sahabat-kreator-redis`): `FLUSHALL`
+  (DBSIZE 2 → 0) agar antrean/cache tenant lama tidak bocor ke
+  ronde ujicoba baru.
+- **Restart** 4 unit via kill MainPID eksplisit (api 4018088,
+  worker 4018090, realtime 4018087, web 4018089 → PID baru
+  4022341–4022344, aktif 18:00:48 UTC).
+- **Verifikasi perawan**: tenants / users / auth_user /
+  channel_accounts / contacts / flows / products /
+  platform_settings = **0 semua**; jurnal tetap 10;
+  `https://botara.my.id/api/health` `ok`; bundle TIDAK berubah
+  (reset data saja — kode tetap build `c5c8f9c`, penanda
+  `META_ENGAGEMENT_SCOPES` + `claimed_at` utuh); `.env.staging`
+  byte-identik sebelum & sesudah (sha256 `9c1ded2a…`, mode 600).
+- **Yang harus diisi ulang user lewat Panel Admin** (platform_settings
+  kini 0 baris) untuk app BARU: `meta_app_id` (Botara
+  `1141276711971314`), `meta_app_secret` milik app baru,
+  `meta_ig_config_id` + `meta_wa_config_id` milik app baru,
+  `openrouter_api_key` + `openrouter_model`, `r2_access_key_id` +
+  `r2_secret_access_key`. **Yang masih tercakup env** `.env.staging`
+  (nama saja): `META_APP_SECRET` + `META_WEBHOOK_VERIFY_TOKEN`
+  berlaku sebagai fallback sesudah panel — pastikan nilainya memang
+  milik app BARU; jalur terbersih adalah mengisi id + secret app
+  baru di Panel Admin (panel menang atas env). Resend tetap belum
+  terisi (sama seperti sebelum reset).
+- Reset ini TIDAK membuat akun apa pun — user mendaftar sendiri.
