@@ -478,3 +478,132 @@ export async function deliverInvitationEmail(
   });
   return { kind: "sent", providerId: result.providerId };
 }
+
+// ---------------------------------------------------------------------------
+// Email reset kata sandi (Fase 14C — menutup sisa 11B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Masa berlaku token reset Better Auth (detik). Auth mengoper nilai ini
+ * sebagai `resetPasswordTokenExpiresIn` dan isi email menyebut angka
+ * yang sama — satu konstanta agar keduanya tidak pernah berbeda.
+ */
+export const PASSWORD_RESET_EXPIRES_IN_SECONDS = 3600;
+
+export interface PasswordResetEmailContent {
+  subject: string;
+  html: string;
+  text: string;
+}
+
+/**
+ * Isi email reset — DWIBAHASA satu pesan seperti undangan (Inggris
+ * utama, Indonesia di bawah pemisah). Tautan adalah URL utuh yang
+ * dibangun Better Auth (`{baseURL}/reset-password/{token}?callbackURL=…`);
+ * modul ini tidak pernah melihat tokennya secara terpisah dan tidak
+ * menyimpan apa pun — token hidup hanya di tabel `auth_verification`
+ * milik Better Auth (hash-side library) dan di email penerima.
+ */
+export function buildPasswordResetEmail(input: {
+  resetUrl: string;
+  expiresInMinutes: number;
+}): PasswordResetEmailContent {
+  const subject = "Reset your Sahabat Kreator password";
+
+  const enBody = `We received a request to reset the password for your Sahabat Kreator account. Open the link below to choose a new password — it expires in ${input.expiresInMinutes} minutes and can be used once. If you didn't request this, you can safely ignore this email; your password will not change.`;
+  const idBody = `Kami menerima permintaan untuk mengatur ulang kata sandi akun Sahabat Kreator Anda. Buka tautan di bawah untuk memilih kata sandi baru — tautan berlaku ${input.expiresInMinutes} menit dan hanya bisa dipakai sekali. Jika Anda tidak meminta ini, abaikan saja email ini; kata sandi Anda tidak akan berubah.`;
+
+  const text = [
+    "Hello,",
+    "",
+    enBody,
+    "",
+    "Reset your password:",
+    input.resetUrl,
+    "",
+    "—",
+    "",
+    "Halo,",
+    "",
+    idBody,
+    "",
+    "Atur ulang kata sandi Anda:",
+    input.resetUrl,
+    "",
+    "— Sahabat Kreator",
+    "",
+  ].join("\n");
+
+  const html = [
+    `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.55;color:#1a1a1a">`,
+    `<p>Hello,</p>`,
+    `<p>${escapeHtml(enBody)}</p>`,
+    `<p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:#2563eb;color:#ffffff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Reset password</a></p>`,
+    `<p style="font-size:13px;color:#555">Or open this link: <a href="${escapeHtml(input.resetUrl)}">${escapeHtml(input.resetUrl)}</a></p>`,
+    `<hr style="border:none;border-top:1px solid #ddd;margin:24px 0">`,
+    `<p>Halo,</p>`,
+    `<p>${escapeHtml(idBody)}</p>`,
+    `<p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:#2563eb;color:#ffffff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Atur ulang kata sandi</a></p>`,
+    `<p style="font-size:13px;color:#555">Atau buka tautan ini: <a href="${escapeHtml(input.resetUrl)}">${escapeHtml(input.resetUrl)}</a></p>`,
+    `<p style="font-size:13px;color:#555">— Sahabat Kreator</p>`,
+    `</div>`,
+  ].join("");
+
+  return { subject, html, text };
+}
+
+export interface PasswordResetEmailDeps {
+  /** Opsi resolver Panel Admin proses pemanggil (panel → env). */
+  platform: PlatformSettingsOptions;
+  /** Override base URL API Resend (mock rantai). */
+  apiBase?: string;
+}
+
+export type PasswordResetEmailResult =
+  | { kind: "sent"; providerId: string | null }
+  | { kind: "not_configured" }
+  | { kind: "failed"; code: string; message: string };
+
+/**
+ * Kirim SATU email reset untuk hook `sendResetPassword` Better Auth.
+ *
+ * Bentuk pengiriman SENGAJA berbeda dari undangan tim (outbox + job):
+ * reset kata sandi adalah urusan pengguna/platform, bukan tenant —
+ * outbox kita tenant-sentris (tenant_id + relay RLS) sehingga memaksanya
+ * ke sana berarti event platform ber-tenant NULL plus ciphertext URL.
+ * Di sini Better Auth sendiri yang membuat & menyimpan token (tabel
+ * verifikasinya) dan menyerahkan URL jadi ke hook; tidak ada kustodi
+ * token yang perlu dipecahkan modul ini, jadi pengiriman langsung lewat
+ * `sendEmail` adalah bentuk yang pas. Hasilnya dikembalikan apa adanya
+ * (sent / not_configured / failed) agar pemanggil mencatatnya dengan
+ * jujur — fungsi ini tidak pernah berpura-pura terkirim.
+ */
+export async function deliverPasswordResetEmail(
+  db: Database,
+  deps: PasswordResetEmailDeps,
+  input: { email: string; resetUrl: string },
+): Promise<PasswordResetEmailResult> {
+  const config = await resolveEmailConfig(db, deps.platform);
+  if (!config) return { kind: "not_configured" };
+  const content = buildPasswordResetEmail({
+    resetUrl: input.resetUrl,
+    expiresInMinutes: Math.round(PASSWORD_RESET_EXPIRES_IN_SECONDS / 60),
+  });
+  const result = await sendEmail({
+    config,
+    apiBase: deps.apiBase,
+    to: input.email,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+  });
+  if (result.kind === "sent") {
+    return { kind: "sent", providerId: result.providerId };
+  }
+  if (result.kind === "failed") {
+    return { kind: "failed", code: result.code, message: result.message };
+  }
+  // Tak terjangkau (config sudah diperiksa di atas) — dipertahankan
+  // demi kejujuran tipe, persis pola deliverInvitationEmail.
+  return { kind: "not_configured" };
+}

@@ -2,7 +2,12 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { customSession } from "better-auth/plugins";
 import { eq } from "drizzle-orm";
-import { isPlatformAdminEmail } from "@sahabat-kreator/core";
+import {
+  deliverPasswordResetEmail,
+  isPlatformAdminEmail,
+  PASSWORD_RESET_EXPIRES_IN_SECONDS,
+  type PlatformSettingsOptions,
+} from "@sahabat-kreator/core";
 import {
   authAccount,
   authSession,
@@ -35,9 +40,20 @@ export interface AuthBundle {
   db: Database;
 }
 
+/** Dependensi email reset kata sandi (Fase 14C) — resolver Panel Admin + override base Resend untuk mock rantai. */
+export interface PasswordResetEmailOptions {
+  platform: PlatformSettingsOptions;
+  apiBase?: string;
+}
+
 function createAuthInstance(
   db: Database,
-  opts: { secret: string; baseURL: string; platformAdminEmails?: string },
+  opts: {
+    secret: string;
+    baseURL: string;
+    platformAdminEmails?: string;
+    passwordResetEmail?: PasswordResetEmailOptions;
+  },
 ) {
   return betterAuth({
     appName: "Sahabat Kreator",
@@ -69,7 +85,74 @@ function createAuthInstance(
         verification: authVerification,
       },
     }),
-    emailAndPassword: { enabled: true },
+    emailAndPassword: {
+      enabled: true,
+      /**
+       * Reset kata sandi via email (Fase 14C — menutup sisa 11B).
+       *
+       * Jalur yang dipilih: hook `sendResetPassword` Better Auth →
+       * `deliverPasswordResetEmail` di core → Resend `sendEmail` yang
+       * sama dengan email undangan. BUKAN pola outbox + job 11B:
+       * undangan membutuhkannya karena lapisan API yang membuat token
+       * dan pengiriman harus selamat lintas proses; di sini Better Auth
+       * sendiri yang membuat token, menyimpannya di `auth_verification`,
+       * dan menyerahkan URL jadi ke hook — tidak ada kustodi token untuk
+       * dipecahkan, dan reset adalah urusan pengguna/platform (bukan
+       * tenant) sedangkan outbox kita tenant-sentris.
+       *
+       * KEJUJURAN STATUS: hook TIDAK PERNAH melempar — endpoint
+       * `/request-password-reset` selalu menjawab sukses ke peminta
+       * (anti-enumerasi, perilaku library), sementara hasil pengiriman
+       * sebenarnya dicatat satu baris terstruktur di log proses:
+       * `password_reset_email … status=sent|not_configured|failed`.
+       * Tanpa konfigurasi Resend email memang tidak terkirim dan log
+       * mengatakannya persis begitu — tidak ada keadaan "terkirim"
+       * karangan. Baris log hanya memuat id pengguna + status (+ kode
+       * gagal); alamat email, token, dan URL tidak pernah ditulis.
+       *
+       * Token berlaku 1 jam (konstanta core yang sama dengan yang
+       * disebut isi email) dan sekali pakai (library menghapus baris
+       * verifikasi saat reset selesai).
+       */
+      resetPasswordTokenExpiresIn: PASSWORD_RESET_EXPIRES_IN_SECONDS,
+      ...(opts.passwordResetEmail
+        ? {
+            sendResetPassword: async ({
+              user,
+              url,
+            }: {
+              user: { id: string; email: string };
+              url: string;
+            }) => {
+              const deps = opts.passwordResetEmail;
+              if (!deps) return;
+              try {
+                const result = await deliverPasswordResetEmail(db, deps, {
+                  email: user.email,
+                  resetUrl: url,
+                });
+                if (result.kind === "sent") {
+                  console.log(
+                    `[auth] password_reset_email user=${user.id} status=sent providerId=${result.providerId ?? "-"}`,
+                  );
+                } else if (result.kind === "not_configured") {
+                  console.warn(
+                    `[auth] password_reset_email user=${user.id} status=not_configured`,
+                  );
+                } else {
+                  console.error(
+                    `[auth] password_reset_email user=${user.id} status=failed code=${result.code}`,
+                  );
+                }
+              } catch {
+                console.error(
+                  `[auth] password_reset_email user=${user.id} status=failed code=UNEXPECTED`,
+                );
+              }
+            },
+          }
+        : {}),
+    },
     /**
      * Rate limit auth (Fase 6B — menutup catatan pra-produksi QA-1).
      *
@@ -182,6 +265,8 @@ export function createAuthBundle(opts: {
   baseURL: string;
   /** Allowlist email platform-admin mentah (env PLATFORM_ADMIN_EMAILS) — Fase 6C. */
   platformAdminEmails?: string;
+  /** Dependensi email reset kata sandi (Fase 14C); tanpa ini endpoint reset menjawab tidak-aktif dari library. */
+  passwordResetEmail?: PasswordResetEmailOptions;
 }): AuthBundle {
   const { db } = createDb(opts.databaseUrl);
   return { auth: createAuthInstance(db, opts), db };

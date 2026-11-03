@@ -721,17 +721,23 @@ export {
 export {
   RESEND_DEFAULT_API_BASE,
   INVITATION_EMAIL_OUTBOX_TYPE,
+  PASSWORD_RESET_EXPIRES_IN_SECONDS,
   resolveEmailConfig,
   sendEmail,
   buildInvitationEmail,
   queueInvitationEmail,
   deliverInvitationEmail,
+  buildPasswordResetEmail,
+  deliverPasswordResetEmail,
   type ResolvedEmailConfig,
   type SendEmailInput,
   type SendEmailResult,
   type InvitationEmailContent,
   type InvitationEmailDeps,
   type InvitationEmailDeliveryResult,
+  type PasswordResetEmailContent,
+  type PasswordResetEmailDeps,
+  type PasswordResetEmailResult,
 } from "./email";
 export {
   PLATFORM_SETTING_KEYS,

@@ -98,6 +98,15 @@ export function LoginPage({ t, controls, onNavigate }: LoginPageProps) {
         <button type="submit" disabled={submitting} className={primaryButtonClassName}>
           {submitting ? t("auth.signingIn") : t("auth.signInButton")}
         </button>
+        <p className="text-center text-sm">
+          <button
+            type="button"
+            onClick={() => onNavigate("/forgot-password")}
+            className="font-medium text-accent"
+          >
+            {t("auth.forgotPassword")}
+          </button>
+        </p>
       </form>
       <p className="mt-5 text-center text-sm text-muted">
         {t("auth.noAccount")}{" "}

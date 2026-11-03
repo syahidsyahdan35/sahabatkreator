@@ -40,6 +40,8 @@ import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { InvitePage } from "./pages/InvitePage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { PayPage } from "./pages/PayPage";
 import { WebchatDemoPage } from "./pages/WebchatDemoPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -519,6 +521,10 @@ export default function App() {
         <LoginPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
       ) : path === "/register" ? (
         <RegisterPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
+      ) : path === "/forgot-password" ? (
+        <ForgotPasswordPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
+      ) : path === "/reset-password" ? (
+        <ResetPasswordPage t={t} locale={locale} controls={controls} onNavigate={navigateTo} />
       ) : path.startsWith("/invite/") ? (
         <InvitePage
           t={t}

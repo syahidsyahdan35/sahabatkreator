@@ -61,6 +61,41 @@ import {
 const env = loadEnv();
 const startedAt = Date.now();
 
+// Opsi resolver Panel Admin Platform (Fase 6C) — SATU objek dipakai
+// bersama modul admin, meta, penanda channels, dan hook email reset
+// kata sandi (Fase 14C): cache resolver ter-bucket per identitas objek,
+// jadi berbagi objek = berbagi semantik env proses ini + invalidasi
+// set/clear berlaku untuk semua pemakai. Env hanya fallback per kunci;
+// sumber utama nilai panel terenkripsi. (Blok ini didahulukan dari
+// pembuatan bundle auth sejak 14C karena hook reset membutuhkannya.)
+const platformOptions: PlatformSettingsOptions = {
+  masterSecret: env.PLATFORM_SETTINGS_SECRET,
+  env: {
+    openrouter_api_key: env.OPENROUTER_API_KEY,
+    openrouter_model: env.OPENROUTER_MODEL,
+    r2_access_key_id: env.R2_ACCESS_KEY_ID,
+    r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
+    // Fase 7A.1: App Secret Meta ikut dikelola panel; env placeholder
+    // staging tetap fallback sampai pemilik mengisi panel.
+    meta_app_secret: env.META_APP_SECRET,
+    // Fase 7D: identifier publik Meta untuk OAuth (App ID + config ID)
+    // — env hanya fallback; sumber utama Panel Admin.
+    meta_app_id: env.META_APP_ID,
+    meta_ig_config_id: env.META_IG_CONFIG_ID,
+    meta_wa_config_id: env.META_WA_CONFIG_ID,
+    // Fase 11B: email Resend — env hanya fallback; sumber utama Panel
+    // Admin (resend_api_key rahasia + identitas pengirim publik).
+    resend_api_key: env.RESEND_API_KEY,
+    resend_from_email: env.RESEND_FROM_EMAIL,
+    resend_from_name: env.RESEND_FROM_NAME,
+    // Fase 13G: klien OAuth Google untuk sinkronisasi Calendar —
+    // env hanya fallback; sumber utama Panel Admin (client_id publik
+    // + client_secret rahasia).
+    google_oauth_client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+    google_oauth_client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+  },
+};
+
 // Bundle auth + DB hanya dibuat bila env-nya lengkap; tanpa itu API tetap
 // melayani /health & /version (mode Fase 0) dan modul tenants menjawab 503.
 let authBundle: AuthBundle | null = null;
@@ -70,6 +105,12 @@ if (env.DATABASE_URL && env.BETTER_AUTH_SECRET) {
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL ?? `http://localhost:${env.API_PORT}`,
     platformAdminEmails: env.PLATFORM_ADMIN_EMAILS,
+    // Fase 14C: email reset kata sandi lewat Resend (pola 11B) —
+    // resolver panel yang sama + override base URL untuk mock rantai.
+    passwordResetEmail: {
+      platform: platformOptions,
+      apiBase: env.RESEND_API_BASE,
+    },
   });
 }
 
@@ -105,39 +146,6 @@ const realtimePublisher: RealtimePublisher | null = env.REDIS_URL
   ? createRealtimePublisher(env.REDIS_URL)
   : null;
 const webchatOpts = { secret: env.WEBCHAT_SECRET, publisher: realtimePublisher };
-
-// Opsi resolver Panel Admin Platform (Fase 6C) — SATU objek dipakai
-// bersama modul admin, meta, dan penanda channels: cache resolver
-// ter-bucket per identitas objek, jadi berbagi objek = berbagi semantik
-// env proses ini + invalidasi set/clear berlaku untuk semua pemakai.
-// Env hanya fallback per kunci; sumber utama nilai panel terenkripsi.
-const platformOptions: PlatformSettingsOptions = {
-  masterSecret: env.PLATFORM_SETTINGS_SECRET,
-  env: {
-    openrouter_api_key: env.OPENROUTER_API_KEY,
-    openrouter_model: env.OPENROUTER_MODEL,
-    r2_access_key_id: env.R2_ACCESS_KEY_ID,
-    r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
-    // Fase 7A.1: App Secret Meta ikut dikelola panel; env placeholder
-    // staging tetap fallback sampai pemilik mengisi panel.
-    meta_app_secret: env.META_APP_SECRET,
-    // Fase 7D: identifier publik Meta untuk OAuth (App ID + config ID)
-    // — env hanya fallback; sumber utama Panel Admin.
-    meta_app_id: env.META_APP_ID,
-    meta_ig_config_id: env.META_IG_CONFIG_ID,
-    meta_wa_config_id: env.META_WA_CONFIG_ID,
-    // Fase 11B: email Resend — env hanya fallback; sumber utama Panel
-    // Admin (resend_api_key rahasia + identitas pengirim publik).
-    resend_api_key: env.RESEND_API_KEY,
-    resend_from_email: env.RESEND_FROM_EMAIL,
-    resend_from_name: env.RESEND_FROM_NAME,
-    // Fase 13G: klien OAuth Google untuk sinkronisasi Calendar —
-    // env hanya fallback; sumber utama Panel Admin (client_id publik
-    // + client_secret rahasia).
-    google_oauth_client_id: env.GOOGLE_OAUTH_CLIENT_ID,
-    google_oauth_client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
-  },
-};
 
 // Modul log integrasi (Fase 7B.1) — pembacaan integration_log:
 // /tenants/:tenantId/logs (owner/admin) + /logs/unresolved (platform admin).

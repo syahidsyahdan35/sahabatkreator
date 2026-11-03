@@ -303,6 +303,31 @@ export const api = {
       });
     },
     /**
+     * POST /api/auth/request-password-reset (Better Auth, Fase 14C) —
+     * server mengirim email reset lewat Resend bila akunnya ada; respons
+     * selalu sukses untuk alamat apa pun (anti-enumerasi), jadi UI
+     * menampilkan keadaan "periksa email" tanpa membedakan. `redirectTo`
+     * adalah halaman web yang dituju tautan email sesudah tokennya
+     * diverifikasi server auth.
+     */
+    requestPasswordReset(email: string, redirectTo: string): Promise<unknown> {
+      return request("/api/auth/request-password-reset", {
+        method: "POST",
+        body: JSON.stringify({ email, redirectTo }),
+      });
+    },
+    /**
+     * POST /api/auth/reset-password (Better Auth, Fase 14C) — menukar
+     * token dari tautan email dengan kata sandi baru. Token tidak valid /
+     * kedaluwarsa / sudah dipakai → error berkode INVALID_TOKEN.
+     */
+    resetPassword(token: string, newPassword: string): Promise<unknown> {
+      return request("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ token, newPassword }),
+      });
+    },
+    /**
      * POST /api/auth/change-password (Better Auth) — verifikasi kata
      * sandi saat ini di server; `revokeOtherSessions: true` mencabut
      * sesi perangkat lain, sesi perangkat ini diperbarui & tetap masuk.

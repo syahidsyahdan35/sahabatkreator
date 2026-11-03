@@ -26,6 +26,10 @@ export function translateApiError(t: Translate, err: unknown): string {
     // Better Auth change-password: kata sandi saat ini salah.
     case "INVALID_PASSWORD":
       return t("settings.passwordCurrentWrong");
+    // Better Auth reset-password (Fase 14C): token tidak dikenal,
+    // kedaluwarsa, atau sudah dipakai.
+    case "INVALID_TOKEN":
+      return t("auth.resetInvalidBody");
     case "INVALID_EMAIL":
       return t("auth.emailInvalid");
     case "NETWORK_ERROR":
