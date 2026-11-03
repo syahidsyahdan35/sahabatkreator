@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+export {
+  createLogger,
+  sanitizeLogValue,
+  type LogFields,
+  type LogLevel,
+  type Logger,
+  type LoggerOptions,
+} from "./logger";
+
 /** Versi aplikasi (semver paket root). */
 export const APP_VERSION = "0.1.0";
 
@@ -18,6 +27,12 @@ export const META_GRAPH_API_VERSION_BY_CHANNEL = {
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  /**
+   * Ambang log terstruktur (JSON lines). Default "info"; "debug" hanya
+   * untuk investigasi lokal — jangan di produksi karena payload ikut
+   * tercetak (nilai sensitif tetap di-redact oleh logger).
+   */
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   API_PORT: z.coerce.number().int().positive().default(3001),
   /**
    * Port apps/realtime (Fase 6G) — gateway WebSocket mandiri. Bind

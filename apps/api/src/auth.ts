@@ -39,6 +39,11 @@ import type { RateLimitStorage } from "./rate-limit-store";
 export interface AuthBundle {
   auth: ReturnType<typeof createAuthInstance>;
   db: Database;
+  /**
+   * Pool koneksi milik bundle. Dipakai readiness check (`SELECT 1`) dan
+   * shutdown; jangan membuat pool kedua untuk keperluan yang sama.
+   */
+  pool: ReturnType<typeof createDb>["pool"];
 }
 
 /** Dependensi email reset kata sandi (Fase 14C) — resolver Panel Admin + override base Resend untuk mock rantai. */
@@ -280,6 +285,6 @@ export function createAuthBundle(opts: {
   /** Storage rate limit bersama (Redis) — Fase 13D; null/kosong = in-memory. */
   rateLimitStorage?: RateLimitStorage | null;
 }): AuthBundle {
-  const { db } = createDb(opts.databaseUrl);
-  return { auth: createAuthInstance(db, opts), db };
+  const { db, pool } = createDb(opts.databaseUrl);
+  return { auth: createAuthInstance(db, opts), db, pool };
 }

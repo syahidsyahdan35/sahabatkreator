@@ -149,6 +149,32 @@ export const HealthResponseSchema = z.object({
 });
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
+/**
+ * Readiness (kesiapan melayani) — BEDA dari liveness `/health`.
+ *
+ * `/health` menjawab "proses hidup"; `/ready` menjawab "dependensi yang
+ * dibutuhkan untuk melayani request benar-benar bisa dipakai". Load
+ * balancer/orchestrator harus memakai `/ready` untuk menarik replika dari
+ * rotasi saat DB/Redis bermasalah, dan `/health` hanya untuk restart.
+ *
+ * `not_configured` sengaja bukan `error`: di lingkungan pengembangan API
+ * boleh hidup tanpa DB (mode Fase 0). Di produksi, status keseluruhan
+ * menjadi `degraded` bila dependensi wajib tidak terkonfigurasi.
+ */
+export const ReadinessCheckSchema = z.enum(["ok", "error", "not_configured"]);
+export type ReadinessCheck = z.infer<typeof ReadinessCheckSchema>;
+
+export const ReadyResponseSchema = z.object({
+  status: z.enum(["ok", "degraded"]),
+  service: z.string(),
+  checks: z.object({
+    database: ReadinessCheckSchema,
+    redis: ReadinessCheckSchema,
+  }),
+  timestamp: z.string().datetime(),
+});
+export type ReadyResponse = z.infer<typeof ReadyResponseSchema>;
+
 export const VersionResponseSchema = z.object({
   service: z.string(),
   version: z.string(),

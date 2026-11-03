@@ -2,8 +2,10 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import {
   HealthResponseSchema,
+  ReadyResponseSchema,
   VersionResponseSchema,
   type HealthResponse,
+  type ReadyResponse,
   type VersionResponse,
 } from "@sahabat-kreator/contracts";
 import {
@@ -11,11 +13,20 @@ import {
   META_GRAPH_API_VERSION,
   R2_ACCOUNT_ID,
   R2_ENDPOINT,
+  createLogger,
   loadEnv,
   resolveR2Bucket,
 } from "@sahabat-kreator/config";
 import { createAuthBundle, type AuthBundle } from "./auth";
 import { createRedisRateLimitStorage } from "./rate-limit-store";
+import { createRateLimiter } from "./rate-limit";
+import {
+  createErrorHandler,
+  createNotFoundHandler,
+  createRequestMiddleware,
+  securityHeaders,
+} from "./observability";
+import { checkDatabase, combineReadiness } from "./readiness";
 import type { AppVariables } from "./http";
 import { createTenantsRoutes } from "./modules/tenants/routes";
 import { createContactsRoutes } from "./modules/contacts/routes";
@@ -61,6 +72,10 @@ import {
 
 const env = loadEnv();
 const startedAt = Date.now();
+const logger = createLogger("api", {
+  level: env.LOG_LEVEL,
+  base: { version: APP_VERSION, environment: env.NODE_ENV },
+});
 
 // Opsi resolver Panel Admin Platform (Fase 6C) — SATU objek dipakai
 // bersama modul admin, meta, penanda channels, dan hook email reset
@@ -124,6 +139,26 @@ if (env.DATABASE_URL && env.BETTER_AUTH_SECRET) {
 // (akses lewat proxy web — staging & publik memakai https://<domain>/api/...).
 const routes = new Hono<{ Variables: AppVariables }>();
 
+/**
+ * Rate limit in-app permukaan publik (Fase 16A). Batas ini adalah jaring
+ * pengaman dasar yang SELALU aktif; ruleset Cloudflare di
+ * docs/PRODUCTION.md §2 tetap lapisan pertama yang dianjurkan.
+ * Angkanya sengaja sama dengan usulan edge agar tidak mengejutkan klien.
+ */
+const rateLimiter = createRateLimiter({
+  redisUrl: env.REDIS_URL,
+  logger,
+  rules: {
+    v1: { limit: 600, windowSeconds: 60 },
+    webchat: { limit: 300, windowSeconds: 60 },
+    public: { limit: 120, windowSeconds: 60 },
+  },
+});
+routes.use("/v1/*", rateLimiter.middleware("v1"));
+routes.use("/webchat/*", rateLimiter.middleware("webchat"));
+routes.use("/pay/*", rateLimiter.middleware("public"));
+routes.use("/go/*", rateLimiter.middleware("public"));
+
 routes.get("/health", (c) => {
   const body: HealthResponse = HealthResponseSchema.parse({
     status: "ok",
@@ -141,6 +176,26 @@ routes.get("/version", (c) => {
     metaGraphApiVersion: META_GRAPH_API_VERSION,
   });
   return c.json(body);
+});
+
+/**
+ * Readiness (Fase 16A): beda dari /health. Memeriksa DB (SELECT 1) dan
+ * Redis (PING) dengan timeout pendek; 503 saat tidak siap agar replika
+ * ditarik dari rotasi tanpa memicu restart loop.
+ */
+routes.get("/ready", async (c) => {
+  const database = await checkDatabase(authBundle?.pool ?? null);
+  const redis = await rateLimiter.health();
+  const combined = combineReadiness(database, redis, {
+    requireRedis: env.NODE_ENV === "production",
+  });
+  const body: ReadyResponse = ReadyResponseSchema.parse({
+    status: combined.status,
+    service: "api",
+    checks: { database, redis },
+    timestamp: new Date().toISOString(),
+  });
+  return c.json(body, combined.ok ? 200 : 503);
 });
 
 // Penerbit nudge realtime (Fase 6G) — satu instance per proses; route &
@@ -421,6 +476,10 @@ routes.route(
 );
 
 export const app = new Hono<{ Variables: AppVariables }>();
+// Observability & header keamanan dipasang SEBELUM route: Hono mengeksekusi
+// middleware sesuai urutan registrasi.
+app.use("*", createRequestMiddleware(logger));
+app.use("*", securityHeaders);
 app.route("/", routes);
 app.route("/api", routes);
 
@@ -431,12 +490,22 @@ if (authBundle) {
   app.on(["POST", "GET"], "/api/auth/*", (c) => bundle.auth.handler(c.req.raw));
 }
 
+// Kontrak error seragam untuk seluruh API (termasuk exception tak tertangani).
+app.onError(createErrorHandler(logger));
+app.notFound(createNotFoundHandler());
+
 // Modul bisnis lain (channels, inbox, automations, agents, ...) dipasang
 // sebagai sub-app Hono per modul — lihat src/modules/.
 
 if (process.env.NODE_ENV !== "test") {
   serve({ fetch: app.fetch, port: env.API_PORT }, (info) => {
-    console.log(`[api] Sahabat Kreator API listening on http://localhost:${info.port}`);
+    logger.info("api.listening", {
+      url: `http://localhost:${info.port}`,
+      port: info.port,
+      databaseConfigured: Boolean(authBundle),
+      redisConfigured: Boolean(env.REDIS_URL),
+      metaGraphApiVersion: META_GRAPH_API_VERSION,
+    });
   });
   // WebSocket TIDAK lagi dilayani proses ini (Fase 6G): hub webchat &
   // poller pengiriman webchat pensiun — socket dashboard & pengunjung

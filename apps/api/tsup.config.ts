@@ -18,4 +18,13 @@ export default defineConfig({
   // savepoint 25P01). Satu-satunya salinan pg yang boleh ada adalah
   // yang di-resolve runtime dari node_modules.
   external: ["pg"],
+  // Transitive CJS (mis. `node-abort-controller` lewat BullMQ dari
+  // @sahabat-kreator/queue) memanggil `require("events")`. Dalam output
+  // ESM, `require` tidak ada sehingga boot gagal dengan "Dynamic require
+  // of \"events\" is not supported". Banner ini menyediakan `require`
+  // nyata (createRequire) agar paket CJS hasil bundel tetap berjalan;
+  // tanpa itu smoke artefak build tidak pernah bisa boot.
+  banner: {
+    js: "import { createRequire as __skCreateRequire } from 'node:module'; const require = __skCreateRequire(import.meta.url);",
+  },
 });

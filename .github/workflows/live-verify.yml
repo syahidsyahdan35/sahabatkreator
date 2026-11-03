@@ -1,0 +1,51 @@
+name: Live Verify (staging)
+
+# Verifikasi permukaan klien terhadap API yang HIDUP. Tidak berjalan di
+# setiap PR karena butuh kunci uji + staging yang dapat dijangkau.
+#
+# Aktifkan manual: Actions → "Live Verify (staging)" → Run workflow.
+# Secret yang dibaca (repo → Settings → Secrets and variables → Actions):
+#   SAHABAT_KREATOR_BASE_URL          contoh https://botara.my.id
+#   SAHABAT_KREATOR_API_KEY           kunci full-scope tenant uji
+#   SAHABAT_KREATOR_API_KEY_LIMITED   opsional, kunci read-only
+#   SAHABAT_KREATOR_TEST_CONVERSATION_ID opsional
+#   SK_BASE_URL / SK_API_KEY / SK_API_KEY_LIMITED  untuk CLI
+# Bila secret utama kosong, langkah live dilewati (bukan gagal).
+on:
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: SDK verify
+        if: ${{ secrets.SAHABAT_KREATOR_API_KEY != '' }}
+        env:
+          SAHABAT_KREATOR_BASE_URL: ${{ secrets.SAHABAT_KREATOR_BASE_URL }}
+          SAHABAT_KREATOR_API_KEY: ${{ secrets.SAHABAT_KREATOR_API_KEY }}
+        run: pnpm --filter @sahabat-kreator/sdk verify:sdk
+      - name: MCP verify
+        if: ${{ secrets.SAHABAT_KREATOR_API_KEY != '' }}
+        env:
+          SAHABAT_KREATOR_BASE_URL: ${{ secrets.SAHABAT_KREATOR_BASE_URL }}
+          SAHABAT_KREATOR_API_KEY: ${{ secrets.SAHABAT_KREATOR_API_KEY }}
+          SAHABAT_KREATOR_API_KEY_LIMITED: ${{ secrets.SAHABAT_KREATOR_API_KEY_LIMITED }}
+          SAHABAT_KREATOR_TEST_CONVERSATION_ID: ${{ secrets.SAHABAT_KREATOR_TEST_CONVERSATION_ID }}
+        run: pnpm --filter @sahabat-kreator/mcp-server verify:mcp
+      - name: CLI verify
+        if: ${{ secrets.SK_API_KEY != '' }}
+        env:
+          SK_BASE_URL: ${{ secrets.SK_BASE_URL }}
+          SK_API_KEY: ${{ secrets.SK_API_KEY }}
+          SK_API_KEY_LIMITED: ${{ secrets.SK_API_KEY_LIMITED }}
+        run: pnpm --filter @sahabat-kreator/cli verify:cli

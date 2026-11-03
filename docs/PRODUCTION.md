@@ -37,7 +37,9 @@ pernah terekspos langsung. Produksi memakai pola yang sama:
    (rahasia sisi server — lihat SECRETS-RUNBOOK.md).
 4. SSL/TLS mode: **Full (Strict)** tidak relevan untuk tunnel (koneksi
    edge→origin terenkripsi oleh tunnel); set "Always Use HTTPS" aktif.
-5. Verifikasi: `https://<domain>/api/health` → `{"status":"ok",...}`.
+5. Verifikasi: `https://<domain>/api/health` → `{"status":"ok",...}`
+   (liveness) dan `https://<domain>/api/ready` → `{"status":"ok",...}`
+   (kesiapan DB/Redis; 503 saat dependensi belum siap).
 
 Alternatif (tidak dipilih): DNS A-record + origin terekspos — ditolak
 karena asumsi kepercayaan header `cf-connecting-ip` pada rate limit
@@ -46,13 +48,14 @@ dicapai lewat Cloudflare.
 
 ## 2. Ruleset edge Cloudflare — SPESIFIKASI (terapkan di dashboard CF saat domain ada)
 
-App sudah punya rate limit per-IP-asli untuk auth (§8); ruleset edge
-ini adalah lapisan di depannya: menahan banjir sebelum mencapai origin
-dan memberi batas untuk permukaan publik yang memang tidak punya limit
-aplikasi. **Belum diterapkan di mana pun** — tidak ada kredensial CF
-yang dipegang agent; ekspresi di bawah siap tempel
-(Rules → Rate limiting rules), karakteristik semua rule = IP,
-aksi = Block (CF menjawab 429 untuk rate-limit block).
+App sudah punya rate limit per-IP-asli untuk auth (§8) dan rate limit
+in-app dasar untuk permukaan publik (`apps/api/src/rate-limit.ts`);
+ruleset edge ini adalah lapisan di depannya: menahan banjir sebelum
+mencapai origin dan memberi batas yang lebih ketat untuk jalur rawan.
+**Belum diterapkan di mana pun** — tidak ada kredensial CF yang dipegang
+agent; ekspresi di bawah siap tempel (Rules → Rate limiting rules),
+karakteristik semua rule = IP, aksi = Block (CF menjawab 429 untuk
+rate-limit block).
 
 | # | Nama | Ekspresi | Batas | Catatan |
 |---|---|---|---|---|
@@ -244,11 +247,18 @@ lewat `cf-connecting-ip`):
 | Jalur auth sensitif lain (change-password dll.) | rule khusus library 3 req / 10 dtk | — |
 | Semua jalur auth (global) | 100 req / 10 dtk per IP (default library, eksplisit di konfigurasi) | — |
 | request/reset password | tanpa rule khusus (ikut global) | E3 = kontrol utama |
-| Endpoint publik (`/pay`, `/go`, webchat, webhook) | **tidak ada limit aplikasi** (terbukti: 30× GET `/api/pay/<code>` → 30× 200, 0× 429) | E4–E7 |
+| Endpoint publik (`/v1`, `/webchat`, `/pay`, `/go`) | rate limit in-app 600 / 300 / 120 req per 60 dtk per IP → 429 + `Retry-After` (Redis bersama; fail-open ke memori) | E4–E7 sebagai lapisan pertama |
 
-Penyimpanan penghitung aplikasi = in-memory satu proses API (reset
-saat API restart) — cukup untuk topologi satu proses; multi-proses
-membutuhkan storage bersama (catatan di `apps/api/src/auth.ts`).
+Penyimpanan penghitung:
+
+- **Auth (Better Auth)** memakai Redis bila `REDIS_URL` tersedia
+  (`rateLimitStorage` di `apps/api/src/index.ts`), dengan fallback
+  in-memory.
+- **Permukaan publik** (`apps/api/src/rate-limit.ts`) memakai fixed
+  window Redis lintas replika. Bila Redis gagal, limiter fail-open ke
+  memori per proses selama 30 detik sebelum mencoba Redis lagi — request
+  pengguna tidak pernah gagal karena Redis bermasalah.
+- Tanpa `REDIS_URL` (pengembangan), keduanya in-memory satu proses.
 
 ## 9. Checklist pra-luncur
 

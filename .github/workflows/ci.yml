@@ -5,7 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Gerbang wajib setiap perubahan (Fase 16A):
+#   typecheck → verifikasi kontrak/DB/RLS/logika/observability → build
+#   → smoke artefak build di Node DAN Bun.
+# Verifikasi yang butuh staging hidup (SDK/MCP/CLI) ada di
+# .github/workflows/live-verify.yml (workflow_dispatch, berbasis secret).
 jobs:
+  # Nama job dipertahankan `build` agar required status check yang sudah
+  # dikonfigurasi di branch protection tidak menggantung.
   build:
     runs-on: ubuntu-latest
     steps:
@@ -17,6 +24,18 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck (25 paket)
+        run: pnpm typecheck
+      - name: Verify (drift, migrasi+RLS, worker, observability)
+        run: pnpm verify:ci
+      - name: Build
+        run: pnpm build
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Smoke artefak API di Node
+        run: node scripts/ci-smoke-api.mjs
+      - name: Smoke artefak API di Bun
+        run: SMOKE_RUNTIME=bun node scripts/ci-smoke-api.mjs

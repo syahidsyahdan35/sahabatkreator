@@ -28,6 +28,7 @@ hijau pada tree finalnya:
 5. Build SEMUA dist + grep string baru di bundle lokal DAN server
    (API/worker staging berjalan dari dist tsup, bukan src).
 6. Pasca-deploy: health publik `https://botara.my.id/api/health` ok,
+   readiness `https://botara.my.id/api/ready` ok (DB/Redis siap),
    service systemd aktif, `.env.staging` pulih byte-identik
    (sha256 baseline `9c1ded2a…`), channel asli user utuh, dan
    `pnpm db:doctor` hijau.
@@ -47,11 +48,13 @@ Publik https://botara.my.id
                           path utuh tanpa strip) → 127.0.0.1:3101
        └─ sahabat-kreator-api.service — API Hono (Bun, dist/index.js) :3101
             route dilayani di root DAN di bawah prefix /api
-            (GET /health, GET /api/health, GET /version, GET /api/version)
+            (GET /health, GET /api/health, GET /ready, GET /version, GET /api/version)
 ```
 
 Target publik: `https://botara.my.id/` → SPA Sahabat Kreator;
-`https://botara.my.id/api/health` → `{"status":"ok",...}`.
+`https://botara.my.id/api/health` → `{"status":"ok",...}`;
+`https://botara.my.id/api/ready` → `{"status":"ok",...}` (503 saat
+DB/Redis belum siap).
 
 ## Lokasi & service di server
 

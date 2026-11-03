@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
 import { drizzle } from "drizzle-orm/pglite";
 import * as schema from "@sahabat-kreator/db/schema";
 import type { Database } from "@sahabat-kreator/db";
@@ -41,7 +42,9 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrationsDir = path.join(here, "../../../packages/db/migrations");
 
-const client = new PGlite({ extensions: { vector } });
+// btree_gist wajib didaftarkan (Fase 13G): migrasi 0006 menjalankan
+// CREATE EXTENSION btree_gist untuk constraint eksklusi anti-double-booking.
+const client = new PGlite({ extensions: { vector, btree_gist } });
 const files = (await readdir(migrationsDir))
   .filter((f) => f.endsWith(".sql"))
   .sort();

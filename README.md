@@ -37,17 +37,30 @@ pnpm --filter @sahabat-kreator/db db:migrate   # terapkan migrasi
 pnpm dev                      # API (http://localhost:3001) + Web (http://localhost:5173)
 ```
 
-Cek API: `curl localhost:3001/health` dan `curl localhost:3001/version`.
+Cek API: `curl localhost:3001/health` (liveness), `curl localhost:3001/ready`
+(kesiapan DB/Redis — 503 bila belum siap), dan `curl localhost:3001/version`.
 
 ## Gerbang mutu
 
 ```bash
 pnpm typecheck      # tsc seluruh paket
 pnpm check:drift    # registry kontrak ↔ rute v1 ↔ SDK ↔ MCP (dua arah)
+pnpm verify:ci      # drift + migrasi/RLS + verifikasi worker + observability API
 pnpm build          # bundel semua app
+pnpm smoke:api      # boot artefak dist API: /health, /version, /ready, 404, header
 pnpm --filter @sahabat-kreator/db verify   # migrasi + RLS di PGlite
 pnpm db:doctor      # audit DB NYATA: migrasi, RLS, hak role aplikasi
 ```
+
+CI (`.github/workflows/ci.yml`) menjalankan urutan yang sama di Node 22,
+lalu mengulang smoke artefak di Bun. Verifikasi yang membutuhkan staging
+hidup dan kunci uji (SDK/MCP/CLI) dipisah ke workflow manual
+`.github/workflows/live-verify.yml` agar PR tidak bergantung layanan
+eksternal.
+
+Log API berbentuk JSON lines; `LOG_LEVEL` (`debug|info|warn|error`)
+mengatur ambangnya. Setiap respons membawa `x-request-id` (nilai klien
+dipertahankan bila wajar) dan baris access log memakai id yang sama.
 
 ### Database: reset, grant, audit
 
