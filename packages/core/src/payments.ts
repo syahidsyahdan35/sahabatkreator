@@ -771,6 +771,12 @@ async function applyWebhookTransition(
       };
     }
     const now = new Date();
+    // Klaim transisi secara ATOMIK: syarat `status = 'pending'` ikut di
+    // WHERE, bukan hanya di percabangan di atas. Tanpa ini dua webhook
+    // provider yang tiba bersamaan (mis. settlement lalu retry) sama-sama
+    // lolos pembacaan `current.status === 'pending'` dan sama-sama
+    // menerapkan transisi — dua baris audit dan dua kali sinkronisasi
+    // order. Dengan syarat ini hanya satu yang mendapat baris kembali.
     const [updated] = await tx
       .update(paymentLinks)
       .set({
@@ -778,9 +784,29 @@ async function applyWebhookTransition(
         paidAt: target === "paid" ? (current.paidAt ?? now) : current.paidAt,
         updatedAt: now,
       })
-      .where(eq(paymentLinks.id, current.id))
+      .where(
+        and(
+          eq(paymentLinks.id, current.id),
+          eq(paymentLinks.status, "pending"),
+        ),
+      )
       .returning();
-    const finalLink = updated ?? current;
+    if (!updated) {
+      // Kalah balapan: proses lain sudah mentransisikan tautan ini.
+      // Laporkan duplicate dengan status terbaru, tanpa audit/hook kedua.
+      const [latest] = await tx
+        .select({ status: paymentLinks.status })
+        .from(paymentLinks)
+        .where(eq(paymentLinks.id, current.id))
+        .limit(1);
+      return {
+        outcome: "duplicate" as const,
+        tenantId: link.tenantId,
+        code: link.code,
+        linkStatus: latest?.status ?? current.status,
+      };
+    }
+    const finalLink = updated;
     await syncOrderStatusFromLink(tx, finalLink);
     await tx.insert(auditLogs).values({
       tenantId: link.tenantId,

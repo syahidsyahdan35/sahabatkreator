@@ -914,6 +914,11 @@ export async function cancelBooking(
     if (booking.status === "cancelled") return booking;
     const needsGoogleDelete =
       booking.googleEventId !== null || booking.googleSyncStatus === "pending";
+    // Klaim atomik: `status = 'confirmed'` di WHERE membuat hanya SATU
+    // pembatalan yang menang. Tanpa penjaga ini dua permintaan
+    // bersamaan (klik ganda di dashboard, atau cancel dari flow +
+    // dashboard) sama-sama lolos pemeriksaan di atas dan menulis dua
+    // baris audit + dua event outbox delete untuk booking yang sama.
     const [updated] = await tx
       .update(bookings)
       .set({
@@ -921,8 +926,26 @@ export async function cancelBooking(
         cancelledAt: new Date(),
         ...(needsGoogleDelete ? { googleSyncStatus: "pending" as const } : {}),
       })
-      .where(eq(bookings.id, bookingId))
+      .where(
+        and(
+          eq(bookings.tenantId, tenantId),
+          eq(bookings.id, bookingId),
+          eq(bookings.status, "confirmed"),
+        ),
+      )
       .returning();
+    if (!updated) {
+      // Kalah balapan: pembatalan lain sudah menulis. Kembalikan
+      // keadaan terbaru tanpa event/audit tambahan (idempoten).
+      const [latest] = await tx
+        .select()
+        .from(bookings)
+        .where(
+          and(eq(bookings.tenantId, tenantId), eq(bookings.id, bookingId)),
+        )
+        .limit(1);
+      return latest ?? booking;
+    }
     if (needsGoogleDelete) {
       await tx.insert(outboxEvents).values({
         tenantId,

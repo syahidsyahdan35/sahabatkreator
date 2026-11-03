@@ -334,6 +334,18 @@ export async function checkoutCartTx(
     );
   }
   const now = new Date();
+  // Klaim keranjang secara ATOMIK sebelum melahirkan order: hanya
+  // transisi open → checked_out yang boleh melanjutkan. Tanpa syarat
+  // `status = 'open'` di WHERE, dua checkout yang berjalan hampir
+  // bersamaan (kontak menekan "checkout" dua kali, atau node flow
+  // cart_checkout dieksekusi ulang) sama-sama melihat keranjang terbuka
+  // dan melahirkan DUA order + dua tautan bayar untuk satu keranjang.
+  const [claimedCart] = await tx
+    .update(carts)
+    .set({ status: "checked_out", updatedAt: now })
+    .where(and(eq(carts.id, view.cartId), eq(carts.status, "open")))
+    .returning({ id: carts.id });
+  if (!claimedCart) return { kind: "empty_cart" };
   const [order] = await tx
     .insert(orders)
     .values({
@@ -383,10 +395,6 @@ export async function checkoutCartTx(
     .set({ paymentLinkId: link.id, updatedAt: now })
     .where(eq(orders.id, order.id))
     .returning();
-  await tx
-    .update(carts)
-    .set({ status: "checked_out", updatedAt: now })
-    .where(eq(carts.id, view.cartId));
   await tx.insert(auditLogs).values({
     tenantId,
     actorType: input.actor.actorType,
