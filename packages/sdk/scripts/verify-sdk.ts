@@ -244,6 +244,41 @@ if (orderFirstId) {
   );
 }
 
+// Fase 13G: janji temu — daftar booking + daftar layanan (pola
+// toleran yang sama; kunci tanpa appointments:read menerima
+// penolakan bertipe). Booking lahir dari flow/dashboard, jadi
+// daftar bisa kosong di tenant uji.
+try {
+  const list = await client.listAppointments();
+  check(
+    "listAppointments() berhasil",
+    Array.isArray(list.bookings),
+    `count=${list.bookings.length}`,
+  );
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listAppointments() (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+try {
+  const list = await client.listAppointmentServices();
+  check(
+    "listAppointmentServices() berhasil",
+    Array.isArray(list.services),
+    `count=${list.services.length}`,
+  );
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listAppointmentServices() (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

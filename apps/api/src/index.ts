@@ -43,6 +43,7 @@ import { createFlowsRoutes } from "./modules/flows/routes";
 import { createSavedRepliesRoutes } from "./modules/saved-replies/routes";
 import { createGrowthRoutes } from "./modules/growth/routes";
 import { createSegmentsRoutes } from "./modules/segments/routes";
+import { createAppointmentsRoutes } from "./modules/appointments/routes";
 import { createNotesRoutes } from "./modules/notes/routes";
 import { createTeamRoutes } from "./modules/team/routes";
 import { createAnalyticsRoutes } from "./modules/analytics/routes";
@@ -129,6 +130,11 @@ const platformOptions: PlatformSettingsOptions = {
     resend_api_key: env.RESEND_API_KEY,
     resend_from_email: env.RESEND_FROM_EMAIL,
     resend_from_name: env.RESEND_FROM_NAME,
+    // Fase 13G: klien OAuth Google untuk sinkronisasi Calendar —
+    // env hanya fallback; sumber utama Panel Admin (client_id publik
+    // + client_secret rahasia).
+    google_oauth_client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+    google_oauth_client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
   },
 };
 
@@ -189,6 +195,24 @@ routes.route("/", createGrowthRoutes(authBundle));
 // Modul segments (Fase 13C) — segmen audiens /tenants/:tenantId/segments
 // (CRUD dashboard + pratinjau hitungan; evaluator tunggal di core).
 routes.route("/", createSegmentsRoutes(authBundle));
+// Modul appointments (Fase 13G) — janji temu /tenants/:tenantId/appointments
+// (layanan, ketersediaan, booking, pratinjau slot) + koneksi Google
+// Calendar tenant (OAuth platform dari Panel Admin; callback publik
+// /google/oauth/callback). Base URL Google dioverride env untuk mock.
+routes.route(
+  "/",
+  createAppointmentsRoutes(authBundle, {
+    platform: platformOptions,
+    tokenSecret: env.CHANNEL_TOKEN_SECRET,
+    googleBases: {
+      apiBase: env.GOOGLE_API_BASE,
+      tokenBase: env.GOOGLE_TOKEN_BASE,
+      authBase: env.GOOGLE_AUTH_BASE,
+    },
+    publicBaseUrl: env.BETTER_AUTH_URL,
+    stateSecret: env.BETTER_AUTH_SECRET,
+  }),
+);
 // Modul notes (Fase 9C) — catatan internal /tenants/:tenantId/conversations/:id/notes.
 routes.route("/", createNotesRoutes(authBundle));
 // Modul team (Fase 9C) — member & undangan /tenants/:tenantId/team/*
@@ -333,6 +357,8 @@ routes.route(
     metaOAuthRedirectUri: `${(env.BETTER_AUTH_URL ?? "").replace(/\/+$/, "")}/api/meta/oauth/callback`,
     // Fase 11B: base URL API Resend untuk probe uji koneksi panel.
     resendApiBase: env.RESEND_API_BASE,
+    // Fase 13G: redirect URI OAuth Google ditampilkan read-only di panel.
+    googleOAuthRedirectUri: `${(env.BETTER_AUTH_URL ?? "").replace(/\/+$/, "")}/api/google/oauth/callback`,
   }),
 );
 // Modul Meta OAuth Connect (Fase 7D) — "Lanjutkan dengan Facebook":

@@ -8,6 +8,7 @@ import {
 } from "@sahabat-kreator/ai";
 import { MetaGraphClient } from "@sahabat-kreator/channel-messenger";
 import {
+  APPOINTMENT_GOOGLE_SYNC_OUTBOX_TYPE,
   INTEGRATION_LOG_RETENTION_DAYS,
   INVITATION_EMAIL_OUTBOX_TYPE,
   deliverInvitationEmail,
@@ -24,7 +25,9 @@ import {
   resolveEmbeddingProvider,
   resolveOpenRouterConfig,
   respondToInboundMessage,
+  syncBookingToGoogle,
   type CommentGraphActions,
+  type GoogleDeps,
   type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import {
@@ -37,6 +40,7 @@ import {
   MAIN_QUEUE_NAME,
   SEQUENCE_STEP_JOB,
   TEAM_INVITATION_EMAIL_JOB,
+  APPOINTMENT_GOOGLE_SYNC_JOB,
   createAutomationQueue,
   createRealtimePublisher,
   createRedisConnection,
@@ -45,6 +49,7 @@ import {
   enqueueBroadcastDispatch,
   enqueueCommentEvaluate,
   enqueueFlowStep,
+  enqueueAppointmentGoogleSync,
   enqueueInvitationEmail,
   enqueueKbEmbed,
   enqueueSequenceStep,
@@ -53,6 +58,7 @@ import {
   type BroadcastDispatchJobData,
   type CommentEvaluateJobData,
   type FlowStepJobData,
+  type AppointmentGoogleSyncJobData,
   type InvitationEmailJobData,
   type KbEmbedJobData,
   type MainJobData,
@@ -131,6 +137,11 @@ import {
  *    undangan (email_sent_at / email_error). Kegagalan provider
  *    DILEMPAR agar BullMQ retry (attempts 3) — undangan sendiri tetap
  *    sah lewat tautan salin apa pun hasil emailnya.
+ * 9. SINKRON GOOGLE CALENDAR (Fase 13G): relay menerjemahkan event
+ *    outbox `appointment.google_sync_requested` (ditulis transaksi
+ *    booking buat/batal pada tenant terhubung Google) menjadi job
+ *    `appointment.google_sync`; processor-nya menjalankan sinkron di
+ *    core — booking tidak pernah menunggu atau gagal karena Google.
  *
  * Worker TIDAK mengirim pesan ke pengunjung: sejak Fase 6G socket
  * pengunjung & dashboard milik apps/realtime. Balasan automation/agent/
@@ -184,6 +195,28 @@ const platformSettingsOptions: PlatformSettingsOptions = {
     resend_api_key: env.RESEND_API_KEY,
     resend_from_email: env.RESEND_FROM_EMAIL,
     resend_from_name: env.RESEND_FROM_NAME,
+    // Fase 13G: fallback env klien OAuth Google (sumber utama Panel
+    // Admin) agar job sinkron Calendar + node book_appointment
+    // me-resolve klien yang sama seperti API.
+    google_oauth_client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+    google_oauth_client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+  },
+};
+
+/**
+ * Dependensi Google Calendar (Fase 13G) untuk node book_appointment
+ * (freebusy mesin slot) + job sinkron event. Base URL dioverride env
+ * untuk mock rantai — pola RESEND_API_BASE. Tanpa klien platform,
+ * core menjawab fail-soft (slot internal tetap jalan; sinkron
+ * tercatat not_connected) — worker tidak perlu bercabang.
+ */
+const googleDeps: GoogleDeps = {
+  platform: platformSettingsOptions,
+  tokenSecret: env.CHANNEL_TOKEN_SECRET,
+  bases: {
+    apiBase: env.GOOGLE_API_BASE,
+    tokenBase: env.GOOGLE_TOKEN_BASE,
+    authBase: env.GOOGLE_AUTH_BASE,
   },
 };
 
@@ -263,11 +296,15 @@ const bullWorker = new Worker<MainJobData>(
   async (job) => {
     if (job.name === AUTOMATION_EVALUATE_JOB) {
       const data = job.data as AutomationEvaluateJobData;
-      const result = await evaluateInboundMessageForAutomations(db, {
-        tenantId: data.tenantId,
-        conversationId: data.conversationId,
-        messageId: data.messageId,
-      });
+      const result = await evaluateInboundMessageForAutomations(
+        db,
+        {
+          tenantId: data.tenantId,
+          conversationId: data.conversationId,
+          messageId: data.messageId,
+        },
+        { googleDeps },
+      );
       if (
         result.fired.length > 0 ||
         result.skippedDuplicates > 0 ||
@@ -314,6 +351,10 @@ const bullWorker = new Worker<MainJobData>(
         // tertangani flow — agent tidak ikut menjawab sesi belanja
         // yang sedang berjalan.
         result.flowCatalogResumed === 0 &&
+        // Fase 13G: pesan yang menjadi pilihan slot book_appointment
+        // parkir juga tertangani flow — agent tidak ikut menjawab
+        // sesi pemesanan yang sedang berjalan.
+        result.flowAppointmentResumed === 0 &&
         // Fase 13C: pesan consent (kata opt-in/opt-out persis) adalah
         // perintah persetujuan yang tertangani sistem — tidak pernah
         // diteruskan ke agent sebagai pertanyaan biasa.
@@ -402,6 +443,7 @@ const bullWorker = new Worker<MainJobData>(
           resolveLlmProvider: resolveAgentLlmProvider,
           resolveEmbeddingProvider: resolveWorkerEmbeddingProvider,
           publicBaseUrl: env.BETTER_AUTH_URL,
+          google: googleDeps,
         },
       );
       // Pesan `queued` yang dibuat langkah ini → nudge pengiriman.
@@ -516,6 +558,27 @@ const bullWorker = new Worker<MainJobData>(
       }
       console.log(
         `[worker] team.invitation_email invitation=${data.invitationId} hasil=${result.kind}` +
+          (result.kind === "skipped" ? ` reason=${result.reason}` : ""),
+      );
+      return result;
+    }
+    if (job.name === APPOINTMENT_GOOGLE_SYNC_JOB) {
+      // Fase 13G: sinkronkan SATU booking ke Google Calendar. Seluruh
+      // keputusan ada di core (keadaan booking terkini dibaca ulang;
+      // hasil tercatat di baris booking). Kegagalan provider TIDAK
+      // dilempar: booking tidak pernah bergantung pada Google, dan
+      // jejak `failed` + google_sync_error di booking adalah permukaan
+      // kegagalannya — melempar hanya akan mengulang panggilan yang
+      // hasil akhirnya sama-sama tercatat di sana.
+      const data = job.data as AppointmentGoogleSyncJobData;
+      const result = await syncBookingToGoogle(db, googleDeps, {
+        tenantId: data.tenantId,
+        bookingId: data.bookingId,
+        action: data.action,
+      });
+      console.log(
+        `[worker] appointment.google_sync booking=${data.bookingId} action=${data.action} hasil=${result.kind}` +
+          (result.kind === "failed" ? ` error=${result.error}` : "") +
           (result.kind === "skipped" ? ` reason=${result.reason}` : ""),
       );
       return result;
@@ -740,6 +803,32 @@ async function relayTick(): Promise<void> {
           tenantId: event.tenantId,
           invitationId: payload.invitationId,
           tokenEnc: payload.tokenEnc,
+          outboxEventId: event.id,
+        });
+        return;
+      }
+      // Fase 13G: booking dibuat/dibatalkan pada tenant yang terhubung
+      // Google → job `appointment.google_sync` (jobId deterministik
+      // dari id event). Event hanya ditulis core bila koneksi Google
+      // ada saat booking berubah; job membaca keadaan terkini.
+      if (event.type === APPOINTMENT_GOOGLE_SYNC_OUTBOX_TYPE) {
+        const payload = event.payload as {
+          bookingId?: unknown;
+          action?: unknown;
+        };
+        if (
+          typeof payload.bookingId !== "string" ||
+          (payload.action !== "create" && payload.action !== "delete")
+        ) {
+          console.warn(
+            `[worker] event ${APPOINTMENT_GOOGLE_SYNC_OUTBOX_TYPE} ${event.id} payload tidak lengkap — ditandai published tanpa job`,
+          );
+          return;
+        }
+        await enqueueAppointmentGoogleSync(queue, {
+          tenantId: event.tenantId,
+          bookingId: payload.bookingId,
+          action: payload.action,
           outboxEventId: event.id,
         });
         return;

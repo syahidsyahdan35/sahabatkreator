@@ -45,6 +45,12 @@ export interface AdminRoutesOptions {
    * mock rantai. Pengiriman sungguhan di-resolve worker dari env-nya.
    */
   resendApiBase?: string;
+  /**
+   * Redirect URI OAuth Google (Fase 13G) — callback yang ditampilkan
+   * read-only di grup Google panel agar pemilik mendaftarkannya persis
+   * di Google Cloud Console. Dihitung dari BETTER_AUTH_URL oleh pemanggil.
+   */
+  googleOAuthRedirectUri?: string;
 }
 
 function serializeStatus(s: CorePlatformSettingStatus): PlatformSettingStatus {
@@ -74,6 +80,11 @@ const KEY_MAX_LENGTH: Record<PlatformSettingKey, number> = {
   resend_api_key: 512,
   resend_from_email: 320,
   resend_from_name: 128,
+  // Fase 13G: klien OAuth Google — client ID identifier publik
+  // (ditampilkan panel), client secret rahasia. Panjang mengikuti
+  // format Google (client ID ±72 char, secret ±40 char) + ruang aman.
+  google_oauth_client_id: 256,
+  google_oauth_client_secret: 512,
 };
 
 /**
@@ -83,6 +94,11 @@ const KEY_MAX_LENGTH: Record<PlatformSettingKey, number> = {
  * (debug_token butuh access token), jadi tombol uji di sini hanya akan
  * jadi uji palsu. Kebenaran nilainya terbukti dari tanda tangan webhook
  * yang lolos/gagal — persis seperti pemakaiannya.
+ * `google_oauth_client_secret` SENGAJA tidak diuji (Fase 13G) dengan
+ * alasan yang sama: token endpoint Google hanya memvalidasi pasangan
+ * klien saat ada authorization code / refresh token yang ditukar —
+ * tidak ada panggilan validasi klien yang berdiri sendiri. Kebenarannya
+ * terbukti dari dialog Hubungkan Google tenant yang berhasil/gagal.
  */
 const TESTABLE_KEYS: ReadonlySet<PlatformSettingKey> = new Set([
   "openrouter_api_key",
@@ -174,6 +190,12 @@ export function createAdminRoutes(
       email: {
         fromEmail: publicConfig.resend_from_email,
         fromName: publicConfig.resend_from_name,
+      },
+      // Fase 13G: Client ID OAuth Google efektif (publik) + redirect
+      // URI yang harus didaftarkan persis di Google Cloud Console.
+      google: {
+        clientId: publicConfig.google_oauth_client_id,
+        oauthRedirectUri: options.googleOAuthRedirectUri ?? "",
       },
     });
     return c.json(body);

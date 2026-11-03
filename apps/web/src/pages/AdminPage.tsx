@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   IntegrationLogResponse,
   PlatformEmailInfo,
+  PlatformGoogleInfo,
   PlatformMetaInfo,
   PlatformSettingKey,
   PlatformSettingStatus,
@@ -85,6 +86,8 @@ const KEY_LABELS: Record<PlatformSettingKey, TranslationKey> = {
   resend_api_key: "admin.resendApiKeyLabel",
   resend_from_email: "admin.resendFromEmailLabel",
   resend_from_name: "admin.resendFromNameLabel",
+  google_oauth_client_id: "admin.googleOauthClientIdLabel",
+  google_oauth_client_secret: "admin.googleOauthClientSecretLabel",
 };
 
 /**
@@ -103,6 +106,9 @@ export function AdminPage({ t, locale }: AdminPageProps) {
   const [r2Info, setR2Info] = useState<PlatformR2Info | null>(null);
   const [metaInfo, setMetaInfo] = useState<PlatformMetaInfo | null>(null);
   const [emailInfo, setEmailInfo] = useState<PlatformEmailInfo | null>(null);
+  const [googleInfo, setGoogleInfo] = useState<PlatformGoogleInfo | null>(
+    null,
+  );
   const [redirectCopied, setRedirectCopied] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +125,7 @@ export function AdminPage({ t, locale }: AdminPageProps) {
       setR2Info(body.r2);
       setMetaInfo(body.meta);
       setEmailInfo(body.email);
+      setGoogleInfo(body.google);
     } catch (err) {
       if (requestSeq.current !== seq) return;
       setError(translateApiError(t, err));
@@ -421,6 +428,58 @@ export function AdminPage({ t, locale }: AdminPageProps) {
               onStatusChanged(next);
               void load();
             }}
+          />
+        </div>
+      </section>
+
+      {/*
+        Fase 13G — klien OAuth Google milik platform untuk sinkron
+        Google Calendar janji temu. Client ID publik (baris teks +
+        nilai efektif ditampilkan); client secret rahasia (baris
+        password, SENGAJA tanpa tombol Uji — pola Meta app secret).
+      */}
+      <section className="mt-8">
+        <h2 className="text-base font-semibold text-ink">
+          {t("admin.googleTitle")}
+        </h2>
+        <p className="mt-1 max-w-2xl text-sm text-muted">
+          {t("admin.googleBody")}
+        </p>
+        {googleInfo ? (
+          <dl className="mt-3 grid max-w-2xl grid-cols-1 gap-2 text-sm">
+            <div className="rounded-xl bg-surface p-3">
+              <dt className="text-xs text-muted">
+                {t("admin.googleOauthClientIdLabel")}
+              </dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-ink">
+                {googleInfo.clientId ?? "—"}
+              </dd>
+            </div>
+            <CopyableUrlRow
+              t={t}
+              label={t("admin.googleOauthRedirectLabel")}
+              url={googleInfo.oauthRedirectUri}
+            />
+          </dl>
+        ) : null}
+        <div className="mt-4 space-y-3">
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="google_oauth_client_id"
+            status={byKey("google_oauth_client_id")}
+            secret={false}
+            onStatusChanged={(next) => {
+              onStatusChanged(next);
+              void load();
+            }}
+          />
+          <SettingRow
+            t={t}
+            locale={locale}
+            settingKey="google_oauth_client_secret"
+            status={byKey("google_oauth_client_secret")}
+            onStatusChanged={onStatusChanged}
           />
         </div>
       </section>

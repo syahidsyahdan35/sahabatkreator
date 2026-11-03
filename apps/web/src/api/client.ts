@@ -101,6 +101,22 @@ import type {
   PaymentLinkResponse,
   OrderListResponse,
   OrderResponse,
+  AppointmentAvailabilityResponse,
+  AppointmentServiceListResponse,
+  AppointmentServiceResponse,
+  AppointmentSettingsResponse,
+  AppointmentSlotListResponse,
+  BookingListResponse,
+  BookingResponse,
+  CreateAppointmentServiceRequest,
+  CreateBookingRequest,
+  GoogleCalendarConnectionResponse,
+  GoogleCalendarListResponse,
+  GoogleConnectStartResponse,
+  UpdateAppointmentAvailabilityRequest,
+  UpdateAppointmentServiceRequest,
+  UpdateAppointmentSettingsRequest,
+  UpdateGoogleCalendarRequest,
   PlatformSettingKey,
   PlatformSettingsResponse,
   PlatformSettingStatus,
@@ -979,6 +995,167 @@ export const api = {
         `/api/tenants/${tenantId}/orders/${orderId}`,
         { method: "GET" },
       );
+    },
+  },
+
+  appointments: {
+    /** GET .../appointments/settings → timezone + lead time (Fase 13G). */
+    getSettings(tenantId: string): Promise<AppointmentSettingsResponse> {
+      return request<AppointmentSettingsResponse>(
+        `/api/tenants/${tenantId}/appointments/settings`,
+        { method: "GET" },
+      );
+    },
+    /** PUT .../appointments/settings (owner/admin). */
+    updateSettings(
+      tenantId: string,
+      body: UpdateAppointmentSettingsRequest,
+    ): Promise<AppointmentSettingsResponse> {
+      return request<AppointmentSettingsResponse>(
+        `/api/tenants/${tenantId}/appointments/settings`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    },
+    /** GET .../appointments/services → semua layanan (aktif + nonaktif). */
+    async listServices(
+      tenantId: string,
+    ): Promise<AppointmentServiceResponse[]> {
+      const body = await request<AppointmentServiceListResponse>(
+        `/api/tenants/${tenantId}/appointments/services`,
+        { method: "GET" },
+      );
+      return body.services;
+    },
+    /** POST .../appointments/services → 201 (owner/admin). */
+    createService(
+      tenantId: string,
+      body: CreateAppointmentServiceRequest,
+    ): Promise<AppointmentServiceResponse> {
+      return request<AppointmentServiceResponse>(
+        `/api/tenants/${tenantId}/appointments/services`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+    },
+    /** PATCH .../appointments/services/:id (owner/admin). */
+    updateService(
+      tenantId: string,
+      serviceId: string,
+      body: UpdateAppointmentServiceRequest,
+    ): Promise<AppointmentServiceResponse> {
+      return request<AppointmentServiceResponse>(
+        `/api/tenants/${tenantId}/appointments/services/${serviceId}`,
+        { method: "PATCH", body: JSON.stringify(body) },
+      );
+    },
+    /** DELETE .../appointments/services/:id (owner/admin). */
+    deleteService(tenantId: string, serviceId: string): Promise<void> {
+      return request<void>(
+        `/api/tenants/${tenantId}/appointments/services/${serviceId}`,
+        { method: "DELETE" },
+      );
+    },
+    /** GET .../appointments/availability → jendela mingguan. */
+    getAvailability(tenantId: string): Promise<AppointmentAvailabilityResponse> {
+      return request<AppointmentAvailabilityResponse>(
+        `/api/tenants/${tenantId}/appointments/availability`,
+        { method: "GET" },
+      );
+    },
+    /** PUT .../appointments/availability — ganti seluruh jendela (owner/admin). */
+    replaceAvailability(
+      tenantId: string,
+      body: UpdateAppointmentAvailabilityRequest,
+    ): Promise<AppointmentAvailabilityResponse> {
+      return request<AppointmentAvailabilityResponse>(
+        `/api/tenants/${tenantId}/appointments/availability`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    },
+    /** GET .../appointments/slots?serviceId=&from=&to= → pratinjau slot bebas. */
+    async listSlots(
+      tenantId: string,
+      serviceId: string,
+      from: string,
+      to: string,
+    ): Promise<AppointmentSlotListResponse> {
+      const q = new URLSearchParams({ serviceId, from, to });
+      return request<AppointmentSlotListResponse>(
+        `/api/tenants/${tenantId}/appointments/slots?${q.toString()}`,
+        { method: "GET" },
+      );
+    },
+    /** GET .../appointments/bookings?from=&to=&status= → daftar booking. */
+    async listBookings(
+      tenantId: string,
+      opts?: { from?: string; to?: string; status?: string },
+    ): Promise<BookingResponse[]> {
+      const q = new URLSearchParams();
+      if (opts?.from) q.set("from", opts.from);
+      if (opts?.to) q.set("to", opts.to);
+      if (opts?.status) q.set("status", opts.status);
+      const qs = q.toString();
+      const body = await request<BookingListResponse>(
+        `/api/tenants/${tenantId}/appointments/bookings${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+      return body.bookings;
+    },
+    /** POST .../appointments/bookings → booking manual dashboard. */
+    createBooking(
+      tenantId: string,
+      body: CreateBookingRequest,
+    ): Promise<BookingResponse> {
+      return request<BookingResponse>(
+        `/api/tenants/${tenantId}/appointments/bookings`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+    },
+    /** POST .../appointments/bookings/:id/cancel → batalkan (idempoten). */
+    cancelBooking(
+      tenantId: string,
+      bookingId: string,
+    ): Promise<BookingResponse> {
+      return request<BookingResponse>(
+        `/api/tenants/${tenantId}/appointments/bookings/${bookingId}/cancel`,
+        { method: "POST" },
+      );
+    },
+    /** GET .../appointments/google → status koneksi tenant. */
+    googleStatus(tenantId: string): Promise<GoogleCalendarConnectionResponse> {
+      return request<GoogleCalendarConnectionResponse>(
+        `/api/tenants/${tenantId}/appointments/google`,
+        { method: "GET" },
+      );
+    },
+    /** POST .../appointments/google/connect → { url } (owner/admin). */
+    googleConnect(tenantId: string): Promise<GoogleConnectStartResponse> {
+      return request<GoogleConnectStartResponse>(
+        `/api/tenants/${tenantId}/appointments/google/connect`,
+        { method: "POST" },
+      );
+    },
+    /** GET .../appointments/google/calendars → kalender akun (owner/admin). */
+    googleCalendars(tenantId: string): Promise<GoogleCalendarListResponse> {
+      return request<GoogleCalendarListResponse>(
+        `/api/tenants/${tenantId}/appointments/google/calendars`,
+        { method: "GET" },
+      );
+    },
+    /** PUT .../appointments/google/calendar → pilih kalender tujuan (owner/admin). */
+    googleSetCalendar(
+      tenantId: string,
+      body: UpdateGoogleCalendarRequest,
+    ): Promise<GoogleCalendarConnectionResponse> {
+      return request<GoogleCalendarConnectionResponse>(
+        `/api/tenants/${tenantId}/appointments/google/calendar`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    },
+    /** DELETE .../appointments/google → putuskan koneksi (owner/admin). */
+    googleDisconnect(tenantId: string): Promise<void> {
+      return request<void>(`/api/tenants/${tenantId}/appointments/google`, {
+        method: "DELETE",
+      });
     },
   },
   apiKeys: {

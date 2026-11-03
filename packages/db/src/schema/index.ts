@@ -21,3 +21,4 @@ export * from "./flows";
 export * from "./saved-replies";
 export * from "./growth";
 export * from "./segments";
+export * from "./appointments";

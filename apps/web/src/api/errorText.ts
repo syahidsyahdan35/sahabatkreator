@@ -45,6 +45,16 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.NOT_FOUND");
     case "RATE_LIMITED":
       return t("errors.RATE_LIMITED");
+    case "APPOINTMENT_TIMEZONE_INVALID":
+      return t("errors.APPOINTMENT_TIMEZONE_INVALID");
+    case "SLOT_TAKEN":
+      return t("errors.SLOT_TAKEN");
+    case "GOOGLE_NOT_CONFIGURED":
+      return t("errors.GOOGLE_NOT_CONFIGURED");
+    case "GOOGLE_NOT_CONNECTED":
+      return t("errors.GOOGLE_NOT_CONNECTED");
+    case "GOOGLE_UNREACHABLE":
+      return t("errors.GOOGLE_UNREACHABLE");
     case "CHANNEL_NOT_AVAILABLE_YET":
       return t("errors.CHANNEL_NOT_AVAILABLE_YET");
     case "CHANNEL_NOT_CONNECTED":

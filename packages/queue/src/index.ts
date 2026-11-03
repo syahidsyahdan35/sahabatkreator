@@ -53,6 +53,7 @@ export const FLOW_STEP_JOB = "flow.step";
 export const COMMENT_EVALUATE_JOB = "comment.evaluate";
 export const KB_EMBED_JOB = "kb.embed";
 export const TEAM_INVITATION_EMAIL_JOB = "team.invitation_email";
+export const APPOINTMENT_GOOGLE_SYNC_JOB = "appointment.google_sync";
 
 export interface AutomationEvaluateJobData {
   tenantId: string;
@@ -172,6 +173,23 @@ export interface InvitationEmailJobData {
   outboxEventId: string;
 }
 
+/**
+ * Job Fase 13G: sinkronkan SATU booking ke Google Calendar (buat /
+ * hapus event). Di-enqueue oleh relay outbox dari event
+ * `appointment.google_sync_requested` (ditulis transaksi booking
+ * hanya bila tenant terhubung Google). Booking TIDAK PERNAH menunggu
+ * job ini — hasil sinkron tercatat di baris booking
+ * (google_sync_status/error) oleh core; jobId deterministik dari id
+ * event outbox dan core membaca keadaan booking terkini sebelum
+ * bertindak, jadi eksekusi ulang/urutan bertukar aman.
+ */
+export interface AppointmentGoogleSyncJobData {
+  tenantId: string;
+  bookingId: string;
+  action: "create" | "delete";
+  outboxEventId: string;
+}
+
 /** jobId deterministik dari id event outbox — fondasi idempotensi relay. */
 export function automationEvaluateJobId(outboxEventId: string): string {
   return `automation-evaluate-${outboxEventId}`;
@@ -215,6 +233,11 @@ export function invitationEmailJobId(outboxEventId: string): string {
   return `invitation-email-${outboxEventId}`;
 }
 
+/** jobId deterministik sinkron Google janji dari id event outbox. */
+export function appointmentGoogleSyncJobId(outboxEventId: string): string {
+  return `appointment-google-sync-${outboxEventId}`;
+}
+
 /**
  * Koneksi Redis untuk BullMQ. `maxRetriesPerRequest: null` adalah syarat
  * BullMQ untuk koneksi blocking (Worker). Buat SATU instance per peran
@@ -233,7 +256,8 @@ export type MainJobData =
   | FlowStepJobData
   | CommentEvaluateJobData
   | KbEmbedJobData
-  | InvitationEmailJobData;
+  | InvitationEmailJobData
+  | AppointmentGoogleSyncJobData;
 
 export type MainQueue = Queue<MainJobData>;
 
@@ -432,6 +456,31 @@ export async function enqueueInvitationEmail(
     ...options,
   });
   return job.id ?? invitationEmailJobId(data.outboxEventId);
+}
+
+/**
+ * Meng-enqueue sinkron Google Calendar untuk satu booking dari event
+ * `appointment.google_sync_requested`. Aman dipanggil berulang: jobId
+ * diturunkan dari id event outbox. attempts 3 + backoff eksponensial
+ * untuk kegagalan provider sesaat; hasil akhir (termasuk kegagalan
+ * permanen) tercatat core di baris booking — job tidak melempar untuk
+ * kegagalan provider, jadi antrean tidak macet oleh satu tenant yang
+ * grant-nya dicabut.
+ */
+export async function enqueueAppointmentGoogleSync(
+  queue: MainQueue,
+  data: AppointmentGoogleSyncJobData,
+  options?: JobsOptions,
+): Promise<string> {
+  const job = await queue.add(APPOINTMENT_GOOGLE_SYNC_JOB, data, {
+    jobId: appointmentGoogleSyncJobId(data.outboxEventId),
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1_000 },
+    removeOnComplete: 1_000,
+    removeOnFail: 1_000,
+    ...options,
+  });
+  return job.id ?? appointmentGoogleSyncJobId(data.outboxEventId);
 }
 
 export {

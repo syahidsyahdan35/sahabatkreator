@@ -580,6 +580,33 @@ server.registerTool(
   async ({ orderId }) => run(() => client.getOrder(orderId)),
 );
 
+server.registerTool(
+  "list_appointments",
+  {
+    description:
+      "Daftar booking janji temu workspace (scope appointments:read, Fase 13G): layanan, kontak, rentang waktu UTC, status confirmed/cancelled, sumber (flow/dashboard), dan keadaan sinkron Google Calendar. Saring opsional from/to (ISO datetime) + status. Booking dibuat lewat node flow book_appointment atau dashboard — tidak ada tool tulis janji (kurasi operator & percakapan). Hasil: { bookings }.",
+    inputSchema: {
+      from: z.string().datetime().optional().describe("Hanya booking mulai ≥ waktu ini (ISO)"),
+      to: z.string().datetime().optional().describe("Hanya booking mulai < waktu ini (ISO)"),
+      status: z.enum(["confirmed", "cancelled"]).optional().describe("Saring status booking"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ from, to, status }) =>
+    run(() => client.listAppointments({ from, to, status })),
+);
+
+server.registerTool(
+  "list_appointment_services",
+  {
+    description:
+      "Daftar layanan janji temu workspace (scope appointments:read, Fase 13G): nama, durasi menit, flag aktif. Hasil: { services }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listAppointmentServices()),
+);
+
 await server.connect(new StdioServerTransport());
 console.error(
   `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl} — tier: ${

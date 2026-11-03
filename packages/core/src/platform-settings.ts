@@ -67,6 +67,14 @@ export const PLATFORM_SETTING_KEYS = [
   "resend_api_key",
   "resend_from_email",
   "resend_from_name",
+  // Fase 13G: klien OAuth Google milik platform untuk sinkronisasi
+  // Google Calendar tenant. client_id BUKAN rahasia (identifier publik
+  // di URL dialog OAuth — lihat PLATFORM_PUBLIC_CONFIG_KEYS);
+  // client_secret RAHASIA seperti kunci lain. Keduanya dibuat pemilik
+  // platform di Google Cloud Console; tanpa keduanya fitur Hubungkan
+  // Google menjawab GOOGLE_NOT_CONFIGURED secara jujur (pola Resend).
+  "google_oauth_client_id",
+  "google_oauth_client_secret",
 ] as const;
 
 /** Kunci platform yang nilainya identifier PUBLIK (Fase 7D, lihat atas). */
@@ -78,6 +86,10 @@ export const PLATFORM_PUBLIC_CONFIG_KEYS = [
   // email yang diterima orang — memang publik menurut sifatnya).
   "resend_from_email",
   "resend_from_name",
+  // Fase 13G: Client ID OAuth Google — identifier publik yang tampil
+  // di setiap URL dialog OAuth Google (sifatnya sama seperti Meta App
+  // ID). Client secret TIDAK ikut: rahasia penuh seperti kunci lain.
+  "google_oauth_client_id",
 ] as const;
 
 export type PlatformPublicConfigKey =
@@ -99,20 +111,28 @@ export async function getPlatformPublicConfig(
   db: Database,
   opts: PlatformSettingsOptions,
 ): Promise<PlatformPublicConfig> {
-  const [appId, igConfigId, waConfigId, resendFromEmail, resendFromName] =
-    await Promise.all([
-      getProviderSecret(db, "meta_app_id", opts),
-      getProviderSecret(db, "meta_ig_config_id", opts),
-      getProviderSecret(db, "meta_wa_config_id", opts),
-      getProviderSecret(db, "resend_from_email", opts),
-      getProviderSecret(db, "resend_from_name", opts),
-    ]);
+  const [
+    appId,
+    igConfigId,
+    waConfigId,
+    resendFromEmail,
+    resendFromName,
+    googleClientId,
+  ] = await Promise.all([
+    getProviderSecret(db, "meta_app_id", opts),
+    getProviderSecret(db, "meta_ig_config_id", opts),
+    getProviderSecret(db, "meta_wa_config_id", opts),
+    getProviderSecret(db, "resend_from_email", opts),
+    getProviderSecret(db, "resend_from_name", opts),
+    getProviderSecret(db, "google_oauth_client_id", opts),
+  ]);
   return {
     meta_app_id: appId,
     meta_ig_config_id: igConfigId,
     meta_wa_config_id: waConfigId,
     resend_from_email: resendFromEmail,
     resend_from_name: resendFromName,
+    google_oauth_client_id: googleClientId,
   };
 }
 

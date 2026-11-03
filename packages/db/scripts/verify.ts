@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrationsDir = path.join(here, "..", "migrations");
@@ -29,7 +30,10 @@ const PLAN_ID = "99999999-9999-4999-8999-999999999999";
 // Ekstensi `vector` (pgvector) didaftarkan eksplisit: baseline 0000 menjalankan
 // CREATE EXTENSION vector dan membuat kolom vector(1536) di kb_chunks.
 // Di staging ekstensi yang sama tersedia dari image pgvector/pgvector:pg16.
-const db = new PGlite({ extensions: { vector } });
+// Ekstensi `btree_gist` (Fase 13G) didaftarkan juga: migrasi 0006
+// menjalankan CREATE EXTENSION btree_gist untuk constraint eksklusi
+// anti-double-booking pada tabel bookings.
+const db = new PGlite({ extensions: { vector, btree_gist } });
 
 // ---------- 1. Terapkan migrasi dari nol ----------
 const files = (await readdir(migrationsDir))
@@ -67,7 +71,9 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 2 tabel Fase 13C (segments, tenant_opt_in_settings)
 // + 1 tabel Fase 13D (flow_experiment_assignments)
 // + 4 tabel Fase 13F (carts, cart_items, orders, order_items)
-assert.equal(Number(tablesRes.rows[0].count), 53);
+// + 5 tabel Fase 13G (appointment_services, appointment_settings,
+//   appointment_availability, bookings, google_calendar_connections)
+assert.equal(Number(tablesRes.rows[0].count), 58);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -168,7 +174,10 @@ const policies = await db.query<{ count: string }>(
 //   (Fase 13D, migrasi 0004) = 63.
 // + tenant_isolation pada carts, cart_items, orders, order_items
 //   (Fase 13F, migrasi 0005) = 67.
-assert.equal(Number(policies.rows[0].count), 67);
+// + tenant_isolation pada appointment_services, appointment_settings,
+//   appointment_availability, bookings, google_calendar_connections
+//   (Fase 13G, migrasi 0006) = 72.
+assert.equal(Number(policies.rows[0].count), 72);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -193,7 +202,9 @@ await db.exec(`
     growth_links, growth_link_events,
     segments, tenant_opt_in_settings,
     flow_experiment_assignments,
-    carts, cart_items, orders, order_items
+    carts, cart_items, orders, order_items,
+    appointment_services, appointment_settings, appointment_availability,
+    bookings, google_calendar_connections
   TO app_user;
 `);
 
@@ -2276,7 +2287,10 @@ function oneHotVector(index: number): string {
   // 2 policy tenant_isolation → 48 / 62; Fase 13D menambah 1 tabel
   // (flow_experiment_assignments) + 1 policy → 49 / 63; Fase 13F
   // menambah 4 tabel commerce (carts, cart_items, orders,
-  // order_items) + 4 policy tenant_isolation → 53 / 67.
+  // order_items) + 4 policy tenant_isolation → 53 / 67; Fase 13G
+  // menambah 5 tabel janji temu (appointment_services,
+  // appointment_settings, appointment_availability, bookings,
+  // google_calendar_connections) + 5 policy tenant_isolation → 58 / 72.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2284,8 +2298,8 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "53");
-  assert.equal(counts.rows[0].policies, "67");
+  assert.equal(counts.rows[0].tables, "58");
+  assert.equal(counts.rows[0].policies, "72");
   console.log(
     "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel & policy global sesuai hitungan berjalan: OK",
   );
@@ -2815,6 +2829,182 @@ function oneHotVector(index: number): string {
   assert.equal(views.crossBlocked, true);
   console.log(
     "[39] Fase 13F: payment_links dual-varian (CHECK tepat satu target); carts/cart_items/orders/order_items terisolasi tenant; satu keranjang terbuka per kontak (unik parsial): OK",
+  );
+}
+
+
+// ---------- 40. Fase 13G: janji temu + eksklusi anti-double-booking ----------
+{
+  // Seed mandiri: layanan + kontak untuk tenant A dan B.
+  const SVC_13G_A = "13a00000-0000-4000-8000-0000000000a1";
+  const SVC_13G_B = "13a00000-0000-4000-8000-0000000000b1";
+  const CONTACT_13G_A = "13a00000-0000-4000-8000-0000000000c1";
+  const CONTACT_13G_B = "13a00000-0000-4000-8000-0000000000c2";
+  await db.query(
+    `INSERT INTO appointment_services (id, tenant_id, name, duration_minutes)
+     VALUES ($1, $2, 'Konsultasi 13G', 30)`,
+    [SVC_13G_A, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO appointment_services (id, tenant_id, name, duration_minutes)
+     VALUES ($1, $2, 'Konsultasi 13G B', 30)`,
+    [SVC_13G_B, TENANT_B],
+  );
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kontak 13G A')`,
+    [CONTACT_13G_A, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kontak 13G B')`,
+    [CONTACT_13G_B, TENANT_B],
+  );
+  await db.query(
+    `INSERT INTO appointment_settings (tenant_id, timezone, min_lead_minutes)
+     VALUES ($1, 'Asia/Jakarta', 120)`,
+    [TENANT_A],
+  );
+
+  // CHECK ketersediaan: weekday di luar 0..6 ditolak; end <= start
+  // ditolak; format jam buruk ditolak.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO appointment_availability (tenant_id, weekday, start_time, end_time)
+       VALUES ($1, 7, '09:00', '17:00')`,
+      [TENANT_A],
+    ),
+    /check constraint|weekday/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO appointment_availability (tenant_id, weekday, start_time, end_time)
+       VALUES ($1, 1, '17:00', '09:00')`,
+      [TENANT_A],
+    ),
+    /check constraint|end_after_start/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO appointment_availability (tenant_id, weekday, start_time, end_time)
+       VALUES ($1, 1, '9:00', '17:00')`,
+      [TENANT_A],
+    ),
+    /check constraint|start_format/i,
+  );
+  await db.query(
+    `INSERT INTO appointment_availability (tenant_id, weekday, start_time, end_time)
+     VALUES ($1, 2, '00:30', '02:00')`,
+    [TENANT_A],
+  );
+
+  // Booking terkonfirmasi pertama: Selasa 2030-01-01 02:00–02:30 UTC.
+  const BK_13G_1 = "13a00000-0000-4000-8000-0000000000d1";
+  await db.query(
+    `INSERT INTO bookings (id, tenant_id, service_id, contact_id, starts_at, ends_at, source)
+     VALUES ($1, $2, $3, $4, '2030-01-01T02:00:00Z', '2030-01-01T02:30:00Z', 'flow')`,
+    [BK_13G_1, TENANT_A, SVC_13G_A, CONTACT_13G_A],
+  );
+  // Tumpang tindih (mulai di dalam rentang) → constraint EKSKLUSI menolak.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO bookings (tenant_id, service_id, contact_id, starts_at, ends_at, source)
+       VALUES ($1, $2, $3, '2030-01-01T02:15:00Z', '2030-01-01T02:45:00Z', 'dashboard')`,
+      [TENANT_A, SVC_13G_A, CONTACT_13G_A],
+    ),
+    /bookings_no_overlap_confirmed|exclusion constraint/i,
+  );
+  // Bersebelahan persis (mulai == akhir booking lain) DIIZINKAN
+  // (tstzrange [) tidak tumpang tindih).
+  await db.query(
+    `INSERT INTO bookings (tenant_id, service_id, contact_id, starts_at, ends_at, source)
+     VALUES ($1, $2, $3, '2030-01-01T02:30:00Z', '2030-01-01T03:00:00Z', 'dashboard')`,
+    [TENANT_A, SVC_13G_A, CONTACT_13G_A],
+  );
+  // Rentang yang sama untuk TENANT LAIN diizinkan (eksklusi per tenant).
+  await db.query(
+    `INSERT INTO bookings (tenant_id, service_id, contact_id, starts_at, ends_at, source)
+     VALUES ($1, $2, $3, '2030-01-01T02:00:00Z', '2030-01-01T02:30:00Z', 'flow')`,
+    [TENANT_B, SVC_13G_B, CONTACT_13G_B],
+  );
+  // Membatalkan booking pertama MEMBEBASKAN rentangnya (predikat
+  // parsial status='confirmed'): sisip di rentang yang persis bebas
+  // itu (02:00–02:30, berbatasan [) dengan booking 02:30) kini lolos.
+  await db.query(
+    `UPDATE bookings SET status = 'cancelled', cancelled_at = now() WHERE id = $1`,
+    [BK_13G_1],
+  );
+  await db.query(
+    `INSERT INTO bookings (tenant_id, service_id, contact_id, starts_at, ends_at, source)
+     VALUES ($1, $2, $3, '2030-01-01T02:00:00Z', '2030-01-01T02:30:00Z', 'dashboard')`,
+    [TENANT_A, SVC_13G_A, CONTACT_13G_A],
+  );
+
+  // Koneksi Google: satu baris per tenant (unik); token hanya envelope.
+  await db.query(
+    `INSERT INTO google_calendar_connections
+       (tenant_id, account_email, calendar_id, access_token_encrypted, refresh_token_encrypted, token_expires_at)
+     VALUES ($1, 'coach@example.com', 'primary', 'v1:deadbeef', 'v1:cafebabe', now() + interval '1 hour')`,
+    [TENANT_A],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO google_calendar_connections
+         (tenant_id, access_token_encrypted, token_expires_at)
+       VALUES ($1, 'v1:lain', now() + interval '1 hour')`,
+      [TENANT_A],
+    ),
+    /duplicate key|google_calendar_connections_tenant_unique/i,
+  );
+
+  // Isolasi RLS sebagai app_user pada kelima tabel baru.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const aBookings = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM bookings`,
+    );
+    const aServices = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM appointment_services`,
+    );
+    const aSettings = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM appointment_settings`,
+    );
+    const aAvail = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM appointment_availability`,
+    );
+    const aGoogle = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM google_calendar_connections`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const bBookings = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM bookings`,
+    );
+    const bGoogle = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM google_calendar_connections`,
+    );
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO bookings (tenant_id, service_id, contact_id, starts_at, ends_at, source)
+         VALUES ($1, $2, $3, '2030-02-01T02:00:00Z', '2030-02-01T02:30:00Z', 'flow')`,
+        [TENANT_A, SVC_13G_A, CONTACT_13G_A],
+      );
+    } catch {
+      crossBlocked = true;
+    }
+    return { aBookings, aServices, aSettings, aAvail, aGoogle, bBookings, bGoogle, crossBlocked };
+  });
+  // Tenant A: 3 baris booking (yang dibatalkan + bersebelahan 02:30
+  // + pengisi rentang bebas 02:00–02:30).
+  assert.equal(views.aBookings.rows[0].n, "3");
+  assert.equal(views.aServices.rows[0].n, "1");
+  assert.equal(views.aSettings.rows[0].n, "1");
+  assert.equal(views.aAvail.rows[0].n, "1");
+  assert.equal(views.aGoogle.rows[0].n, "1");
+  assert.equal(views.bBookings.rows[0].n, "1");
+  assert.equal(views.bGoogle.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+  console.log(
+    "[40] Fase 13G: 5 tabel janji temu terisolasi tenant; eksklusi GiST menolak booking confirmed tumpang tindih (mengizinkan bersebelahan, tenant lain, dan sesudah batal); CHECK ketersediaan (weekday/format/end>start) + koneksi Google unik per tenant: OK",
   );
 }
 

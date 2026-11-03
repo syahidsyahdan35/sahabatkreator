@@ -18,6 +18,9 @@ import {
   GrowthLinkListResponseSchema,
   SegmentListResponseSchema,
   OrderListResponseSchema,
+  AppointmentServiceListResponseSchema,
+  BookingListResponseSchema,
+  V1ListAppointmentsQuerySchema,
   MessageListResponseSchema,
   ProductListResponseSchema,
   PublicMeResponseSchema,
@@ -56,6 +59,8 @@ import {
   listSegments,
   getOrder,
   listOrders,
+  listBookings,
+  listAppointmentServices,
   listKbDocuments,
   listMessages,
   listProducts,
@@ -87,6 +92,10 @@ import { serializeFlow } from "../flows/routes";
 import { serializeGrowthLink } from "../growth/routes";
 import { serializeSegment } from "../segments/routes";
 import { serializeOrder } from "../products/routes";
+import {
+  serializeAppointmentService,
+  serializeBooking,
+} from "../appointments/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeDocument } from "../knowledge/routes";
 import { serializeMessage } from "../messages-serialize";
@@ -873,6 +882,47 @@ export function createPublicV1Routes(
     const row = await getOrder(bundle.db, { tenantId: auth.tenantId }, id);
     if (!row) return apiError(c, 404, "NOT_FOUND", "Order not found");
     return c.json(serializeOrder(row));
+  });
+
+  // --- Fase 13G: janji temu — permukaan BACA (appointments:read).
+  // Booking lahir dari flow (node book_appointment) atau dashboard;
+  // tulis (layanan/ketersediaan/booking manual/batal) SENGAJA
+  // dashboard/flow-only — lihat docs/COVERAGE-MATRIX.md. Serializer
+  // yang sama persis dengan modul appointments dashboard.
+  app.get("/v1/appointments", async (c) => {
+    const denied = requireScope(c, "appointments:read");
+    if (denied) return denied;
+    const query = V1ListAppointmentsQuerySchema.safeParse({
+      from: c.req.query("from"),
+      to: c.req.query("to"),
+      status: c.req.query("status"),
+    });
+    if (!query.success) {
+      return apiError(c, 422, "VALIDATION_ERROR", "Invalid appointments query");
+    }
+    const auth = c.get("apiKeyAuth");
+    const rows = await listBookings(bundle.db, auth.tenantId, {
+      from: query.data.from ? new Date(query.data.from) : undefined,
+      to: query.data.to ? new Date(query.data.to) : undefined,
+      status: query.data.status,
+    });
+    return c.json(
+      BookingListResponseSchema.parse({
+        bookings: rows.map((r) => serializeBooking(r)),
+      }),
+    );
+  });
+
+  app.get("/v1/appointment-services", async (c) => {
+    const denied = requireScope(c, "appointments:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listAppointmentServices(bundle.db, auth.tenantId);
+    return c.json(
+      AppointmentServiceListResponseSchema.parse({
+        services: rows.map((r) => serializeAppointmentService(r)),
+      }),
+    );
   });
 
   return app;

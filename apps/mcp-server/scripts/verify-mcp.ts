@@ -155,6 +155,9 @@ const EXPECTED_TOOLS = [
   "get_segment",
   "list_orders",
   "get_order",
+  // Fase 13G: janji temu — permukaan BACA.
+  "list_appointments",
+  "list_appointment_services",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -209,6 +212,9 @@ try {
       // Fase 13F: order adalah BACA.
       hintOf("list_orders") === true &&
       hintOf("get_order") === true &&
+      // Fase 13G: janji temu adalah BACA.
+      hintOf("list_appointments") === true &&
+      hintOf("list_appointment_services") === true &&
       hintOf("create_contact") === false &&
       hintOf("update_contact") === false &&
       hintOf("send_message") === false &&
@@ -463,6 +469,22 @@ try {
       one ? `total=${one.totalIdr}` : resultText(oneResult),
     );
   }
+
+  // Fase 13G: janji temu (BACA) — daftar booking + daftar layanan.
+  const apptResult = await call(client, "list_appointments");
+  const apptList = resultJson<{ bookings: Array<{ id: string }> }>(apptResult);
+  check(
+    "list_appointments",
+    !apptResult.isError && !!apptList && Array.isArray(apptList.bookings),
+    apptList ? `count=${apptList.bookings.length}` : resultText(apptResult),
+  );
+  const svcResult = await call(client, "list_appointment_services");
+  const svcList = resultJson<{ services: Array<{ id: string }> }>(svcResult);
+  check(
+    "list_appointment_services",
+    !svcResult.isError && !!svcList && Array.isArray(svcList.services),
+    svcList ? `count=${svcList.services.length}` : resultText(svcResult),
+  );
 } finally {
   await client.close();
 }

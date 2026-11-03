@@ -12,7 +12,7 @@ import type { TranslationKey } from "@sahabat-kreator/i18n";
 export type IconName =
   | "home" | "inbox" | "bot" | "megaphone" | "users" | "workflow" | "book"
   | "bag" | "link" | "chart" | "card" | "settings" | "shield" | "more"
-  | "list" | "audit" | "flow" | "growth";
+  | "list" | "audit" | "flow" | "growth" | "calendar";
 
 export interface NavItem {
   id: string;
@@ -47,21 +47,23 @@ export const NAV_REGISTRY: NavItem[] = [
   // Knowledge (desktop 8 / more 4).
   { id: "growth",      labelKey: "nav.growth",      icon: "growth",    route: "/growth",      mobile: { slot: "more" }, order: { desktop: 8,  more: 4 } },
   { id: "products",    labelKey: "nav.products",    icon: "bag",       route: "/products",    mobile: { slot: "more" }, order: { desktop: 9,  more: 5 } },
-  { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
-  { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
-  { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
-  { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
+  // Janji Temu (Fase 13G): layanan + ketersediaan + booking + Google Calendar.
+  { id: "appointments", labelKey: "nav.appointments", icon: "calendar", route: "/appointments", mobile: { slot: "more" }, order: { desktop: 10, more: 6 } },
+  { id: "channels",    labelKey: "nav.channels",    icon: "link",      route: "/channels",    mobile: { slot: "more" }, order: { desktop: 11, more: 7 } },
+  { id: "analytics",   labelKey: "nav.analytics",   icon: "chart",     route: "/analytics",   mobile: { slot: "more" }, order: { desktop: 12, more: 8 } },
+  { id: "billing",     labelKey: "nav.billing",     icon: "card",      route: "/billing",     mobile: { slot: "more" }, order: { desktop: 13, more: 9 } },
+  { id: "settings",    labelKey: "nav.settings",    icon: "settings",  route: "/settings",    mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
   // Log integrasi (Fase 7B.1): jejak webhook & pengiriman per workspace —
   // grup utilitas bersama Settings/Admin di "More" (tab utama mobile
   // tetap 4 sesuai keputusan desain).
-  { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 14, more: 10 } },
+  { id: "logs",        labelKey: "nav.logs",        icon: "list",      route: "/logs",        mobile: { slot: "more" }, order: { desktop: 15, more: 11 } },
   // Penelusur Audit (Fase 7B.4): jejak aksi user/agent/sistem/API key
   // per workspace dari audit_logs — bersebelahan dengan Logs.
-  { id: "audit",       labelKey: "nav.audit",       icon: "audit",     route: "/audit",       mobile: { slot: "more" }, order: { desktop: 15, more: 11 } },
+  { id: "audit",       labelKey: "nav.audit",       icon: "audit",     route: "/audit",       mobile: { slot: "more" }, order: { desktop: 16, more: 12 } },
   // Panel Admin Platform (Fase 6C): `permission: "platformAdmin"` — item
   // hanya dirender untuk user ber-flag isPlatformAdmin (lihat
   // filterNavItems); gerbang sesungguhnya ada di API (non-admin → 404).
-  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 16, more: 12 } },
+  { id: "admin",       labelKey: "nav.admin",       icon: "shield",    route: "/admin",       permission: "platformAdmin", mobile: { slot: "more" }, order: { desktop: 17, more: 13 } },
 ];
 
 /**

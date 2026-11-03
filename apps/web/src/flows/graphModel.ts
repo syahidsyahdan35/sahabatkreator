@@ -41,6 +41,7 @@ export const FLOW_NODE_LABEL_KEYS: Record<FlowNodeType, TranslationKey> = {
   questionnaire: "flows.nodeQuestionnaire",
   show_catalog: "flows.nodeShowCatalog",
   cart_checkout: "flows.nodeCartCheckout",
+  book_appointment: "flows.nodeBookAppointment",
 };
 
 /** Tipe yang boleh ditambahkan dari palet (trigger dibuat otomatis & tunggal). */
@@ -64,6 +65,7 @@ export const ADDABLE_NODE_TYPES: FlowNodeType[] = [
   "questionnaire",
   "show_catalog",
   "cart_checkout",
+  "book_appointment",
 ];
 
 /**
@@ -100,6 +102,12 @@ export const FLOW_BRANCHED_TYPES: Partial<
   cart_checkout: [
     { branch: "checked_out", labelKey: "flows.branchCheckedOut" },
     { branch: "empty_cart", labelKey: "flows.branchEmptyCart" },
+  ],
+  book_appointment: [
+    { branch: "booked", labelKey: "flows.branchBooked" },
+    { branch: "invalid", labelKey: "flows.branchInvalid" },
+    { branch: "timeout", labelKey: "flows.branchTimeout" },
+    { branch: "slot_taken", labelKey: "flows.branchSlotTaken" },
   ],
 };
 
@@ -146,6 +154,15 @@ export function defaultNodeConfig(
       return { amount: 1, unit: "hours" };
     case "show_catalog":
       return { amount: 24, unit: "hours", maxInvalidAttempts: 2 };
+    case "book_appointment":
+      return {
+        serviceId: "",
+        daysAhead: 7,
+        slotsPerMessage: 5,
+        amount: 24,
+        unit: "hours",
+        maxInvalidAttempts: 2,
+      };
     case "cart_checkout":
       return {};
     case "questionnaire":
@@ -181,6 +198,8 @@ function truncate(text: string, max = 90): string {
 export interface NodeSummaryResolvers {
   flowName?: (flowId: string) => string | undefined;
   productName?: (productId: string) => string | undefined;
+  /** Fase 13G: nama layanan janji temu untuk ringkasan book_appointment. */
+  serviceName?: (serviceId: string) => string | undefined;
 }
 
 /**
@@ -343,6 +362,16 @@ export function summarizeNodeConfig(
     }
     case "cart_checkout": {
       return t("flows.summaryCheckout");
+    }
+    case "book_appointment": {
+      const serviceId = asString(c.serviceId);
+      const name = serviceId
+        ? resolvers?.serviceName?.(serviceId)
+        : undefined;
+      const days = typeof c.daysAhead === "number" ? c.daysAhead : 7;
+      return serviceId
+        ? `${name ?? t("flows.nodeBookAppointment")} · ${t("flows.summaryAppointment", { days })}`
+        : t("flows.summaryNotConfigured");
     }
     default:
       return "";

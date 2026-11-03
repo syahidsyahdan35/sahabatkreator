@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import {
+  APPOINTMENT_DEFAULT_INVALID_PROMPT,
+  APPOINTMENT_DEFAULT_NO_SLOTS_MESSAGE,
+  APPOINTMENT_DEFAULT_SLOT_TAKEN_PROMPT,
   CATALOG_DEFAULT_INVALID_PROMPT,
   findFlowTemplate,
   QUESTIONNAIRE_DEFAULT_INVALID_PROMPT,
@@ -47,6 +50,17 @@ import {
   renderCartSummaryText,
   renderCatalogText,
 } from "./commerce";
+import {
+  createBooking,
+  getAppointmentSettings,
+  getBookableSlots,
+  parseSlotSelection,
+  renderSlotListText,
+  AppointmentServiceNotFoundError,
+  SlotTakenError,
+  type BookableSlot,
+} from "./appointments";
+import type { GoogleDeps } from "./google-calendar";
 
 /**
  * Flow Engine (Fase 8A) — eksekutor graf node di worker.
@@ -146,6 +160,26 @@ import {
  *   seperti send_payment_link (butuh deps.publicBaseUrl untuk URL
  *   tautan) — checkout atomik di commerce.checkoutCartTx, pesan
  *   ringkasan + tautan antre, lalu branch checked_out / empty_cart.
+ *
+ * FASE 13G — node `book_appointment` (kontrak didokumentasikan penuh
+ * di packages/contracts): pola node khusus di executeFlowStep seperti
+ * ai_response, karena daftar slot dihitung mesin slot inti
+ * (appointments.getBookableSlots) yang boleh memotong kesibukan
+ * Google (HTTP freebusy) — hitungan itu berjalan DI LUAR transaksi
+ * langkah; transaksi hanya menulis baris langkah + pesan daftar +
+ * keadaan parkir (context.appointment {nodeId, serviceId,
+ * offeredSlots, attempts, listedAt} — slot yang DITAWARKAN dibekukan
+ * sebagai instan ISO agar nomor balasan selalu menunjuk slot yang
+ * dilihat kontak). Balasan diproses processParkedAppointmentReply di
+ * jalur evaluasi: nomor sah → booking dibuat lewat createBooking
+ * (transaksinya SENDIRI di luar transaksi evaluasi — pola jalur
+ * dashboard; pelanggaran constraint eksklusi = SlotTakenError yang
+ * ditangkap bersih tanpa savepoint bersarang)
+ * → branch "booked"; slot keburu diambil & daftar segar kosong →
+ * branch "slot_taken"; daftar segar masih ada → pemberitahuan +
+ * daftar segar ditawarkan ulang (parkir lagi, attempts TIDAK
+ * bertambah — balapan bukan kesalahan kontak). Tenggat lewat →
+ * branch "timeout" lewat blok parkir eksekutor yang sama.
  */
 
 export const FLOW_MAX_STEPS = 100;
@@ -183,7 +217,9 @@ export type FlowBranch =
   | "invalid"
   | "added"
   | "checked_out"
-  | "empty_cart";
+  | "empty_cart"
+  | "booked"
+  | "slot_taken";
 
 export interface FlowGraphEdge {
   from: string;
@@ -220,6 +256,8 @@ const NODE_TYPES = new Set([
   // Fase 13F
   "show_catalog",
   "cart_checkout",
+  // Fase 13G
+  "book_appointment",
 ]);
 
 const FLOW_BRANCHES: readonly FlowBranch[] = [
@@ -234,6 +272,8 @@ const FLOW_BRANCHES: readonly FlowBranch[] = [
   "added",
   "checked_out",
   "empty_cart",
+  "booked",
+  "slot_taken",
 ];
 
 function isValidFlowPosition(
@@ -365,6 +405,23 @@ export interface CatalogRunState {
   listedAt: string;
 }
 
+/** Keadaan node book_appointment yang parkir, di `flow_runs.context` (Fase 13G). */
+export interface AppointmentRunState {
+  nodeId: string;
+  serviceId: string;
+  /**
+   * Slot yang DITAWARKAN ke kontak sebagai instan ISO, SESUAI urutan
+   * daftar yang dikirim — nomor balasan menunjuk daftar ini, bukan
+   * hitungan slot berjalan, agar perubahan ketersediaan di tengah
+   * parkir tidak menggeser arti nomor. Ketersediaan slot tetap
+   * divalidasi ulang oleh constraint eksklusi saat dipilih.
+   */
+  offeredSlots: Array<{ startsAt: string; endsAt: string }>;
+  /** Percobaan tidak sah selama parkir ini. */
+  attempts: number;
+  listedAt: string;
+}
+
 /** Bentuk `flow_runs.context` yang dibaca eksekutor (defensif). */
 export interface FlowRunContextData {
   triggerText?: string;
@@ -378,6 +435,8 @@ export interface FlowRunContextData {
   questionnaire?: QuestionnaireRunState;
   /** Keadaan show_catalog (Fase 13F) selama node-nya parkir. */
   catalog?: CatalogRunState;
+  /** Keadaan book_appointment (Fase 13G) selama node-nya parkir. */
+  appointment?: AppointmentRunState;
   [key: string]: unknown;
 }
 
@@ -447,6 +506,37 @@ function runContextOf(run: FlowRun): FlowRunContextData {
           ? Math.max(0, cat.attempts)
           : 0,
       listedAt: typeof cat.listedAt === "string" ? cat.listedAt : "",
+    };
+  }
+  const appt = raw.appointment as Partial<AppointmentRunState> | undefined;
+  if (
+    typeof appt !== "object" ||
+    appt === null ||
+    typeof appt.nodeId !== "string" ||
+    typeof appt.serviceId !== "string" ||
+    !Array.isArray(appt.offeredSlots) ||
+    !appt.offeredSlots.every(
+      (s) =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as { startsAt?: unknown }).startsAt === "string" &&
+        typeof (s as { endsAt?: unknown }).endsAt === "string",
+    )
+  ) {
+    delete out.appointment;
+  } else {
+    out.appointment = {
+      nodeId: appt.nodeId,
+      serviceId: appt.serviceId,
+      offeredSlots: appt.offeredSlots as Array<{
+        startsAt: string;
+        endsAt: string;
+      }>,
+      attempts:
+        typeof appt.attempts === "number" && Number.isInteger(appt.attempts)
+          ? Math.max(0, appt.attempts)
+          : 0,
+      listedAt: typeof appt.listedAt === "string" ? appt.listedAt : "",
     };
   }
   return out;
@@ -773,6 +863,59 @@ export function cartCheckoutConfigOf(node: FlowGraphNode): {
     emptyMessage: isNonEmptyString(node.config.emptyMessage)
       ? node.config.emptyMessage
       : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Janji temu (Fase 13G) — bentuk config node book_appointment
+// ---------------------------------------------------------------------------
+
+export interface AppointmentNodeConfig {
+  /** Layanan janji yang ditawarkan; null bila config rusak (validasi aktivasi menolak). */
+  serviceId: string | null;
+  /** Jendela penawaran: slot sampai sekarang + sekian hari (1..30). */
+  daysAhead: number;
+  /** Jumlah slot per daftar yang dikirim (1..10). */
+  slotsPerMessage: number;
+  timeoutMs: number;
+  maxInvalidAttempts: number;
+  invalidPrompt: string | null;
+  /** Pesan tambahan opsional yang dikirim node tepat sesudah booking tercipta. */
+  bookedMessage: string | null;
+}
+
+/**
+ * Membaca config node book_appointment menjadi bentuk kerja (DEFENSIF —
+ * pola catalogConfigOf; keabsahan ditegakkan validasi aktivasi).
+ */
+export function appointmentConfigOf(node: FlowGraphNode): AppointmentNodeConfig {
+  const c = node.config;
+  const attempts = c.maxInvalidAttempts;
+  const days = c.daysAhead;
+  const perMessage = c.slotsPerMessage;
+  return {
+    serviceId: isNonEmptyString(c.serviceId) ? c.serviceId : null,
+    daysAhead:
+      typeof days === "number" && Number.isInteger(days) && days >= 1 && days <= 30
+        ? days
+        : 7,
+    slotsPerMessage:
+      typeof perMessage === "number" &&
+      Number.isInteger(perMessage) &&
+      perMessage >= 1 &&
+      perMessage <= 10
+        ? perMessage
+        : 5,
+    timeoutMs: parkTimeoutMsOf(c),
+    maxInvalidAttempts:
+      typeof attempts === "number" &&
+      Number.isInteger(attempts) &&
+      attempts >= 1 &&
+      attempts <= 5
+        ? attempts
+        : 2,
+    invalidPrompt: isNonEmptyString(c.invalidPrompt) ? c.invalidPrompt : null,
+    bookedMessage: isNonEmptyString(c.bookedMessage) ? c.bookedMessage : null,
   };
 }
 
@@ -1257,6 +1400,86 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
       }
       break;
     }
+    case "book_appointment": {
+      if (!isNonEmptyString(c.serviceId) || !isUuidLike(c.serviceId)) {
+        err(
+          "APPOINTMENT_SERVICE_INVALID",
+          "Node book_appointment membutuhkan config.serviceId UUID layanan janji",
+        );
+      }
+      const days = c.daysAhead;
+      if (
+        typeof days !== "number" ||
+        !Number.isInteger(days) ||
+        days < 1 ||
+        days > 30
+      ) {
+        err(
+          "APPOINTMENT_DAYS_AHEAD_INVALID",
+          "Node book_appointment membutuhkan config.daysAhead bilangan bulat 1..30",
+        );
+      }
+      const perMessage = c.slotsPerMessage;
+      if (
+        typeof perMessage !== "number" ||
+        !Number.isInteger(perMessage) ||
+        perMessage < 1 ||
+        perMessage > 10
+      ) {
+        err(
+          "APPOINTMENT_SLOTS_PER_MESSAGE_INVALID",
+          "Node book_appointment membutuhkan config.slotsPerMessage bilangan bulat 1..10",
+        );
+      }
+      const amount = c.amount;
+      if (
+        typeof amount !== "number" ||
+        !Number.isInteger(amount) ||
+        amount < 0
+      ) {
+        err(
+          "APPOINTMENT_AMOUNT_INVALID",
+          "Node book_appointment membutuhkan config.amount (tenggat per parkir) bilangan bulat ≥ 0",
+        );
+      }
+      if (c.unit !== "seconds" && c.unit !== "minutes" && c.unit !== "hours") {
+        err(
+          "APPOINTMENT_UNIT_INVALID",
+          "Node book_appointment membutuhkan unit 'seconds'|'minutes'|'hours'",
+        );
+      }
+      const attempts = c.maxInvalidAttempts;
+      if (
+        typeof attempts !== "number" ||
+        !Number.isInteger(attempts) ||
+        attempts < 1 ||
+        attempts > 5
+      ) {
+        err(
+          "APPOINTMENT_ATTEMPTS_INVALID",
+          "Node book_appointment membutuhkan config.maxInvalidAttempts bilangan bulat 1..5",
+        );
+      }
+      if (
+        c.invalidPrompt !== undefined &&
+        (!isNonEmptyString(c.invalidPrompt) || c.invalidPrompt.length > 1000)
+      ) {
+        err(
+          "APPOINTMENT_INVALID_PROMPT_INVALID",
+          "Node book_appointment membutuhkan invalidPrompt string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      if (
+        c.bookedMessage !== undefined &&
+        (!isNonEmptyString(c.bookedMessage) || c.bookedMessage.length > 1000)
+      ) {
+        err(
+          "APPOINTMENT_BOOKED_MESSAGE_INVALID",
+          "Node book_appointment membutuhkan bookedMessage string non-kosong ≤ 1000 karakter bila diisi",
+        );
+      }
+      break;
+    }
     case "ai_response":
     case "handoff":
     case "end":
@@ -1369,6 +1592,14 @@ export async function validateFlowGraph(
         { branch: "empty_cart", code: "CHECKOUT_BRANCH_EMPTY_CART_MISSING", label: "Node cart_checkout membutuhkan edge branch 'empty_cart'" },
       ],
     },
+    book_appointment: {
+      required: [
+        { branch: "booked", code: "APPOINTMENT_BRANCH_BOOKED_MISSING", label: "Node book_appointment membutuhkan edge branch 'booked'" },
+        { branch: "invalid", code: "APPOINTMENT_BRANCH_INVALID_MISSING", label: "Node book_appointment membutuhkan edge branch 'invalid'" },
+        { branch: "timeout", code: "APPOINTMENT_BRANCH_TIMEOUT_MISSING", label: "Node book_appointment membutuhkan edge branch 'timeout'" },
+        { branch: "slot_taken", code: "APPOINTMENT_BRANCH_SLOT_TAKEN_MISSING", label: "Node book_appointment membutuhkan edge branch 'slot_taken'" },
+      ],
+    },
   };
   for (const node of graph.nodes) {
     issues.push(...validateFlowNodeConfig(node));
@@ -1393,7 +1624,7 @@ export async function validateFlowGraph(
     } else {
       for (const e of out) {
         if (e.branch !== undefined) {
-          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, wait_reply, questionnaire, show_catalog, atau cart_checkout");
+          err("EDGE_BRANCH_MISPLACED", node.id, "Branch hanya sah pada edge keluar node condition, ab_split, wait_reply, questionnaire, show_catalog, cart_checkout, atau book_appointment");
         }
       }
     }
@@ -2248,6 +2479,8 @@ export interface FlowEvaluationOutcome {
   questionnaireResumedRunIds: string[];
   /** Run show_catalog parkir yang memproses pesan ini sebagai pilihan (Fase 13F). */
   catalogResumedRunIds: string[];
+  /** Run book_appointment parkir yang memproses pesan ini sebagai pilihan slot (Fase 13G). */
+  appointmentResumedRunIds: string[];
 }
 
 /**
@@ -3108,6 +3341,379 @@ async function processParkedCatalogReply(
   });
 }
 /**
+ * Keluar dari node book_appointment lewat satu branch (booked /
+ * invalid / timeout / slot_taken): menulis baris langkah penutup,
+ * membersihkan context.wait + context.appointment, dan memajukan run
+ * (atau menyelesaikannya) — pasangan `exitParkedCatalog` untuk node
+ * ini (Fase 13G). `run` harus keadaan segar dalam transaksi ini.
+ */
+async function exitParkedAppointment(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: {
+    branch: "booked" | "invalid" | "timeout" | "slot_taken";
+    detail: Record<string, unknown>;
+  },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number }> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "book_appointment",
+    detail: { ...input.detail, branch: input.branch },
+  });
+  const nextId = nextNodeId(graph, node.id, input.branch);
+  const context = { ...runContextOf(run) };
+  delete context.wait;
+  delete context.appointment;
+  const patch: Partial<FlowRun> = {
+    stepCount: run.stepCount + 1,
+    nextStepSeq: seq + 1,
+    context,
+    updatedAt: now,
+  };
+  if (nextId === null) {
+    patch.status = "completed";
+    patch.currentNodeId = null;
+    patch.completedAt = now;
+    await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+    await flowAudit(tx, tenantId, {
+      actorType: "system",
+      actorId: `flow:${run.flowId}`,
+      action: "flow.run_completed",
+      flowId: run.flowId,
+      meta: {
+        flowRunId: run.id,
+        conversationId: run.conversationId,
+        stepCount: run.stepCount + 1,
+        reason: `book_appointment_${input.branch}`,
+      },
+    });
+    return { status: "completed", nextStepSeq: seq + 1 };
+  }
+  patch.status = "running";
+  patch.currentNodeId = nextId;
+  await tx.update(flowRuns).set(patch).where(eq(flowRuns.id, run.id));
+  return { status: "running", nextStepSeq: seq + 1 };
+}
+
+/**
+ * Parkir (ulang) run pada node book_appointment: baris langkah +
+ * keadaan janji + penanda parkir wait dengan tenggat BARU (semantik
+ * per-parkir wait_reply) + event tenggat. Pasangan `parkCatalog`.
+ */
+async function parkAppointment(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  node: FlowGraphNode,
+  state: AppointmentRunState,
+  timeoutMs: number,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const now = new Date();
+  const seq = run.nextStepSeq;
+  await tx.insert(flowRunSteps).values({
+    tenantId,
+    runId: run.id,
+    seq,
+    nodeId: node.id,
+    nodeType: "book_appointment",
+    detail,
+  });
+  const resumeAt = new Date(now.getTime() + timeoutMs);
+  const context: FlowRunContextData = {
+    ...runContextOf(run),
+    appointment: state,
+    wait: {
+      nodeId: node.id,
+      deadline: resumeAt.toISOString(),
+      parkedAt: now.toISOString(),
+    },
+  };
+  await tx
+    .update(flowRuns)
+    .set({
+      stepCount: run.stepCount + 1,
+      nextStepSeq: seq + 1,
+      status: "waiting",
+      currentNodeId: node.id,
+      context,
+      updatedAt: now,
+    })
+    .where(eq(flowRuns.id, run.id));
+  await tx.insert(outboxEvents).values({
+    tenantId,
+    type: "flow.step_due",
+    payload: {
+      runId: run.id,
+      stepSeq: seq + 1,
+      resumeAt: resumeAt.toISOString(),
+    },
+  });
+}
+
+/**
+ * Memproses SATU pesan masuk sebagai balasan bagi run
+ * book_appointment yang parkir (Fase 13G): parsing nomor slot →
+ * booking dalam savepoint → keluar "booked"; slot keburu diambil →
+ * daftar segar ditawarkan ulang (parkir lagi) atau keluar
+ * "slot_taken" bila daftar segar kosong; balasan tidak sah → prompt
+ * ulang / keluar "invalid". Seluruhnya dalam transaksi pemanggil
+ * (jalur evaluasi pesan masuk), kecuali hitungan daftar segar yang
+ * membaca lewat `db` (transaksi baca sendiri + freebusy Google di
+ * luar transaksi evaluasi — data ter-commit terbaru adalah yang
+ * benar untuk penawaran ulang). Mengembalikan hasil keluar-parkir
+ * bila run meninggalkan node-nya, null bila run parkir lagi.
+ */
+async function processParkedAppointmentReply(
+  tx: DbTx,
+  tenantId: string,
+  run: FlowRun,
+  graph: FlowGraphData,
+  node: FlowGraphNode,
+  input: { messageId: string; messageText: string },
+  ctx: { db: Database; googleDeps?: GoogleDeps },
+): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> {
+  const config = appointmentConfigOf(node);
+  const ctxData = runContextOf(run);
+  const state = ctxData.appointment;
+  if (!state || state.nodeId !== node.id) {
+    // Keadaan parkir rusak/hilang — degrade jujur seperti katalog.
+    return exitParkedAppointment(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      detail: { outcome: "state_missing" },
+    });
+  }
+  const [contact] = await tx
+    .select()
+    .from(contacts)
+    .where(
+      and(eq(contacts.tenantId, tenantId), eq(contacts.id, run.contactId)),
+    )
+    .limit(1);
+  const [conversation] = await tx
+    .select()
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, tenantId),
+        eq(conversations.id, run.conversationId),
+      ),
+    )
+    .limit(1);
+  if (!contact || !conversation) {
+    return exitParkedAppointment(tx, tenantId, run, graph, node, {
+      branch: "invalid",
+      detail: { outcome: "state_missing" },
+    });
+  }
+
+  // Satu jalur kegagalan pilihan: hitung percobaan, lalu prompt ulang
+  // (daftar yang DITAWARKAN dirender ulang apa adanya — nomor tidak
+  // bergeser) atau keluar "invalid" bila percobaan habis.
+  const failSelection = async (
+    reason: "not_a_selection",
+    extra: Record<string, unknown>,
+  ): Promise<{ status: FlowRunStatus; nextStepSeq: number } | null> => {
+    const attempts = state.attempts + 1;
+    if (attempts >= config.maxInvalidAttempts) {
+      return exitParkedAppointment(tx, tenantId, run, graph, node, {
+        branch: "invalid",
+        detail: {
+          outcome: "attempts_exhausted",
+          reason,
+          attempts,
+          messageId: input.messageId,
+          ...extra,
+        },
+      });
+    }
+    state.attempts = attempts;
+    const offered: BookableSlot[] = state.offeredSlots.map((s) => ({
+      startsAt: new Date(s.startsAt),
+      endsAt: new Date(s.endsAt),
+    }));
+    const settings = await getAppointmentSettings(ctx.db, tenantId).catch(
+      () => null,
+    );
+    const tz = settings?.timezone ?? "Asia/Jakarta";
+    const invalidText = renderMessageText(
+      config.invalidPrompt ?? APPOINTMENT_DEFAULT_INVALID_PROMPT,
+      { name: contact.name },
+    );
+    const outboundId = await queueFlowOutboundText(
+      tx,
+      tenantId,
+      run,
+      conversation,
+      `${invalidText}\n${renderSlotListText(offered, tz)}`,
+    );
+    await parkAppointment(tx, tenantId, run, node, state, config.timeoutMs, {
+      outcome: "selection_invalid",
+      reason,
+      raw: input.messageText.slice(0, 200),
+      attempts,
+      messageId: input.messageId,
+      outboundMessageId: outboundId,
+      ...extra,
+    });
+    return null;
+  };
+
+  const selection = parseSlotSelection(
+    input.messageText,
+    state.offeredSlots.length,
+  );
+  if (!selection) {
+    return failSelection("not_a_selection", {});
+  }
+  const chosen = state.offeredSlots[selection.index]!;
+
+  // Booking dibuat lewat transaksinya SENDIRI (createBooking di
+  // ctx.db — pola yang sama dengan jalur dashboard): pelanggaran
+  // constraint eksklusi (slot keburu diambil sejak daftar dikirim)
+  // menjadi SlotTakenError yang ditangkap bersih, TANPA savepoint
+  // bersarang di dalam transaksi evaluasi. Konsekuensi atomisitas
+  // yang diterima: booking ter-commit lebih dulu; tulisan langkah/
+  // keluar parkir menyusul di transaksi evaluasi. Bila transaksi
+  // evaluasi gagal SETELAH booking ter-commit (langka), run tetap
+  // parkir dan pilihan berikutnya atas slot yang sama terselesaikan
+  // lewat jalur slot_taken (tawaran segar) — konsisten, tanpa
+  // booking ganda (constraint eksklusi tetap penegak tunggal).
+  let booking: Awaited<ReturnType<typeof createBooking>> | null = null;
+  let slotTaken = false;
+  try {
+    booking = await createBooking(ctx.db, tenantId, {
+      serviceId: state.serviceId,
+      contactId: run.contactId,
+      conversationId: run.conversationId,
+      startsAt: new Date(chosen.startsAt),
+      source: "flow",
+      actorType: "system",
+      actorId: `flow:${run.flowId}`,
+    });
+  } catch (err) {
+    if (err instanceof SlotTakenError) {
+      slotTaken = true;
+    } else if (err instanceof AppointmentServiceNotFoundError) {
+      // Layanan terhapus di tengah parkir — keluar invalid tercatat.
+      return exitParkedAppointment(tx, tenantId, run, graph, node, {
+        branch: "invalid",
+        detail: {
+          outcome: "service_unavailable",
+          serviceId: state.serviceId,
+          messageId: input.messageId,
+        },
+      });
+    } else {
+      throw err;
+    }
+  }
+
+  if (slotTaken) {
+    // Hitung daftar SEGAR (booking terbaru + kesibukan Google) lewat
+    // mesin slot yang sama, di luar transaksi evaluasi.
+    const now = new Date();
+    const fresh = await getBookableSlots(
+      ctx.db,
+      tenantId,
+      state.serviceId,
+      {
+        from: now,
+        to: new Date(now.getTime() + config.daysAhead * 86_400_000),
+        now,
+      },
+      ctx.googleDeps,
+    ).catch(() => null);
+    const freshOffered = (fresh?.slots ?? []).slice(
+      0,
+      config.slotsPerMessage,
+    );
+    if (!fresh || freshOffered.length === 0) {
+      return exitParkedAppointment(tx, tenantId, run, graph, node, {
+        branch: "slot_taken",
+        detail: {
+          outcome: "slot_taken",
+          serviceId: state.serviceId,
+          chosenStartsAt: chosen.startsAt,
+          messageId: input.messageId,
+        },
+      });
+    }
+    const notice = renderMessageText(APPOINTMENT_DEFAULT_SLOT_TAKEN_PROMPT, {
+      name: contact.name,
+    });
+    const outboundId = await queueFlowOutboundText(
+      tx,
+      tenantId,
+      run,
+      conversation,
+      `${notice}\n${renderSlotListText(freshOffered, fresh.settings.timezone)}`,
+    );
+    const newState: AppointmentRunState = {
+      nodeId: node.id,
+      serviceId: state.serviceId,
+      offeredSlots: freshOffered.map((s) => ({
+        startsAt: s.startsAt.toISOString(),
+        endsAt: s.endsAt.toISOString(),
+      })),
+      attempts: state.attempts,
+      listedAt: now.toISOString(),
+    };
+    await parkAppointment(
+      tx,
+      tenantId,
+      run,
+      node,
+      newState,
+      config.timeoutMs,
+      {
+        outcome: "slot_taken_reoffered",
+        serviceId: state.serviceId,
+        chosenStartsAt: chosen.startsAt,
+        freshSlotCount: freshOffered.length,
+        messageId: input.messageId,
+        outboundMessageId: outboundId,
+      },
+    );
+    return null;
+  }
+
+  // Booking tercipta: bookedMessage opsional dikirim node ini;
+  // konfirmasi utama adalah komposisi graf sesudah branch "booked".
+  let outboundId: string | undefined;
+  if (config.bookedMessage) {
+    outboundId = await queueFlowOutboundText(
+      tx,
+      tenantId,
+      run,
+      conversation,
+      renderMessageText(config.bookedMessage, { name: contact.name }),
+    );
+  }
+  return exitParkedAppointment(tx, tenantId, run, graph, node, {
+    branch: "booked",
+    detail: {
+      outcome: "booked",
+      bookingId: booking!.id,
+      serviceId: state.serviceId,
+      startsAt: booking!.startsAt.toISOString(),
+      endsAt: booking!.endsAt.toISOString(),
+      googleSyncStatus: booking!.googleSyncStatus,
+      messageId: input.messageId,
+      ...(outboundId ? { outboundMessageId: outboundId } : {}),
+    },
+  });
+}
+
+/**
  * Melanjutkan SEMUA run parkir (wait_reply, questionnaire &
  * show_catalog) di percakapan ini dengan pesan masuk yang baru tiba,
  * lalu mengantrekan langkah lanjutan tiap run yang keluar dari
@@ -3124,10 +3730,12 @@ async function resumeParkedFlowRuns(
   tx: DbTx,
   tenantId: string,
   input: { conversationId: string; messageId: string; messageText: string },
+  deps: { db: Database; googleDeps?: GoogleDeps },
 ): Promise<{
   waitReplyRunIds: string[];
   questionnaireRunIds: string[];
   catalogRunIds: string[];
+  appointmentRunIds: string[];
 }> {
   const waiting = await tx
     .select()
@@ -3142,6 +3750,7 @@ async function resumeParkedFlowRuns(
   const waitReplyRunIds: string[] = [];
   const questionnaireRunIds: string[] = [];
   const catalogRunIds: string[] = [];
+  const appointmentRunIds: string[] = [];
   for (const run of waiting) {
     const ctx = runContextOf(run);
     if (!ctx.wait || run.currentNodeId !== ctx.wait.nodeId) continue;
@@ -3212,6 +3821,36 @@ async function resumeParkedFlowRuns(
       catalogRunIds.push(run.id);
       continue;
     }
+    if (node.type === "book_appointment") {
+      if (!ctx.appointment || ctx.appointment.nodeId !== node.id) {
+        continue;
+      }
+      const exited = await processParkedAppointmentReply(
+        tx,
+        tenantId,
+        run,
+        graph,
+        node,
+        {
+          messageId: input.messageId,
+          messageText: input.messageText,
+        },
+        deps,
+      );
+      if (exited && exited.status === "running") {
+        await tx.insert(outboxEvents).values({
+          tenantId,
+          type: "flow.step_due",
+          payload: {
+            runId: run.id,
+            stepSeq: exited.nextStepSeq,
+            resumeAt: new Date().toISOString(),
+          },
+        });
+      }
+      appointmentRunIds.push(run.id);
+      continue;
+    }
     if (node.type !== "wait_reply") continue;
     const result = await resolveParkedWaitReply(tx, tenantId, run, graph, node, {
       branch: "replied",
@@ -3230,7 +3869,7 @@ async function resumeParkedFlowRuns(
     }
     waitReplyRunIds.push(run.id);
   }
-  return { waitReplyRunIds, questionnaireRunIds, catalogRunIds };
+  return { waitReplyRunIds, questionnaireRunIds, catalogRunIds, appointmentRunIds };
 }
 
 /**
@@ -3301,6 +3940,7 @@ export async function startFlowRunsForInboundMessage(
     contact: Contact | null;
     conversation: Conversation;
   },
+  opts?: { googleDeps?: GoogleDeps },
 ): Promise<FlowEvaluationOutcome> {
   const { tenantId, conversationId, messageId } = input;
   const outcome: FlowEvaluationOutcome = {
@@ -3310,6 +3950,7 @@ export async function startFlowRunsForInboundMessage(
     resumedRunIds: [],
     questionnaireResumedRunIds: [],
     catalogResumedRunIds: [],
+    appointmentResumedRunIds: [],
   };
   if (!input.contact) return outcome;
 
@@ -3330,15 +3971,21 @@ export async function startFlowRunsForInboundMessage(
   // Fase 13E: run questionnaire yang parkir memproses pesan yang sama
   // sebagai JAWABAN (bukan sekadar resume) lewat jalur yang sama.
   const resumedParked = await withTenantDb(db, tenantId, (tx) =>
-    resumeParkedFlowRuns(tx, tenantId, {
-      conversationId,
-      messageId,
-      messageText: input.messageText,
-    }),
+    resumeParkedFlowRuns(
+      tx,
+      tenantId,
+      {
+        conversationId,
+        messageId,
+        messageText: input.messageText,
+      },
+      { db, googleDeps: opts?.googleDeps },
+    ),
   );
   outcome.resumedRunIds = resumedParked.waitReplyRunIds;
   outcome.questionnaireResumedRunIds = resumedParked.questionnaireRunIds;
   outcome.catalogResumedRunIds = resumedParked.catalogRunIds;
+  outcome.appointmentResumedRunIds = resumedParked.appointmentRunIds;
 
   const activeFlows = await withTenantDb(db, tenantId, (tx) =>
     tx
@@ -3456,6 +4103,13 @@ export interface FlowStepDeps {
   resolveEmbeddingProvider?: () => Promise<EmbeddingProvider | null>;
   /** Base URL publik untuk tool agent (send_payment_link). */
   publicBaseUrl?: string;
+  /**
+   * Dependensi Google Calendar untuk node `book_appointment`
+   * (Fase 13G) — mesin slot memotong kesibukan freebusy tenant yang
+   * terhubung. Tanpa deps ini node tetap bekerja: slot dihitung dari
+   * data internal saja (Google adalah peningkatan, bukan syarat).
+   */
+  google?: GoogleDeps;
 }
 
 export interface ExecuteFlowStepResult {
@@ -4679,7 +5333,8 @@ export async function executeFlowStep(
       run.status === "waiting" &&
       (node.type === "wait_reply" ||
         node.type === "questionnaire" ||
-        node.type === "show_catalog") &&
+        node.type === "show_catalog" ||
+        node.type === "book_appointment") &&
       parkedCtx.wait &&
       parkedCtx.wait.nodeId === node.id
     ) {
@@ -4708,6 +5363,28 @@ export async function executeFlowStep(
           const waitedMs = Number.isNaN(parkedAtMs)
             ? null
             : Math.max(0, Date.now() - parkedAtMs);
+          if (node.type === "book_appointment") {
+            const aState = freshCtx.appointment;
+            const r = await exitParkedAppointment(
+              tx,
+              tenantId,
+              fresh,
+              graph,
+              node,
+              {
+                branch: "timeout",
+                detail: {
+                  outcome: "timeout",
+                  deadline: freshCtx.wait.deadline,
+                  waitedMs,
+                  attempts: aState?.attempts ?? null,
+                  slotCount: aState?.offeredSlots.length ?? null,
+                  serviceId: aState?.serviceId ?? null,
+                },
+              },
+            );
+            return { applied: true, status: r.status };
+          }
           if (node.type === "show_catalog") {
             const cState = freshCtx.catalog;
             const r = await exitParkedCatalog(
@@ -5037,6 +5714,160 @@ export async function executeFlowStep(
         };
       }
       stepsExecuted += 1;
+      if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
+        return {
+          executed: true,
+          status: applied.status,
+          conversationId: run.conversationId,
+          outboundMessageId: lastOutboundMessageId,
+          stepsExecuted,
+        };
+      }
+      continue;
+    }
+
+    // Node book_appointment (Fase 13G): daftar slot dihitung mesin
+    // slot inti DI LUAR transaksi langkah (freebusy Google adalah
+    // HTTP — pola ai_response); transaksi hanya menulis baris langkah
+    // + pesan daftar + keadaan parkir. Layanan hilang/nonaktif =
+    // kegagalan keras tercatat (pola show_catalog); nol slot = pesan
+    // bawaan + keluar branch "invalid" beralasan no_slots (memarkir
+    // daftar kosong akan menggantung kontak).
+    if (node.type === "book_appointment") {
+      const config = appointmentConfigOf(node);
+      const offerNow = new Date();
+      const offer = config.serviceId
+        ? await getBookableSlots(
+            db,
+            tenantId,
+            config.serviceId,
+            {
+              from: offerNow,
+              to: new Date(
+                offerNow.getTime() + config.daysAhead * 86_400_000,
+              ),
+              now: offerNow,
+            },
+            deps.google,
+          ).catch(() => null)
+        : null;
+      const applied: AdvanceResult = await withTenantDb(
+        db,
+        tenantId,
+        async (tx) => {
+          const [fresh] = await tx
+            .select()
+            .from(flowRuns)
+            .where(and(eq(flowRuns.tenantId, tenantId), eq(flowRuns.id, runId)))
+            .limit(1);
+          if (!fresh || isTerminalStatus(fresh.status)) {
+            return { applied: false, reason: "run_terminal" as const };
+          }
+          if (fresh.nextStepSeq !== run.nextStepSeq) {
+            return { applied: false, reason: "stale_step" as const };
+          }
+          if (!ctxState.conversation || !ctxState.contact) {
+            await failRun(
+              tx,
+              tenantId,
+              fresh,
+              node,
+              "step_error",
+              "percakapan/kontak run tidak ditemukan",
+              { outcome: "failed" },
+            );
+            return { applied: true, status: "failed" as const };
+          }
+          if (!offer || !offer.service.isActive) {
+            await failRun(
+              tx,
+              tenantId,
+              fresh,
+              node,
+              "appointment_service_unavailable",
+              offer
+                ? "layanan janji node book_appointment nonaktif"
+                : "layanan janji node book_appointment tidak ditemukan",
+              {
+                outcome: "failed",
+                reason: "appointment_service_unavailable",
+                serviceId: config.serviceId,
+              },
+            );
+            return { applied: true, status: "failed" as const };
+          }
+          if (offer.slots.length === 0) {
+            const outboundId = await queueFlowOutboundText(
+              tx,
+              tenantId,
+              fresh,
+              ctxState.conversation,
+              APPOINTMENT_DEFAULT_NO_SLOTS_MESSAGE,
+            );
+            const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+              detail: {
+                outcome: "no_slots",
+                serviceId: offer.service.id,
+                daysAhead: config.daysAhead,
+                outboundMessageId: outboundId,
+              },
+              branch: "invalid",
+            });
+            return {
+              applied: true,
+              status: adv.status,
+              outboundMessageId: outboundId,
+            };
+          }
+          const offered = offer.slots.slice(0, config.slotsPerMessage);
+          const outboundId = await queueFlowOutboundText(
+            tx,
+            tenantId,
+            fresh,
+            ctxState.conversation,
+            renderSlotListText(offered, offer.settings.timezone),
+          );
+          const state: AppointmentRunState = {
+            nodeId: node.id,
+            serviceId: offer.service.id,
+            offeredSlots: offered.map((s) => ({
+              startsAt: s.startsAt.toISOString(),
+              endsAt: s.endsAt.toISOString(),
+            })),
+            attempts: 0,
+            listedAt: new Date().toISOString(),
+          };
+          const adv = await advanceRun(tx, tenantId, fresh, graph, node, {
+            detail: {
+              outcome: "slots_offered",
+              serviceId: offer.service.id,
+              slotCount: offered.length,
+              offeredStartsAt: state.offeredSlots.map((s) => s.startsAt),
+              outboundMessageId: outboundId,
+            },
+            parkWaitReplyMs: config.timeoutMs,
+            contextPatch: { appointment: state },
+          });
+          return {
+            applied: true,
+            status: adv.status,
+            outboundMessageId: outboundId,
+          };
+        },
+      );
+      if (!applied.applied) {
+        return {
+          executed: stepsExecuted > 0,
+          reason:
+            applied.reason === "stale_step" ? "stale_step" : "run_terminal",
+          conversationId: run.conversationId,
+          stepsExecuted,
+        };
+      }
+      stepsExecuted += 1;
+      if (applied.outboundMessageId) {
+        lastOutboundMessageId = applied.outboundMessageId;
+      }
       if (applied.status === "waiting" || isTerminalStatus(applied.status!)) {
         return {
           executed: true,

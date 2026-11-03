@@ -27,6 +27,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
+  AppointmentServiceResponse,
   AutomationResponse,
   FlowEdgeBranch,
   FlowGraph,
@@ -83,6 +84,8 @@ interface BuilderShared {
   sequenceName: (automationId: string) => string | undefined;
   flowName: (flowId: string) => string | undefined;
   productName: (productId: string) => string | undefined;
+  /** Fase 13G: nama layanan janji temu untuk ringkasan book_appointment. */
+  serviceName: (serviceId: string) => string | undefined;
 }
 
 const BuilderCtx = createContext<BuilderShared | null>(null);
@@ -126,10 +129,13 @@ const NODE_ICON_PATHS: Record<FlowNodeType, string> = {
     "M4 5.5h16l-1.2 5H5.2L4 5.5zM5.2 10.5 6 18a1.5 1.5 0 0 0 1.5 1.2h9A1.5 1.5 0 0 0 18 18l.8-7.5M9 14.5h6",
   cart_checkout:
     "M3.5 4.5h2.4l2.3 11.2a1.8 1.8 0 0 0 1.8 1.4h7.6a1.8 1.8 0 0 0 1.8-1.4L20.8 8H6.2M10 20.8h.01M17.5 20.8h.01",
+  book_appointment:
+    "M4 6.5A1.5 1.5 0 0 1 5.5 5h13A1.5 1.5 0 0 1 20 6.5v12A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-12zM4 10h16M8 3v4M16 3v4M8 14.5h3",
 };
 
 /** Warna label chip cabang: positif hijau, timeout kuning (bila ada cabang ketiga), selainnya merah. */
 function branchColorClass(branch: string, count: number): string {
+  if (branch === "slot_taken") return "text-warning";
   if (branch === "timeout") return count > 2 ? "text-warning" : "text-danger";
   if (branch === "empty_cart") return "text-muted";
   if (branch === "invalid" || branch === "no" || branch === "b") {
@@ -140,13 +146,14 @@ function branchColorClass(branch: string, count: number): string {
 
 /** Node kustom kanvas: label tipe dwibahasa + ringkasan config satu baris. */
 function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
-  const { t, sequenceName, flowName, productName } = useBuilderShared();
+  const { t, sequenceName, flowName, productName, serviceName } =
+    useBuilderShared();
   const type = data.nodeType;
   const summary = summarizeNodeConfig(
     t,
     { type, config: data.config },
     sequenceName,
-    { flowName, productName },
+    { flowName, productName, serviceName },
   );
   const branches = FLOW_BRANCHED_TYPES[type];
   const borderClass =
@@ -349,6 +356,8 @@ interface TenantMeta {
   selfFlow: { id: string; name: string } | null;
   /** Produk aktif tenant (pemilih send_payment_link). */
   products: ProductResponse[];
+  /** Layanan janji temu AKTIF tenant (pemilih book_appointment, Fase 13G). */
+  appointmentServices: AppointmentServiceResponse[];
   /**
    * Kunci field custom yang dikenal tenant (dari custom_fields kontak
    * yang dimuat — pola yang sama seperti tags/stages di atas);
@@ -1431,6 +1440,178 @@ function NodeConfigPanel({
         </div>
       ) : null}
 
+      {type === "book_appointment" ? (
+        <div className="space-y-3">
+          <p className="text-xs text-muted">{t("flows.appointmentHint")}</p>
+          <div>
+            <label className={labelClass} htmlFor="cfg-appt-service">
+              {t("flows.appointmentServiceLabel")}
+            </label>
+            {meta.appointmentServices.length === 0 ? (
+              <p className="text-sm text-muted">{t("flows.appointmentNone")}</p>
+            ) : (
+              <select
+                id="cfg-appt-service"
+                className={inputClass}
+                disabled={readOnly}
+                value={str(config.serviceId)}
+                onChange={(e) => set({ serviceId: e.target.value })}
+              >
+                <option value="">
+                  {t("flows.appointmentServicePlaceholder")}
+                </option>
+                {meta.appointmentServices.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass} htmlFor="cfg-appt-days">
+                {t("flows.appointmentDaysAheadLabel")}
+              </label>
+              <input
+                id="cfg-appt-days"
+                type="number"
+                min={1}
+                max={30}
+                step={1}
+                className={inputClass}
+                disabled={readOnly}
+                value={numVal(config.daysAhead, 7)}
+                onChange={(e) =>
+                  set({
+                    daysAhead: Math.min(
+                      30,
+                      Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                    ),
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="cfg-appt-per-message">
+                {t("flows.appointmentSlotsPerMessageLabel")}
+              </label>
+              <input
+                id="cfg-appt-per-message"
+                type="number"
+                min={1}
+                max={10}
+                step={1}
+                className={inputClass}
+                disabled={readOnly}
+                value={numVal(config.slotsPerMessage, 5)}
+                onChange={(e) =>
+                  set({
+                    slotsPerMessage: Math.min(
+                      10,
+                      Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                    ),
+                  })
+                }
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass} htmlFor="cfg-appt-amount">
+                {t("flows.waitReplyAmountLabel")}
+              </label>
+              <input
+                id="cfg-appt-amount"
+                type="number"
+                min={0}
+                step={1}
+                className={inputClass}
+                disabled={readOnly}
+                value={numVal(config.amount, 24)}
+                onChange={(e) =>
+                  set({
+                    amount: Math.max(
+                      0,
+                      Math.floor(Number(e.target.value) || 0),
+                    ),
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="cfg-appt-unit">
+                {t("flows.delayUnitLabel")}
+              </label>
+              <select
+                id="cfg-appt-unit"
+                className={inputClass}
+                disabled={readOnly}
+                value={str(config.unit) || "hours"}
+                onChange={(e) => set({ unit: e.target.value })}
+              >
+                <option value="seconds">{t("flows.unitSeconds")}</option>
+                <option value="minutes">{t("flows.unitMinutes")}</option>
+                <option value="hours">{t("flows.unitHours")}</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-appt-attempts">
+              {t("flows.questionnaireAttemptsLabel")}
+            </label>
+            <input
+              id="cfg-appt-attempts"
+              type="number"
+              min={1}
+              max={5}
+              step={1}
+              className={inputClass}
+              disabled={readOnly}
+              value={numVal(config.maxInvalidAttempts, 2)}
+              onChange={(e) =>
+                set({
+                  maxInvalidAttempts: Math.min(
+                    5,
+                    Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                  ),
+                })
+              }
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-appt-invalid">
+              {t("flows.appointmentInvalidPromptLabel")}
+            </label>
+            <textarea
+              id="cfg-appt-invalid"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.appointmentInvalidPromptPlaceholder")}
+              value={str(config.invalidPrompt)}
+              onChange={(e) => set({ invalidPrompt: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="cfg-appt-booked">
+              {t("flows.appointmentBookedMessageLabel")}
+            </label>
+            <textarea
+              id="cfg-appt-booked"
+              className={inputClass}
+              rows={2}
+              maxLength={1000}
+              disabled={readOnly}
+              placeholder={t("flows.appointmentBookedMessagePlaceholder")}
+              value={str(config.bookedMessage)}
+              onChange={(e) => set({ bookedMessage: e.target.value })}
+            />
+          </div>
+        </div>
+      ) : null}
+
       {type === "cart_checkout" ? (
         <div className="space-y-3">
           <p className="text-xs text-muted">{t("flows.checkoutHint")}</p>
@@ -2483,6 +2664,12 @@ function BuilderInner({
     [meta.products],
   );
 
+  const serviceName = useCallback(
+    (serviceId: string) =>
+      meta.appointmentServices.find((s) => s.id === serviceId)?.name,
+    [meta.appointmentServices],
+  );
+
   // Tandai node yang disebut issue (klik issue juga memilih node itu).
   useEffect(() => {
     const severityByNode = new Map<string, "error" | "warning">();
@@ -2810,6 +2997,7 @@ function BuilderInner({
     sequenceName,
     flowName,
     productName,
+    serviceName,
   };
 
   return (
@@ -3131,6 +3319,7 @@ export function FlowBuilderPage({
     flows: [],
     selfFlow: null,
     products: [],
+    appointmentServices: [],
     customFieldKeys: [],
   });
   const [loading, setLoading] = useState(true);
@@ -3142,16 +3331,25 @@ export function FlowBuilderPage({
     setLoading(true);
     (async () => {
       try {
-        const [flowRes, automations, contacts, flowsRes, products] =
-          await Promise.all([
-            api.flows.get(tenantId, flowId),
-            api.automations.list(tenantId).catch(() => []),
-            api.contacts.list(tenantId, { limit: 200 }).catch(() => null),
-            api.flows
-              .list(tenantId, { status: "active", limit: 100 })
-              .catch(() => null),
-            api.products.list(tenantId).catch(() => [] as ProductResponse[]),
-          ]);
+        const [
+          flowRes,
+          automations,
+          contacts,
+          flowsRes,
+          products,
+          appointmentServices,
+        ] = await Promise.all([
+          api.flows.get(tenantId, flowId),
+          api.automations.list(tenantId).catch(() => []),
+          api.contacts.list(tenantId, { limit: 200 }).catch(() => null),
+          api.flows
+            .list(tenantId, { status: "active", limit: 100 })
+            .catch(() => null),
+          api.products.list(tenantId).catch(() => [] as ProductResponse[]),
+          api.appointments
+            .listServices(tenantId)
+            .catch(() => [] as AppointmentServiceResponse[]),
+        ]);
         if (cancelled) return;
         setFlow(flowRes);
         const tags = new Set<string>();
@@ -3173,6 +3371,7 @@ export function FlowBuilderPage({
           flows: flowsRes?.flows ?? [],
           selfFlow: { id: flowRes.id, name: flowRes.name },
           products: products.filter((p) => p.isActive),
+          appointmentServices: appointmentServices.filter((s) => s.isActive),
           customFieldKeys: [...customFieldKeys].sort(),
         });
       } catch (err) {

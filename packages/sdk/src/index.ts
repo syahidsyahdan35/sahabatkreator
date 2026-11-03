@@ -24,6 +24,9 @@ import type {
   SegmentResponse,
   OrderListResponse,
   OrderResponse,
+  AppointmentServiceListResponse,
+  BookingListResponse,
+  ListAppointmentsQuery,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -87,6 +90,9 @@ export type {
   SegmentResponse,
   OrderListResponse,
   OrderResponse,
+  AppointmentServiceListResponse,
+  BookingListResponse,
+  ListAppointmentsQuery,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -488,6 +494,29 @@ export class SahabatKreatorClient {
     return this.request<OrderResponse>(
       "GET",
       `/orders/${encodeURIComponent(orderId)}`,
+    );
+  }
+
+  /**
+   * GET /v1/appointments (scope `appointments:read`) — daftar booking
+   * janji temu (Fase 13G), menaik per waktu mulai; saring opsional
+   * from/to (ISO) + status. Booking lahir dari node flow
+   * book_appointment atau dashboard — tulis SENGAJA bukan permukaan
+   * publik (lihat docs/COVERAGE-MATRIX.md).
+   */
+  async listAppointments(
+    query: ListAppointmentsQuery = {},
+  ): Promise<BookingListResponse> {
+    return this.request<BookingListResponse>("GET", "/appointments", {
+      query: { from: query.from, to: query.to, status: query.status },
+    });
+  }
+
+  /** GET /v1/appointment-services (scope `appointments:read`) — layanan janji tenant (termasuk nonaktif). */
+  async listAppointmentServices(): Promise<AppointmentServiceListResponse> {
+    return this.request<AppointmentServiceListResponse>(
+      "GET",
+      "/appointment-services",
     );
   }
 }

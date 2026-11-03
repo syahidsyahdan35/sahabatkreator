@@ -19,6 +19,7 @@ import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
 import { renderMessageText } from "./render-text";
 import { startFlowRunsForInboundMessage } from "./flows";
+import type { GoogleDeps } from "./google-calendar";
 import { setContactConsent } from "./contacts";
 import { getOptInSettings, matchConsentKeyword } from "./optin";
 
@@ -491,6 +492,12 @@ export interface EvaluateInboundResult {
    * questionnaire — worker tidak meneruskannya ke agent.
    */
   flowCatalogResumed: number;
+  /**
+   * Fase 13G: run book_appointment parkir yang memproses pesan ini
+   * sebagai pilihan slot. Dihitung tertangani flow seperti katalog —
+   * worker tidak meneruskannya ke agent.
+   */
+  flowAppointmentResumed: number;
 }
 
 /**
@@ -509,6 +516,7 @@ export interface EvaluateInboundResult {
 export async function evaluateInboundMessageForAutomations(
   db: Database,
   input: { tenantId: string; conversationId: string; messageId: string },
+  opts?: { googleDeps?: GoogleDeps },
 ): Promise<EvaluateInboundResult> {
   const { tenantId, conversationId, messageId } = input;
 
@@ -633,6 +641,7 @@ export async function evaluateInboundMessageForAutomations(
       flowWaitReplyResumed: 0,
       flowQuestionnaireResumed: 0,
       flowCatalogResumed: 0,
+      flowAppointmentResumed: 0,
       consentAction: null,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
@@ -650,6 +659,7 @@ export async function evaluateInboundMessageForAutomations(
       flowWaitReplyResumed: 0,
       flowQuestionnaireResumed: 0,
       flowCatalogResumed: 0,
+      flowAppointmentResumed: 0,
       consentAction: null,
     };
   const text = context.message.contentText ?? "";
@@ -729,6 +739,7 @@ export async function evaluateInboundMessageForAutomations(
           flowWaitReplyResumed: 0,
           flowQuestionnaireResumed: 0,
       flowCatalogResumed: 0,
+      flowAppointmentResumed: 0,
           consentAction: consentMatch,
         };
       }
@@ -996,14 +1007,18 @@ export async function evaluateInboundMessageForAutomations(
   // sequence (urutan keyword → flow → agent). Flow aktif yang
   // trigger-nya cocok memulai run; kontak opt-out tidak memulai run
   // dan run `waiting`-nya di percakapan ini dibatalkan di sana.
-  const flowOutcome = await startFlowRunsForInboundMessage(db, {
-    tenantId,
-    conversationId,
-    messageId,
-    messageText: text,
-    contact: context.contact ?? null,
-    conversation: context.conversation,
-  });
+  const flowOutcome = await startFlowRunsForInboundMessage(
+    db,
+    {
+      tenantId,
+      conversationId,
+      messageId,
+      messageText: text,
+      contact: context.contact ?? null,
+      conversation: context.conversation,
+    },
+    { googleDeps: opts?.googleDeps },
+  );
 
   return {
     evaluated: true,
@@ -1016,6 +1031,7 @@ export async function evaluateInboundMessageForAutomations(
     flowWaitReplyResumed: flowOutcome.resumedRunIds.length,
     flowQuestionnaireResumed: flowOutcome.questionnaireResumedRunIds.length,
     flowCatalogResumed: flowOutcome.catalogResumedRunIds.length,
+    flowAppointmentResumed: flowOutcome.appointmentResumedRunIds.length,
     consentAction: null,
   };
 }

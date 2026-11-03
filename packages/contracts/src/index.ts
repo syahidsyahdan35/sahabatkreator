@@ -114,6 +114,12 @@ export const ErrorCodeSchema = z.enum([
   "API_KEY_REVOKED",
   "API_KEY_SCOPE_DENIED",
   "MESSAGING_WINDOW_CLOSED",
+  // Fase 13G: janji temu + Google Calendar.
+  "APPOINTMENT_TIMEZONE_INVALID",
+  "SLOT_TAKEN",
+  "GOOGLE_NOT_CONFIGURED",
+  "GOOGLE_NOT_CONNECTED",
+  "GOOGLE_UNREACHABLE",
   "RATE_LIMITED",
   "ENTITLEMENT_EXCEEDED",
   "INTERNAL_ERROR",
@@ -1837,6 +1843,11 @@ export const ApiKeyScopeSchema = z.enum([
   // keadaan sesi ephemeral per kontak, bukan sumber daya integrasi;
   // lihat docs/COVERAGE-MATRIX.md).
   "orders:read",
+  // Fase 13G: permukaan BACA publik janji temu (booking + layanan).
+  // Tulis (layanan/ketersediaan/pembatalan) tetap dashboard/flow-only —
+  // booking lahir dari percakapan (node book_appointment) atau aksi
+  // operator di dashboard; lihat docs/COVERAGE-MATRIX.md.
+  "appointments:read",
   // Fase 15A: permukaan BACA publik untuk sumber daya yang sebelumnya
   // hanya dashboard (aturan sinkronisasi kontrak dijalankan retrospektif).
   // Tulis untuk sumber daya ini tetap dashboard-only — lihat
@@ -1869,6 +1880,7 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "growth_links:read",
   "segments:read",
   "orders:read",
+  "appointments:read",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1887,11 +1899,12 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "growth_links:read",
   "segments:read",
   "orders:read",
+  "appointments:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(17).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(18).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -2034,6 +2047,16 @@ export const PlatformSettingKeySchema = z.enum([
   "resend_api_key",
   "resend_from_email",
   "resend_from_name",
+  // Fase 13G: klien OAuth Google milik PLATFORM untuk sinkronisasi
+  // Google Calendar tenant. `google_oauth_client_id` adalah identifier
+  // PUBLIK (tampil di setiap URL dialog OAuth Google, sama seperti
+  // Meta App ID) — nilainya ditampilkan panel lewat PlatformGoogleInfo.
+  // `google_oauth_client_secret` adalah RAHASIA (pola kunci lain:
+  // hanya status yang dipertukarkan). Keduanya dibuat pemilik platform
+  // di Google Cloud Console; tanpa keduanya tombol Hubungkan Google
+  // menjawab GOOGLE_NOT_CONFIGURED secara jujur (pola Resend 11B).
+  "google_oauth_client_id",
+  "google_oauth_client_secret",
 ]);
 export type PlatformSettingKey = z.infer<typeof PlatformSettingKeySchema>;
 
@@ -2088,11 +2111,26 @@ export const PlatformEmailInfoSchema = z.object({
 });
 export type PlatformEmailInfo = z.infer<typeof PlatformEmailInfoSchema>;
 
+/**
+ * Info Google BUKAN rahasia (Fase 13G): Client ID OAuth Google efektif
+ * (panel → env) DITAMPILKAN agar pemilik bisa memverifikasinya — Client
+ * ID identifier publik (muncul di URL dialog). `oauthRedirectUri`
+ * adalah callback yang harus didaftarkan PERSIS di Google Cloud
+ * Console (APIs & Services → Credentials → OAuth client → Authorized
+ * redirect URIs). Client secret TIDAK PERNAH muncul di kontrak.
+ */
+export const PlatformGoogleInfoSchema = z.object({
+  clientId: z.string().nullable(),
+  oauthRedirectUri: z.string(),
+});
+export type PlatformGoogleInfo = z.infer<typeof PlatformGoogleInfoSchema>;
+
 export const PlatformSettingsResponseSchema = z.object({
   settings: z.array(PlatformSettingStatusSchema),
   r2: PlatformR2InfoSchema,
   meta: PlatformMetaInfoSchema,
   email: PlatformEmailInfoSchema,
+  google: PlatformGoogleInfoSchema,
 });
 export type PlatformSettingsResponse = z.infer<
   typeof PlatformSettingsResponseSchema
@@ -2979,7 +3017,8 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  * `wait_reply` → "replied"+"timeout",
  * `questionnaire` → "completed"+"invalid"+"timeout",
  * `show_catalog` → "added"+"invalid"+"timeout",
- * `cart_checkout` → "checked_out"+"empty_cart". Node lain tidak
+ * `cart_checkout` → "checked_out"+"empty_cart",
+ * `book_appointment` → "booked"+"invalid"+"timeout"+"slot_taken". Node lain tidak
  * boleh membawa branch.
  *
  * Tipe node v1 dan config-nya:
@@ -3168,6 +3207,42 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *                   order menjadi paid (+ paid_at) lewat hook yang
  *                   sama dengan tautan produk; kedaluwarsa tautan
  *                   membalik order menjadi expired.
+ *
+ * Tipe node tambahan (Fase 13G):
+ * - book_appointment { serviceId, daysAhead, slotsPerMessage, amount,
+ *                   unit, maxInvalidAttempts, invalidPrompt?,
+ *                   bookedMessage? } — pemesanan janji temu: menghitung
+ *                   slot yang bisa dipesan untuk SATU layanan janji
+ *                   (mesin slot inti yang sama dengan dashboard:
+ *                   jendela ketersediaan mingguan ∩ masa depan + lead
+ *                   time − booking terkonfirmasi − kesibukan Google
+ *                   Calendar bila terhubung), mengirim N slot berikutnya
+ *                   (slotsPerMessage) sebagai daftar teks BERNOMOR
+ *                   (tanggal + jam dalam zona waktu janji tenant,
+ *                   format dwibahasa), lalu PARKIR memakai mesin parkir
+ *                   wait_reply yang sama (context.wait + keadaan di
+ *                   context.appointment). Balasan sah: nomor slot →
+ *                   booking dibuat (baris + percobaan event Google
+ *                   lewat outbox) lalu keluar branch "booked";
+ *                   kelanjutan graf (pesan konfirmasi dll.) adalah
+ *                   komposisi graf sesudah node ini. Balasan tidak sah
+ *                   memicu prompt ulang (invalidPrompt atau bawaan
+ *                   dwibahasa APPOINTMENT_DEFAULT_INVALID_PROMPT)
+ *                   sampai maxInvalidAttempts → branch "invalid".
+ *                   Tenggat lewat → branch "timeout". Bila slot yang
+ *                   dipilih keburu diambil booking lain (constraint
+ *                   eksklusi DB menolak), daftar slot SEGAR dihitung
+ *                   ulang dan ditawarkan kembali dengan pemberitahuan
+ *                   (APPOINTMENT_DEFAULT_SLOT_TAKEN_PROMPT); branch
+ *                   "slot_taken" hanya keluar bila daftar segar itu
+ *                   KOSONG. Bila sejak awal tidak ada slot dalam
+ *                   jendela daysAhead, node mengirim pesan bawaan
+ *                   dwibahasa APPOINTMENT_DEFAULT_NO_SLOTS_MESSAGE dan
+ *                   keluar branch "invalid" beralasan no_slots —
+ *                   memarkir daftar kosong akan menggantung kontak.
+ *                   Layanan yang hilang/nonaktif saat eksekusi adalah
+ *                   kegagalan keras tercatat (appointment_service_
+ *                   unavailable), pola show_catalog.
  */
 export const FlowStatusSchema = z.enum(["draft", "active", "archived"]);
 export type FlowStatus = z.infer<typeof FlowStatusSchema>;
@@ -3205,6 +3280,8 @@ export const FlowNodeTypeSchema = z.enum([
   // Fase 13F
   "show_catalog",
   "cart_checkout",
+  // Fase 13G
+  "book_appointment",
 ]);
 export type FlowNodeType = z.infer<typeof FlowNodeTypeSchema>;
 
@@ -3323,6 +3400,19 @@ export const FlowNodeConfigSchema = z.union([
   z.object({
     emptyMessage: z.string().min(1).max(1000).optional(),
   }),
+  // Fase 13G — book_appointment: bentuk kasar; keabsahan rinci
+  // (layanan ada & aktif, rentang hari/percobaan) ditegakkan validasi
+  // aktivasi di core.
+  z.object({
+    serviceId: z.string().uuid(),
+    daysAhead: z.number().int().min(1).max(30),
+    slotsPerMessage: z.number().int().min(1).max(10),
+    amount: z.number().int().min(0).max(100_000),
+    unit: z.enum(["seconds", "minutes", "hours"]),
+    maxInvalidAttempts: z.number().int().min(1).max(5),
+    invalidPrompt: z.string().min(1).max(1000).optional(),
+    bookedMessage: z.string().min(1).max(1000).optional(),
+  }),
   // ai_response / handoff / end: config kosong.
   z.object({}),
 ]);
@@ -3373,6 +3463,40 @@ export const CATALOG_REPLY_HINT =
   "Reply with a product number to add it to your cart (e.g. \"2\", or \"2x3\" for 3 items).\nBalas nomor produk untuk menambahkannya ke keranjang (mis. \"2\", atau \"2x3\" untuk 3 buah).";
 
 /**
+ * Prompt ulang bawaan produk (dwibahasa, pola questionnaire/catalog)
+ * yang dipakai node `book_appointment` (Fase 13G) bila config
+ * `invalidPrompt` tidak diisi: balasan bukan nomor slot yang sah.
+ */
+export const APPOINTMENT_DEFAULT_INVALID_PROMPT =
+  "Sorry, that choice isn't on the list. Please reply with a slot number.\nMaaf, pilihan itu tidak ada di daftar. Silakan balas dengan nomor slot.";
+
+/**
+ * Pemberitahuan bawaan (dwibahasa) saat slot pilihan kontak keburu
+ * diambil booking lain: daftar slot SEGAR menyusul dalam pesan yang
+ * sama dan run parkir lagi; branch "slot_taken" hanya keluar bila
+ * daftar segar kosong.
+ */
+export const APPOINTMENT_DEFAULT_SLOT_TAKEN_PROMPT =
+  "Sorry, that time was just booked by someone else. Here are the latest available times:\nMaaf, waktu itu baru saja dipesan orang lain. Berikut waktu terbaru yang tersedia:";
+
+/**
+ * Pesan bawaan (dwibahasa) saat tidak ada slot yang bisa dipesan dalam
+ * jendela hari node: node keluar branch "invalid" beralasan no_slots
+ * sesudah mengirim pesan ini (tidak memarkir daftar kosong).
+ */
+export const APPOINTMENT_DEFAULT_NO_SLOTS_MESSAGE =
+  "Sorry, there are no available times right now. Please try again later.\nMaaf, saat ini belum ada waktu yang tersedia. Silakan coba lagi nanti.";
+
+/**
+ * Petunjuk balasan yang selalu menutup daftar slot node
+ * `book_appointment` (dwibahasa, pola katalog): balasan angka adalah
+ * kontrak balasan node ini — builder dan eksekutor membaca teks
+ * kanonis yang sama dari sini.
+ */
+export const APPOINTMENT_REPLY_HINT =
+  "Reply with a slot number to book it.\nBalas nomor slot untuk memesannya.";
+
+/**
  * Posisi node di canvas builder (Fase 8B) — koordinat piksel relatif
  * kanvas, boleh negatif (pan bebas). Murni metadata tampilan.
  */
@@ -3394,7 +3518,8 @@ export type FlowNode = z.infer<typeof FlowNodeSchema>;
  * Cabang edge: condition yes/no, ab_split a/b, wait_reply
  * replied/timeout, questionnaire completed/invalid/timeout,
  * show_catalog added/invalid/timeout, cart_checkout
- * checked_out/empty_cart.
+ * checked_out/empty_cart, book_appointment
+ * booked/invalid/timeout/slot_taken.
  */
 export const FlowEdgeBranchSchema = z.enum([
   "yes",
@@ -3409,6 +3534,9 @@ export const FlowEdgeBranchSchema = z.enum([
   "added",
   "checked_out",
   "empty_cart",
+  // Fase 13G
+  "booked",
+  "slot_taken",
 ]);
 export type FlowEdgeBranch = z.infer<typeof FlowEdgeBranchSchema>;
 
@@ -4397,6 +4525,263 @@ export const OrderListResponseSchema = z.object({
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// Fase 13G — Janji temu (appointments) + sinkronisasi Google Calendar.
+//
+// Lapisan janji temu bekerja PENUH tanpa Google (kalender internal):
+// layanan janji (durasi), jendela ketersediaan mingguan per tenant,
+// pengaturan zona waktu + lead time minimum, dan booking yang lahir
+// dari node flow `book_appointment` atau dibuat operator di dashboard.
+// Google Calendar adalah PENINGKATAN sinkronisasi: koneksi OAuth per
+// tenant (klien OAuth milik PLATFORM dari Panel Admin); event dibuat/
+// dihapus mengikuti booking dan kesibukan (freebusy) Google memotong
+// slot. Kegagalan sinkron tercatat di booking (googleSyncStatus/Error)
+// dan TIDAK PERNAH menggagalkan booking itu sendiri.
+//
+// Permukaan v1 BACA saja (appointments:read): daftar booking
+// (tersaring from/to/status) + daftar layanan. Tulis SENGAJA
+// dashboard/flow-only: layanan & ketersediaan adalah artefak kurasi
+// operator, dan booking adalah hasil percakapan/dashboard — bukan
+// sumber daya integrasi (lihat docs/COVERAGE-MATRIX.md).
+// ---------------------------------------------------------------------------
+
+/** Hari dalam seminggu: 0 = Minggu … 6 = Sabtu (konvensi JS getDay). */
+export const AppointmentWeekdaySchema = z.number().int().min(0).max(6);
+export type AppointmentWeekday = z.infer<typeof AppointmentWeekdaySchema>;
+
+/** Jam dinding "HH:mm" 24-jam dalam zona waktu janji tenant. */
+export const AppointmentTimeOfDaySchema = z
+  .string()
+  .regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, "format HH:mm 24-jam");
+
+/** Satu layanan janji temu (mis. "Konsultasi 30 menit"). */
+export const AppointmentServiceResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  /** Deskripsi opsional untuk operator; null = tidak diisi. */
+  description: z.string().nullable(),
+  durationMinutes: z.number().int().positive(),
+  isActive: z.boolean(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type AppointmentServiceResponse = z.infer<
+  typeof AppointmentServiceResponseSchema
+>;
+
+export const AppointmentServiceListResponseSchema = z.object({
+  services: z.array(AppointmentServiceResponseSchema),
+});
+export type AppointmentServiceListResponse = z.infer<
+  typeof AppointmentServiceListResponseSchema
+>;
+
+export const CreateAppointmentServiceRequestSchema = z.object({
+  name: z.string().trim().min(1).max(255),
+  description: z.string().trim().max(2000).nullable().optional(),
+  durationMinutes: z.number().int().min(5).max(24 * 60),
+  isActive: z.boolean().optional(),
+});
+export type CreateAppointmentServiceRequest = z.infer<
+  typeof CreateAppointmentServiceRequestSchema
+>;
+
+export const UpdateAppointmentServiceRequestSchema = z.object({
+  name: z.string().trim().min(1).max(255).optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
+  durationMinutes: z.number().int().min(5).max(24 * 60).optional(),
+  isActive: z.boolean().optional(),
+});
+export type UpdateAppointmentServiceRequest = z.infer<
+  typeof UpdateAppointmentServiceRequestSchema
+>;
+
+/**
+ * Pengaturan janji per tenant. `timezone` adalah zona IANA yang
+ * menjadi acuan SEMUA hitungan slot (default Asia/Jakarta);
+ * `minLeadMinutes` = jarak minimum dari sekarang ke slot yang masih
+ * boleh dipesan (lead time yang bisa dikonfigurasi).
+ */
+export const AppointmentSettingsResponseSchema = z.object({
+  timezone: z.string(),
+  minLeadMinutes: z.number().int().nonnegative(),
+  updatedAt: z.string().datetime(),
+});
+export type AppointmentSettingsResponse = z.infer<
+  typeof AppointmentSettingsResponseSchema
+>;
+
+export const UpdateAppointmentSettingsRequestSchema = z.object({
+  timezone: z.string().trim().min(1).max(64).optional(),
+  minLeadMinutes: z.number().int().min(0).max(7 * 24 * 60).optional(),
+});
+export type UpdateAppointmentSettingsRequest = z.infer<
+  typeof UpdateAppointmentSettingsRequestSchema
+>;
+
+/** Satu jendela ketersediaan mingguan (jam dinding zona janji tenant). */
+export const AppointmentAvailabilityWindowSchema = z.object({
+  weekday: AppointmentWeekdaySchema,
+  startTime: AppointmentTimeOfDaySchema,
+  endTime: AppointmentTimeOfDaySchema,
+});
+export type AppointmentAvailabilityWindow = z.infer<
+  typeof AppointmentAvailabilityWindowSchema
+>;
+
+export const AppointmentAvailabilityResponseSchema = z.object({
+  windows: z.array(AppointmentAvailabilityWindowSchema),
+});
+export type AppointmentAvailabilityResponse = z.infer<
+  typeof AppointmentAvailabilityResponseSchema
+>;
+
+/** Ganti SELURUH jendela mingguan (semantik replace — editor mingguan). */
+export const UpdateAppointmentAvailabilityRequestSchema = z.object({
+  windows: z.array(AppointmentAvailabilityWindowSchema).max(7 * 4),
+});
+export type UpdateAppointmentAvailabilityRequest = z.infer<
+  typeof UpdateAppointmentAvailabilityRequestSchema
+>;
+
+/** Status booking: terkonfirmasi atau dibatalkan (baris tidak dihapus). */
+export const BookingStatusSchema = z.enum(["confirmed", "cancelled"]);
+export type BookingStatus = z.infer<typeof BookingStatusSchema>;
+
+/**
+ * Keadaan sinkron Google pada satu booking: not_connected (tenant
+ * tidak/belum terhubung saat booking diproses), pending (event outbox
+ * menunggu job), synced (event Google ada untuk booking ini),
+ * failed (percobaan terakhir gagal — booking tetap sah; error tercatat).
+ */
+export const BookingGoogleSyncStatusSchema = z.enum([
+  "not_connected",
+  "pending",
+  "synced",
+  "failed",
+]);
+export type BookingGoogleSyncStatus = z.infer<
+  typeof BookingGoogleSyncStatusSchema
+>;
+
+/** Sumber booking: percakapan flow atau dibuat operator di dashboard. */
+export const BookingSourceSchema = z.enum(["flow", "dashboard"]);
+export type BookingSource = z.infer<typeof BookingSourceSchema>;
+
+export const BookingResponseSchema = z.object({
+  id: z.string().uuid(),
+  serviceId: z.string().uuid(),
+  /** Nama layanan saat dibaca; null bila layanan sudah dihapus. */
+  serviceName: z.string().nullable(),
+  contactId: z.string().uuid(),
+  /** Nama kontak; null bila kontak sudah terhapus. */
+  contactName: z.string().nullable(),
+  /** Percakapan asal (booking flow); null untuk booking dashboard. */
+  conversationId: z.string().uuid().nullable(),
+  /** Instan mulai/selesai UTC (ISO); render lokal = zona janji tenant. */
+  startsAt: z.string().datetime(),
+  endsAt: z.string().datetime(),
+  status: BookingStatusSchema,
+  source: BookingSourceSchema,
+  /** Id event Google; null sampai sinkron berhasil / bila tak terhubung. */
+  googleEventId: z.string().nullable(),
+  googleSyncStatus: BookingGoogleSyncStatusSchema,
+  /** Ringkasan error sinkron terakhir (tanpa kredensial); null bila tak ada. */
+  googleSyncError: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  cancelledAt: z.string().datetime().nullable(),
+});
+export type BookingResponse = z.infer<typeof BookingResponseSchema>;
+
+export const BookingListResponseSchema = z.object({
+  bookings: z.array(BookingResponseSchema),
+});
+export type BookingListResponse = z.infer<typeof BookingListResponseSchema>;
+
+/** Pembuatan booking manual oleh operator di dashboard. */
+export const CreateBookingRequestSchema = z.object({
+  serviceId: z.string().uuid(),
+  contactId: z.string().uuid(),
+  /** Instan mulai UTC (ISO) — UI menghitungnya dari pilihan slot lokal. */
+  startsAt: z.string().datetime(),
+});
+export type CreateBookingRequest = z.infer<typeof CreateBookingRequestSchema>;
+
+/** Satu slot yang bisa dipesan (instan UTC) — pratinjau dashboard. */
+export const AppointmentSlotSchema = z.object({
+  startsAt: z.string().datetime(),
+  endsAt: z.string().datetime(),
+});
+export type AppointmentSlot = z.infer<typeof AppointmentSlotSchema>;
+
+export const AppointmentSlotListResponseSchema = z.object({
+  slots: z.array(AppointmentSlotSchema),
+  /** Zona janji tenant yang menjadi acuan render slot. */
+  timezone: z.string(),
+});
+export type AppointmentSlotListResponse = z.infer<
+  typeof AppointmentSlotListResponseSchema
+>;
+
+/** Keadaan koneksi Google Calendar tenant (TANPA token apa pun). */
+export const GoogleCalendarConnectionResponseSchema = z.object({
+  connected: z.boolean(),
+  /** Email akun Google terhubung; null bila belum terhubung. */
+  accountEmail: z.string().nullable(),
+  /** Kalender tujuan event; null bila belum terhubung. */
+  calendarId: z.string().nullable(),
+  connectedAt: z.string().datetime().nullable(),
+});
+export type GoogleCalendarConnectionResponse = z.infer<
+  typeof GoogleCalendarConnectionResponseSchema
+>;
+
+/** Satu kalender dari akun Google tenant (untuk pemilih kalender). */
+export const GoogleCalendarOptionSchema = z.object({
+  id: z.string(),
+  summary: z.string(),
+  primary: z.boolean(),
+});
+export type GoogleCalendarOption = z.infer<typeof GoogleCalendarOptionSchema>;
+
+export const GoogleCalendarListResponseSchema = z.object({
+  calendars: z.array(GoogleCalendarOptionSchema),
+});
+export type GoogleCalendarListResponse = z.infer<
+  typeof GoogleCalendarListResponseSchema
+>;
+
+export const UpdateGoogleCalendarRequestSchema = z.object({
+  calendarId: z.string().trim().min(1).max(255),
+});
+export type UpdateGoogleCalendarRequest = z.infer<
+  typeof UpdateGoogleCalendarRequestSchema
+>;
+
+/**
+ * Hasil mulai koneksi Google: URL dialog OAuth yang harus dibuka
+ * browser operator. Bila klien OAuth platform belum diatur di Panel
+ * Admin, endpoint menjawab 422 GOOGLE_NOT_CONFIGURED (bukan URL mati).
+ */
+export const GoogleConnectStartResponseSchema = z.object({
+  url: z.string().url(),
+});
+export type GoogleConnectStartResponse = z.infer<
+  typeof GoogleConnectStartResponseSchema
+>;
+
+/** Query daftar booking API publik /v1 (Fase 13G) — rentang + status. */
+export const V1ListAppointmentsQuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  status: BookingStatusSchema.optional(),
+});
+export type V1ListAppointmentsQuery = z.infer<
+  typeof V1ListAppointmentsQuerySchema
+>;
+/** Alias pola SDK (ListContactsQuery/ListBroadcastsQuery). */
+export type ListAppointmentsQuery = V1ListAppointmentsQuery;
+
+// ---------------------------------------------------------------------------
 // Fase 15A — Permukaan publik v1: query tambahan + REGISTRY permukaan.
 //
 // Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
@@ -4768,6 +5153,24 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     contractSchemas: ["OrderResponseSchema"],
     sdkMethod: "getOrder",
     mcpTool: "get_order",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/appointments",
+    scope: "appointments:read",
+    contractSchemas: ["V1ListAppointmentsQuerySchema", "BookingListResponseSchema"],
+    sdkMethod: "listAppointments",
+    mcpTool: "list_appointments",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/appointment-services",
+    scope: "appointments:read",
+    contractSchemas: ["AppointmentServiceListResponseSchema"],
+    sdkMethod: "listAppointmentServices",
+    mcpTool: "list_appointment_services",
     mcpTier: "read",
   },
 ];

@@ -146,6 +146,25 @@ const EnvSchema = z.object({
    * sama dengan TELEGRAM_API_BASE / META_API_BASE.
    */
   RESEND_API_BASE: z.string().url().optional(),
+  /**
+   * Klien OAuth Google milik platform (Fase 13G) — FALLBACK env saja;
+   * sumber utama adalah Panel Admin (kunci `google_oauth_client_id` /
+   * `google_oauth_client_secret` di platform_settings, resolusi
+   * panel → env seperti kunci lain). Client ID bukan rahasia;
+   * client secret rahasia penuh dan hanya di env server.
+   */
+  GOOGLE_OAUTH_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+  /**
+   * Base URL Google untuk mock rantai uji (Fase 13G) — pola yang sama
+   * dengan RESEND_API_BASE: GOOGLE_API_BASE (Calendar API + userinfo;
+   * default https://www.googleapis.com), GOOGLE_TOKEN_BASE (token
+   * endpoint; default https://oauth2.googleapis.com), GOOGLE_AUTH_BASE
+   * (dialog authorize; default https://accounts.google.com).
+   */
+  GOOGLE_API_BASE: z.string().url().optional(),
+  GOOGLE_TOKEN_BASE: z.string().url().optional(),
+  GOOGLE_AUTH_BASE: z.string().url().optional(),
 });
 
 /**
