@@ -5956,3 +5956,92 @@ Dokumen lengkap: `docs/DB-MIGRATION-BASELINE-11A1.md`. Ringkasan:
   (rekursif) dan `package.json` terkait sebelum `pnpm add qrcode
   @types/qrcode`. Kepemilikan file bukan bagian dari git — tanpa
   dampak repo/server.
+
+## Update Hotfix R1 — Avatar channel saat connect + picker Page Messenger (2026-11-03)
+
+Temuan ujicoba ulang user di staging perawan (konek IG + FB berhasil):
+(a) avatar channel terasa baru muncul setelah konek + refresh; (b) IG
+tidak mengambil avatar sama sekali; (c) dari 2 Page yang dikelola
+user, hanya 1 tampil di picker OAuth Messenger. Data live user TIDAK
+direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
+
+- **Diagnosis picker (fakta log, bukan dugaan)**: journal
+  `sahabat-kreator-api` untuk dua percobaan live user (2026-11-02
+  23:23:31 & 23:26:46 UTC) identik:
+  `discovery provider=messenger pages_accounts=1
+  pages_assigned_pages=ERR:graph_10 pages_businesses=ERR:graph_100
+  pages_backfill=0 total=1`. Penyebab: `MESSENGER_OAUTH_SCOPES` tidak
+  pernah meminta `business_management` — dialog Facebook Login klasik
+  hanya memberi scope yang diminta parameter kita, jadi token user
+  tidak bisa membaca tepi bisnis (`/me/assigned_pages` graph_10,
+  `/me/businesses` graph_100) dan Page kedua (hanya terlihat lewat
+  portofolio SHD Store) tidak pernah menjadi kandidat. Kontribusi
+  kedua: `getManagedPages()` membuang diam-diam kandidat tanpa token.
+- **Diagnosis avatar (fakta DB + log)**: akun IG user tidak punya
+  baris `profile_photos` sama sekali; log mencatat
+  `[meta-oauth] pengambilan foto profil akun … gagal` dua kali —
+  permukaan `GET /{id}/picture` bekerja untuk Page tetapi GAGAL untuk
+  ID akun IG di graph.facebook.com. Foto Page Messenger sebenarnya
+  tersimpan 3 detik setelah connect (fire-and-forget) — respons
+  complete sudah terserialisasi lebih dulu dengan avatarUrl null,
+  itulah kesan "harus refresh".
+- **Perbaikan avatar (butir 1)**: semua jalur connect (manual +
+  OAuth complete + SUAT; Messenger/Instagram/WhatsApp/Telegram) kini
+  mengambil foto SAAT connect dan meng-await-nya dengan batas lunak
+  6 detik sebelum respons diserialisasi — respons langsung membawa
+  `avatarUrl`; kegagalan foto tidak pernah menggagalkan koneksi.
+  Permukaan per provider di `MetaGraphClient.getChannelProfilePicture`:
+  Page → `GET /{id}/picture`; IG → `GET /{id}?fields=profile_picture_url`
+  lalu unduh URL CDN-nya (pola yang sama seperti foto profil bisnis
+  WhatsApp). WhatsApp TERNYATA tersedia wajar via Cloud API
+  (`whatsapp_business_profile.profile_picture_url`) — sudah dipakai,
+  kini ikut ter-await. Backfill lazy daftar channel diperluas ke akun
+  Meta (Messenger + IG, token tersimpan terdekripsi, gagal diam-diam
+  + cache negatif 15 menit pola backfill bot Telegram) — akun lama
+  user beravatar pada kunjungan Channels berikutnya TANPA reconnect.
+- **Perbaikan picker (butir 2)**: `business_management` ditambahkan
+  ke `MESSENGER_OAUTH_SCOPES`; callback Messenger kini memakai
+  `listPageCandidates` UTUH — Page tanpa token yang berhasil diisi
+  TETAP tampil di picker sebagai aset `connectable:false` +
+  `unavailableReason:"missing_page_token"` (kontrak
+  `MetaOAuthAsset`), dirender web nonaktif + teks alasan dwibahasa,
+  dan endpoint complete menolaknya 422 `META_OAUTH_ASSET_NOT_CONNECTABLE`
+  (kode error baru di kontrak + i18n en/id). Rantai pages bersama
+  tidak berubah perilakunya untuk IG (dedupe + merge token 7D.3 utuh).
+- **Permukaan publik**: TIDAK ada rute/kemampuan publik baru —
+  serializer channel yang ada memang sudah membawa `avatarUrl`;
+  `pnpm check:drift` lulus (28 rute). `verify-sdk`/`verify-mcp`
+  tidak dijalankan (gerbang butir 7 hanya untuk fase yang menyentuh
+  permukaan publik).
+- **Verifikasi**: typecheck monorepo hijau (19 paket); PGlite verify
+  SEMUA LULUS (36 seksi); build semua dist + grep bundle lokal &
+  server (`business_management`, `META_OAUTH_ASSET_NOT_CONNECTABLE`,
+  `profile_picture_url`, kunci picker baru di chunk web).
+  **Rantai terisolasi di server** (DB buangan `sk_chainr1` + role app
+  sendiri + API :3214 + Redis DB 11 + mock Graph/Telegram :3998):
+  **33 PASS / 0 FAIL** — dialog meminta business_management; Page
+  khusus-bisnis tampil connectable (token backfill) + complete +
+  avatar 200/etag 304; Page hantu tampil nonaktif beralasan +
+  complete 422; discovery IG dedupe 1 aset; avatar saat connect
+  terbukti untuk OAuth Messenger + IG, manual Messenger + IG
+  (token Page & SUAT) + Telegram + WhatsApp (byte foto persis,
+  termasuk jalur IG yang mock-nya menolak `/picture` dengan graph
+  100 — membuktikan permukaan profile_picture_url); connect tanpa
+  foto tetap berhasil (avatarUrl null); backfill Meta mengisi kedua
+  akun seed sesudah daftar dibuka; daftar final 10/10 channel
+  beravatar; 10 baris profile_photos di DB rantai. Deploy: rsync
+  (`.env.staging` dikecualikan; sha256 tetap `9c1ded2a…`), 4 service
+  restart via MainPID, health publik ok, web 200, akun live user utuh
+  (instagram + messenger `connected`=2 sebelum & sesudah). Rantai
+  dibersihkan total (DB + role di-drop, Redis DB 11 di-flush, proses
+  + berkas rantai dihapus).
+- **Batas jujur**: (1) Bukti LIVE picker menunggu user mencoba
+  connect Messenger lagi pasca-deploy — dialog kini akan meminta izin
+  `business_management` (sudah ditambahkan user ke aplikasi); rantai
+  membuktikan perilaku kode terhadap Graph yang memodelkan respons
+  berizin itu. (2) Backfill avatar live untuk Page + IG user yang
+  sudah terhubung terjadi alami saat user membuka halaman Channels
+  berikutnya — tidak dipicu dari rantai uji (token asli user tidak
+  dipakai pengujian). (3) Foto profil WhatsApp bergantung Meta
+  mengembalikan `profile_picture_url` untuk nomor itu; bila kosong,
+  UI jatuh ke inisial seperti biasa (bukan error).
