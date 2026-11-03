@@ -6045,3 +6045,74 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   dipakai pengujian). (3) Foto profil WhatsApp bergantung Meta
   mengembalikan `profile_picture_url` untuk nomor itu; bila kosong,
   UI jatuh ke inisial seperti biasa (bukan error).
+
+## Fase 13C — Mesin Opt-in Broadcast + Segmentasi Lanjutan (2026-11-03)
+
+- **Migrasi 0003_segments_optin** via `pnpm db:generate` (+ blok RLS
+  [K-13C]): jurnal kini **4 entri**; staging **48 tabel / 62 policy**.
+  Isi: `contacts.opt_in_source` varchar(64) NULL +
+  `contacts.opt_in_at` timestamptz NULL (kondisional — sah nullable),
+  `broadcasts.require_opt_in` boolean NOT NULL default false, tabel
+  baru `segments` (name + definition jsonb, keduanya NOT NULL) dan
+  `tenant_opt_in_settings` (satu baris per tenant, dibuat malas).
+- **Mesin opt-in**: matcher consent tingkat sistem di pipeline inbound
+  (dievaluasi sebelum agent; pesan consent tertangani sistem dan tidak
+  diteruskan ke agent). Pencocokan kata PERSIS mengikuti normalisasi
+  matcher keyword; opt-out didahulukan bila keduanya cocok. Kata
+  opt-out bawaan `stop/berhenti/unsubscribe/unsub/keluar` + tambahan
+  tenant; kata opt-in bawaan `ikut/mau ikut/join/optin` (dapat diedit).
+  CATATAN JUJUR: sebelum fase ini TIDAK ada penangkapan opt-out kata
+  kunci inbound sama sekali — opt-out hanya diset dashboard/API; 13C
+  adalah fase yang memperkenalkan penangkapan inbound dua arah.
+  Konfirmasi opt-in terkirim HANYA pada transisi masuk opted_in.
+  Status efektif diturunkan: opted_out tersimpan menang; else
+  opted_in tersimpan ATAU optInAt terisi → opted_in; selain itu none.
+- **Segmentasi**: evaluator SATU di core (profil kontak dimuat sekali)
+  dipakai daftar kontak (`?segmentId=`), pratinjau broadcast, dan
+  materialisasi dispatch. 8 tipe kondisi: tag, stage, source_prefix,
+  opt_in_status, custom_field (eq/contains), created_within_days,
+  last_active_within_days, has_channel. Definisi `last_active` = pesan
+  masuk terakhir di percakapan 1:1; fallback updated_at percakapan 1:1
+  terbaru; tanpa percakapan = tidak pernah aktif.
+- **Broadcast**: penerima tetap dimaterialisasi SAAT DISPATCH oleh
+  worker (perilaku sejak 7C dipertahankan — bukan saat buat);
+  `classifyBroadcastCandidate` tunggal dipakai pratinjau + dispatch
+  (urutan: opted_out → not_opted_in → jendela 24 jam Meta →
+  missing_phone/template). Endpoint pratinjau lama diganti
+  `GET /broadcasts/audience-preview` berincian penuh. Audiens kini
+  `all | tag | segment` (mode baris lama diturunkan otomatis —
+  regresi nol).
+- **Permukaan publik**: scope baru `segments:read` (total 16) +
+  `GET /v1/segments` + `GET /v1/segments/:id` + SDK + MCP (baca) →
+  **30 rute v1**; `pnpm check:drift` lulus. Tulis segmen +
+  pengaturan opt-in = dashboard-only (alasan di matriks).
+- **Verifikasi**: typecheck monorepo hijau; PGlite verify SEMUA LULUS
+  (37 seksi, termasuk [37] baru); build semua dist + grep bundle
+  server (api: `audience-preview`, worker: `not_opted_in`, web:
+  `optInCard`). **Rantai terisolasi di server** (DB buangan
+  `sk_chain13c` + role app sendiri + API :3214 + worker rantai +
+  Redis DB 13 + mock gabungan Telegram/Meta :8413): **82 PASS /
+  0 FAIL** — consent dua arah (ikut→konfirmasi sekali→STOP menang→
+  join lagi→kata tambahan tenant 'cabut'), toggle manual + audit,
+  evaluator 8 kondisi + all/any, CRUD + isolasi tenant, paritas
+  pratinjau↔materialisasi TG/WA, gerbang template 10A, regresi 24 jam
+  7C di Messenger, v1 segmen + 403 scope, verify-sdk + verify-mcp
+  hijau terhadap API rantai. Deploy: rsync (`.env.staging`
+  dikecualikan; sha256 tetap `9c1ded2a…`), migrasi teraplikasi,
+  4 service restart via MainPID, health ok. Data live user UTUH:
+  **1 tenant / 4 channel connected / 1 kontak** sebelum & sesudah
+  (baseline brief menyebut connected=2 — user menambah koneksi
+  Messenger saat retest picker R1, jadi angka live yang benar 4).
+  Rantai dibersihkan total (DB + role di-drop, Redis DB 13 di-flush,
+  proses rantai dimatikan).
+- **Batas jujur**: (1) Bukti live consent menunggu ujicoba user —
+  rantai membuktikan perilaku kode terhadap mock Telegram/Meta;
+  kata kunci bekerja di semua provider karena matcher ada di pipeline
+  inbound bersama, tetapi pengiriman konfirmasi per provider asli
+  (khususnya WhatsApp di luar jendela 24 jam) mengikuti aturan
+  platform masing-masing. (2) Evaluator segmen memuat profil seluruh
+  kontak tenant ke memori per evaluasi (pola yang sama seperti
+  materialisasi broadcast saat ini) — untuk tenant sangat besar ini
+  kandidat optimasi SQL berikutnya. (3) Hitungan anggota segmen
+  tidak disimpan di respons segmen; permukaan hitungan adalah
+  pratinjau (dipakai juga UI pengelola segmen).

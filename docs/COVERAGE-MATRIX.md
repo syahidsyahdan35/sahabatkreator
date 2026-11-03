@@ -61,7 +61,11 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 | Komentar IG/Messenger — daftar | Ada | Ada | Ada — `GET /v1/comments` (`comments:read`) | `listComments()` | `list_comments` (baca) | `sk comments list` | Sejak Fase 10B. |
 | Komentar — sembunyikan/tampilkan | Ada | Ada | Ada — `POST /v1/comments/:id/hide\|unhide` (`comments:write`) | `hideComment()` / `unhideComment()` | `hide_comment` / `unhide_comment` (tulis) | `sk comments hide` / `sk comments unhide` | Helper moderasi yang sama dengan dashboard: Graph dulu, lokal sesudahnya. |
 | Broadcast — daftar & detail + statistik | Ada | Ada | **Ada (baru 15A)** — `GET /v1/broadcasts`, `GET /v1/broadcasts/:id` (`broadcasts:read`) | `listBroadcasts()` / `getBroadcast()` | `list_broadcasts` / `get_broadcast` (baca) | `sk broadcasts list` / `sk broadcasts get` | Paginasi kursor sama seperti dashboard. |
-| Broadcast — buat/edit/jadwal/kirim/batal | Ada | Ada | Dashboard-only (sengaja) | — | — | `sk broadcasts send` ditahan | Radius ledak: pengiriman massal tidak boleh terpicu API key sebelum mesin opt-in + segmentasi Fase 13C ada; gerbang template/24 jam juga ditegakkan di alur dashboard. |
+| Broadcast — buat/edit/jadwal/kirim/batal | Ada | Ada | Dashboard-only (sengaja) | — | — | `sk broadcasts send` ditahan | Radius ledak: pengiriman massal tetap tidak boleh terpicu API key. Mesin opt-in + segmentasi Fase 13C SUDAH ada dan ditegakkan di alur dashboard (gerbang `require_opt_in`, template, 24 jam); keputusan dashboard-only dipertahankan karena pengiriman massal adalah aksi operator bervolume. |
+| Broadcast — gerbang opt-in & pratinjau audiens | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Fase 13C: kolom `require_opt_in` (bawaan true untuk WhatsApp, selain itu false; dapat diubah selama draft) + endpoint pratinjau `GET /broadcasts/audience-preview` yang memakai fungsi klasifikasi inti yang SAMA dengan materialisasi penerima saat dispatch — satu logika, tanpa duplikasi. Alasan skip baru: `not_opted_in`. |
+| Segmen kontak — daftar & detail | Ada | Ada | **Ada (baru 13C)** — `GET /v1/segments`, `GET /v1/segments/:id` (`segments:read`) | `listSegments()` / `getSegment()` | `list_segments` / `get_segment` (baca) | `sk segments list` / `sk segments get` | Evaluator SATU di core dipakai daftar kontak, pratinjau broadcast, dan materialisasi dispatch. Hitungan anggota tidak disimpan di respons — permukaan hitungan adalah pratinjau (dashboard). |
+| Segmen kontak — buat/edit/hapus | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Segmen adalah artefak kurasi UI (pembuat kondisi visual + definisi kompleks); tulis dibatasi sesi dashboard owner/admin (keputusan Fase 13C). |
+| Opt-in broadcast — pengaturan tenant & status kontak | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Fase 13C: kata kunci opt-in/opt-out tambahan tenant + teks konfirmasi adalah konfigurasi perilaku inbox (kartu "Opt-in Broadcast" di halaman Broadcasts). Status kontak terekspos ADITIF di serializer kontak semua permukaan: `optInStatus` (tersimpan) + `optInEffectiveStatus`/`optInSource`/`optInAt` (turunan/jejak). Konversi growth link SENGAJA bukan opt-in pemasaran (klik/memulai chat ≠ persetujuan). |
 | Broadcast — penerima per broadcast | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Statistik agregat sudah terekspos lewat detail; daftar penerima memuat identitas kontak massal — ditahan sampai ada kebutuhan integrasi konkret. |
 | Flow — daftar & detail (termasuk graf) | Ada | Ada | **Ada (baru 15A)** — `GET /v1/flows`, `GET /v1/flows/:id` (`flows:read`) | `listFlows()` / `getFlow()` | `list_flows` / `get_flow` (baca) | `sk flows list` / `sk flows get` | Graf ikut terbaca (artefak tenant sendiri, bukan rahasia lintas tenant). |
 | Flow — buat/edit graf/aktivasi/arsip | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Graf adalah artefak builder visual; aktivasi mengubah perilaku live terhadap pelanggan — keduanya keputusan Fase 12A/12B yang dipertahankan. |
@@ -124,3 +128,19 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 - **28 metode** publik SDK dan **28 tool** MCP: 23 baca / 5 tulis
   (tool tulis tidak berubah; growth links baca saja).
 - `pnpm check:drift` lulus pada permukaan yang diperluas.
+
+## Pembaruan Fase 13C (2026-11-03) — Mesin Opt-in Broadcast + Segmentasi
+
+- **30 rute** API publik v1 (bertambah 2: segmen baca).
+- **16 scope** API key: 3 tulis + 13 baca — scope baru
+  `segments:read` ikut menjadi bawaan kunci baru (preseden yang sama).
+- **30 metode** publik SDK dan **30 tool** MCP: 25 baca / 5 tulis
+  (tool tulis tidak berubah; segmen baca saja).
+- Kontrak kontak berubah ADITIF: `optInEffectiveStatus`,
+  `optInSource`, `optInAt` di serializer bersama dashboard + v1
+  (`optInStatus` tersimpan tetap dipertahankan — regresi nol).
+- `pnpm check:drift` lulus pada permukaan yang diperluas; rantai
+  verifikasi terisolasi Fase 13C: **82 PASS / 0 FAIL** (consent
+  keyword dua arah + konfirmasi sekali per transisi, paritas
+  pratinjau↔materialisasi, evaluator 8 tipe kondisi + all/any,
+  isolasi tenant, regresi 7C/10A, verify-sdk + verify-mcp hijau).
