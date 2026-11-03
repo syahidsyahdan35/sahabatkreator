@@ -2954,7 +2954,7 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *                position?: { x: number, y: number } }
  *   FlowEdge = { from: nodeId, to: nodeId,
  *                branch?: "yes" | "no" | "a" | "b" | "replied" |
- *                         "timeout" }
+ *                         "timeout" | "completed" | "invalid" }
  *
  * `position` adalah metadata TAMPILAN milik builder (Fase 8B): disimpan
  * apa adanya di graf yang sama (satu sumber kebenaran), diterima
@@ -2967,8 +2967,9 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  * `branch` hanya sah keluar dari node bercabang, dan himpunan cabang
  * yang wajib lengkap ditegakkan saat aktivasi (bukan di skema bentuk):
  * `condition` → "yes"+"no", `ab_split` → "a"+"b",
- * `wait_reply` → "replied"+"timeout". Node lain tidak boleh membawa
- * branch.
+ * `wait_reply` → "replied"+"timeout",
+ * `questionnaire` → "completed"+"invalid"+"timeout". Node lain tidak
+ * boleh membawa branch.
  *
  * Tipe node v1 dan config-nya:
  * - trigger       { kind: "keyword", keywords: string[], match:
@@ -3063,6 +3064,55 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *                   Satu pesan masuk melanjutkan SEMUA run wait_reply
  *                   yang parkir di percakapan itu. Opt-out membatalkan
  *                   run parkir seperti delay.
+ *
+ * Tipe node tambahan (Fase 13E):
+ * - questionnaire { questions: [{ id, prompt, answerType:
+ *                   "text"|"number"|"email"|"phone"|"choice",
+ *                   target, required, options? }], amount, unit,
+ *                   maxInvalidAttempts, invalidPrompt?, completionTag? }
+ *                   — kuesioner penangkap lead: daftar pertanyaan
+ *                   BERURUTAN di dalam SATU node, dijalankan memakai
+ *                   mesin parkir wait_reply yang sama (context.wait +
+ *                   tenggat per pertanyaan; balasan yang melanjutkan
+ *                   kuesioner dihitung tertangani flow — tidak bocor ke
+ *                   agent). `target` = "name"|"email"|"phone"|
+ *                   "custom:<key>"; kunci custom harus SUDAH dikenal
+ *                   tenant (dibawa ≥ 1 kontak tenant) — ditegakkan
+ *                   validasi aktivasi (QUESTIONNAIRE_TARGET_UNKNOWN)
+ *                   karena produk tidak punya registri definisi field
+ *                   terpisah: himpunan kunci pada kontak adalah
+ *                   definisinya. Pertanyaan choice wajib ≥ 2 options.
+ *                   Setiap balasan divalidasi menurut answerType
+ *                   (email: bentuk alamat; phone: normalisasi digit
+ *                   yang sama seperti dedup kontak; number: parse
+ *                   numerik, koma desimal diterima; choice: cocok
+ *                   teks opsi case-insensitive ATAU nomor urut 1..n;
+ *                   text: non-kosong sesudah trim) dan jawaban sah
+ *                   LANGSUNG ditulis ke field target — progres parsial
+ *                   selamat dari pengabaian. Jawaban tidak sah memicu
+ *                   prompt ulang (invalidPrompt, atau bawaan produk
+ *                   dwibahasa QUESTIONNAIRE_DEFAULT_INVALID_PROMPT)
+ *                   sampai maxInvalidAttempts per pertanyaan: sesudah
+ *                   itu pertanyaan wajib keluar lewat branch "invalid",
+ *                   pertanyaan opsional dilewati. Cabang keluar:
+ *                   "completed" (semua pertanyaan selesai;
+ *                   completionTag diterapkan bila diisi), "invalid",
+ *                   "timeout" (tenggat pertanyaan berjalan lewat).
+ *                   Keberadaan target custom diperiksa ulang SETIAP
+ *                   pertanyaan hendak dikirim: target wajib yang hilang
+ *                   (kunci tidak lagi dibawa kontak mana pun) keluar
+ *                   "invalid" dengan langkah outcome `target_missing`;
+ *                   target opsional yang hilang dilewati dan tercatat.
+ *                   Jawaban yang sudah telanjur dalam perjalanan tetap
+ *                   ditulis (penulisannya sendiri memulihkan kunci).
+ *                   Transkrip tanya-jawab penuh hidup di
+ *                   context.questionnaire run selama parkir dan disalin
+ *                   ke detail langkah penutup (completed/timeout/
+ *                   attempts_exhausted/target_missing). Render choice:
+ *                   daftar teks bernomor di SEMUA channel — lapisan
+ *                   keluar flow tidak punya infrastruktur tombol
+ *                   quick-reply per channel, jadi tidak ada tombol
+ *                   yang dijanjikan; balasan angka/teks diterima.
  */
 export const FlowStatusSchema = z.enum(["draft", "active", "archived"]);
 export type FlowStatus = z.infer<typeof FlowStatusSchema>;
@@ -3095,6 +3145,8 @@ export const FlowNodeTypeSchema = z.enum([
   "ab_split",
   "send_payment_link",
   "wait_reply",
+  // Fase 13E
+  "questionnaire",
 ]);
 export type FlowNodeType = z.infer<typeof FlowNodeTypeSchema>;
 
@@ -3175,10 +3227,59 @@ export const FlowNodeConfigSchema = z.union([
     amount: z.number().int().min(0).max(100_000),
     unit: z.enum(["seconds", "minutes", "hours"]),
   }),
+  // Fase 13E — questionnaire: bentuk kasar; keabsahan rinci (target
+  // custom harus dikenal tenant, choice ≥ 2 opsi, id pertanyaan unik)
+  // ditegakkan validasi aktivasi di core.
+  z.object({
+    questions: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          prompt: z.string().min(1).max(1000),
+          answerType: z.enum(["text", "number", "email", "phone", "choice"]),
+          target: z.string().min(1).max(128),
+          required: z.boolean(),
+          options: z.array(z.string().min(1).max(200)).max(10).optional(),
+        }),
+      )
+      .min(1)
+      .max(20),
+    amount: z.number().int().min(0).max(100_000),
+    unit: z.enum(["seconds", "minutes", "hours"]),
+    maxInvalidAttempts: z.number().int().min(1).max(5),
+    invalidPrompt: z.string().min(1).max(1000).optional(),
+    completionTag: z.string().min(1).max(64).optional(),
+  }),
   // ai_response / handoff / end: config kosong.
   z.object({}),
 ]);
 export type FlowNodeConfig = z.infer<typeof FlowNodeConfigSchema>;
+
+/**
+ * Satu pertanyaan node questionnaire (Fase 13E) — bentuk kanonis yang
+ * dibaca builder & eksekutor dari config node.
+ */
+export const FlowQuestionnaireQuestionSchema = z.object({
+  id: z.string().min(1).max(64),
+  prompt: z.string().min(1).max(1000),
+  answerType: z.enum(["text", "number", "email", "phone", "choice"]),
+  target: z.string().min(1).max(128),
+  required: z.boolean(),
+  options: z.array(z.string().min(1).max(200)).max(10).optional(),
+});
+export type FlowQuestionnaireQuestion = z.infer<
+  typeof FlowQuestionnaireQuestionSchema
+>;
+
+/**
+ * Prompt ulang bawaan produk (dwibahasa dalam satu pesan, pola email
+ * undangan 11B) yang dipakai node questionnaire bila config
+ * `invalidPrompt` tidak diisi. Teks kanonis tinggal di sini (kontrak)
+ * agar worker dan builder tidak menyimpang; cerminannya tampil di
+ * builder lewat kunci i18n `flows.questionnaireInvalidPromptDefault`.
+ */
+export const QUESTIONNAIRE_DEFAULT_INVALID_PROMPT =
+  "Sorry, that answer doesn't look right yet. Please try again.\nMaaf, jawaban itu sepertinya belum tepat. Silakan coba lagi.";
 
 /**
  * Posisi node di canvas builder (Fase 8B) — koordinat piksel relatif
@@ -3198,7 +3299,10 @@ export const FlowNodeSchema = z.object({
 });
 export type FlowNode = z.infer<typeof FlowNodeSchema>;
 
-/** Cabang edge: condition yes/no, ab_split a/b, wait_reply replied/timeout. */
+/**
+ * Cabang edge: condition yes/no, ab_split a/b, wait_reply
+ * replied/timeout, questionnaire completed/invalid/timeout.
+ */
 export const FlowEdgeBranchSchema = z.enum([
   "yes",
   "no",
@@ -3206,6 +3310,8 @@ export const FlowEdgeBranchSchema = z.enum([
   "b",
   "replied",
   "timeout",
+  "completed",
+  "invalid",
 ]);
 export type FlowEdgeBranch = z.infer<typeof FlowEdgeBranchSchema>;
 
