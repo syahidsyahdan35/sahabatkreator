@@ -32,9 +32,12 @@ function clearReconnectTimer(): void {
 
 function scheduleReconnect(): void {
   if (!currentTenantId || reconnectTimer !== null) return;
-  const delay =
+  const base =
     RECONNECT_DELAYS_MS[Math.min(reconnectStep, RECONNECT_DELAYS_MS.length - 1)];
   reconnectStep += 1;
+  // Jitter ±30%: setelah server restart, semua tab tidak menyambung ulang
+  // pada milidetik yang sama (thundering herd ke gateway realtime).
+  const delay = Math.round(base * (0.7 + Math.random() * 0.6));
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null;
     connect();

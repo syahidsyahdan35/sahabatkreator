@@ -453,14 +453,32 @@ export function InboxPage({ t, locale, conversationId, onConversationChange }: I
     setHighlightedId(null);
   }, [selectedId]);
 
+  // Timer sorotan kutipan dibersihkan saat halaman dilepas — tanpa ini,
+  // berpindah halaman dalam 1,6 dtk memicu setState pada komponen mati.
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+    };
+  }, []);
+
   // Fase 9A — pustaka saved replies dimuat per workspace aktif.
+  // Nomor urut permintaan: balasan yang datang terlambat (workspace sudah
+  // berganti / permintaan lebih baru sudah jalan) TIDAK boleh menimpa
+  // state dengan data workspace lama.
+  const savedRepliesReqRef = useRef(0);
   const loadSavedReplies = useCallback(async () => {
     if (!tenantId) return;
+    const seq = ++savedRepliesReqRef.current;
     try {
       const res = await api.savedReplies.list(tenantId);
+      if (seq !== savedRepliesReqRef.current) return;
       setSavedReplies(res.replies);
       setSavedRepliesError(null);
     } catch {
+      if (seq !== savedRepliesReqRef.current) return;
       setSavedRepliesError(t("inbox.savedReplies.loadError"));
     }
   }, [tenantId, t]);

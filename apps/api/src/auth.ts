@@ -18,6 +18,7 @@ import {
   type Database,
   type User,
 } from "@sahabat-kreator/db";
+import type { RateLimitStorage } from "./rate-limit-store";
 
 /**
  * Integrasi Better Auth (Fase 1B) — email + password, sesi cookie httpOnly.
@@ -53,6 +54,8 @@ function createAuthInstance(
     baseURL: string;
     platformAdminEmails?: string;
     passwordResetEmail?: PasswordResetEmailOptions;
+    /** Storage rate limit bersama (Redis) — Fase 13D; null = in-memory bawaan. */
+    rateLimitStorage?: RateLimitStorage | null;
   },
 ) {
   return betterAuth({
@@ -189,10 +192,14 @@ function createAuthInstance(
      * Default global 10 dtk/100 req adalah default library, ditulis
      * eksplisit agar konfigurasi efektif terlihat utuh di satu tempat.
      *
-     * Penyimpanan: bawaan library = in-memory (satu proses API);
-     * penghitung reset saat API restart — dapat diterima untuk staging
-     * satu proses; untuk multi-proses gunakan storage database /
-     * secondary-storage.
+     * Penyimpanan (Fase 13D): dengan `REDIS_URL` terisi, penghitung
+     * disimpan di Redis lewat `customStorage` sehingga berlaku lintas
+     * proses/replika dan tidak reset saat API restart. Tanpa Redis
+     * (pengembangan lokal) kita JATUH ke storage in-memory bawaan
+     * library — perilaku lama, satu ember per proses. Jalur
+     * `customStorage` sengaja dipilih alih-alih `secondaryStorage`
+     * agar sesi TETAP sepenuhnya di Postgres dan tidak ada perilaku
+     * auth lain yang ikut berubah.
      *
      * `enabled: true` ditulis eksplisit (default library: hanya aktif
      * di production) agar perilaku tidak bergantung pada NODE_ENV.
@@ -205,6 +212,9 @@ function createAuthInstance(
         "/sign-up/*": { window: 60, max: 10 },
         "/sign-in/*": { window: 60, max: 20 },
       },
+      ...(opts.rateLimitStorage
+        ? { customStorage: opts.rateLimitStorage }
+        : {}),
     },
     advanced: {
       ipAddress: {
@@ -267,6 +277,8 @@ export function createAuthBundle(opts: {
   platformAdminEmails?: string;
   /** Dependensi email reset kata sandi (Fase 14C); tanpa ini endpoint reset menjawab tidak-aktif dari library. */
   passwordResetEmail?: PasswordResetEmailOptions;
+  /** Storage rate limit bersama (Redis) — Fase 13D; null/kosong = in-memory. */
+  rateLimitStorage?: RateLimitStorage | null;
 }): AuthBundle {
   const { db } = createDb(opts.databaseUrl);
   return { auth: createAuthInstance(db, opts), db };

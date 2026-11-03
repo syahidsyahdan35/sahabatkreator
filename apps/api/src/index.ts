@@ -15,6 +15,7 @@ import {
   resolveR2Bucket,
 } from "@sahabat-kreator/config";
 import { createAuthBundle, type AuthBundle } from "./auth";
+import { createRedisRateLimitStorage } from "./rate-limit-store";
 import type { AppVariables } from "./http";
 import { createTenantsRoutes } from "./modules/tenants/routes";
 import { createContactsRoutes } from "./modules/contacts/routes";
@@ -111,6 +112,10 @@ if (env.DATABASE_URL && env.BETTER_AUTH_SECRET) {
       platform: platformOptions,
       apiBase: env.RESEND_API_BASE,
     },
+    // Fase 13D: rate limit auth di Redis agar berlaku lintas replika
+    // dan tidak reset saat restart. Tanpa REDIS_URL → null → storage
+    // in-memory bawaan Better Auth (mode pengembangan).
+    rateLimitStorage: createRedisRateLimitStorage(env.REDIS_URL),
   });
 }
 

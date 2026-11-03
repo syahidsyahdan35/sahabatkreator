@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, type SessionUser } from "../api/client";
+import { api, UNAUTHORIZED_EVENT, type SessionUser } from "../api/client";
 
 /**
  * State sesi untuk seluruh aplikasi (Fase 1C).
@@ -50,6 +50,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Sesi kedaluwarsa/dicabut di tengah pemakaian: klien memancarkan event
+  // pada balasan 401 pertama (lihat api/client.ts). Segarkan sesi sekali —
+  // bila benar sudah tidak valid, status menjadi anonymous dan shell
+  // mengalihkan ke /login, alih-alih setiap halaman menampilkan error.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      void refresh();
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, [refresh]);
 
   const signOut = useCallback(async () => {

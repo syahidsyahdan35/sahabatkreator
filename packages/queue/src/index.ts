@@ -247,6 +247,29 @@ export function createRedisConnection(redisUrl: string): Redis {
   return new Redis(redisUrl, { maxRetriesPerRequest: null });
 }
 
+/**
+ * Koneksi Redis "fail-fast" untuk pemakaian di jalur request (mis.
+ * penyimpanan rate limit Better Auth, Fase 13D).
+ *
+ * Beda dari `createRedisConnection`: perintah TIDAK diantrekan saat
+ * Redis belum tersambung (`enableOfflineQueue: false`) dan gagal
+ * setelah satu percobaan (`maxRetriesPerRequest: 1`). Ini penting agar
+ * request auth tidak menggantung menunggu Redis yang mati — pemanggil
+ * memperlakukan kegagalan sebagai "tidak ada data" (fail-open) dan
+ * melanjutkan tanpa rate limit bersama.
+ *
+ * JANGAN dipakai untuk BullMQ: Worker/Queue membutuhkan koneksi
+ * blocking dengan `maxRetriesPerRequest: null`.
+ */
+export function createEphemeralRedisConnection(redisUrl: string): Redis {
+  return new Redis(redisUrl, {
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    connectTimeout: 2_000,
+    lazyConnect: true,
+  });
+}
+
 /** Semua data job yang berjalan di antrean fisik utama. */
 export type MainJobData =
   | AutomationEvaluateJobData

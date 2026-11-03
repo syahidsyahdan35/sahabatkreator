@@ -190,18 +190,25 @@ function fallbackCodeForStatus(status: number): string {
   return "INTERNAL_ERROR";
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      ...init,
-    });
-  } catch {
-    throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
-  }
+/**
+ * Event global saat server menjawab 401 (sesi kedaluwarsa / dicabut).
+ * AuthProvider mendengarkannya lalu menyegarkan sesi — pengguna langsung
+ * dialihkan ke /login alih-alih melihat error per halaman.
+ */
+export const UNAUTHORIZED_EVENT = "sk:unauthorized";
+let lastUnauthorizedAt = 0;
 
+function notifyUnauthorized(): void {
+  if (typeof window === "undefined") return;
+  // Banyak request paralel bisa 401 bersamaan; cukup satu event per 2 dtk.
+  const now = Date.now();
+  if (now - lastUnauthorizedAt < 2_000) return;
+  lastUnauthorizedAt = now;
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
+
+/** Parse body + terjemahkan error kontrak — dipakai request & multipart. */
+async function parseResponse<T>(res: Response): Promise<T> {
   const raw = await res.text();
   let body: unknown = null;
   if (raw) {
@@ -223,10 +230,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       (typeof contractError?.message === "string" && contractError.message) ||
       (typeof record.message === "string" && record.message) ||
       res.statusText;
+    if (res.status === 401) notifyUnauthorized();
     throw new ApiClientError(res.status, code, message, contractError?.details);
   }
 
   return body as T;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  const headers = new Headers(init?.headers);
+  // Default JSON, TAPI header pemanggil menang (bug lama: `...init` setelah
+  // headers membuat Content-Type pemanggil hilang).
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  try {
+    res = await fetch(path, {
+      credentials: "include",
+      ...init,
+      headers,
+    });
+  } catch {
+    throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
+  }
+  return parseResponse<T>(res);
 }
 
 /**
@@ -235,43 +261,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  * `multipart/form-data; boundary=...` sendiri. Penanganan error
  * identik request() — kode kontrak diterjemahkan UI lewat errorText.
  */
-async function requestFormData<T>(path: string, form: FormData): Promise<T> {
+async function requestFormData<T>(
+  path: string,
+  form: FormData,
+  init?: { signal?: AbortSignal },
+): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
       method: "POST",
       credentials: "include",
       body: form,
+      ...(init?.signal ? { signal: init.signal } : {}),
     });
   } catch {
     throw new ApiClientError(0, "NETWORK_ERROR", "Network request failed");
   }
-
-  const raw = await res.text();
-  let body: unknown = null;
-  if (raw) {
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      body = null;
-    }
-  }
-
-  if (!res.ok) {
-    const record = (body ?? {}) as Record<string, unknown>;
-    const contractError = record.error as Record<string, unknown> | undefined;
-    const code =
-      (typeof contractError?.code === "string" && contractError.code) ||
-      (typeof record.code === "string" && record.code) ||
-      fallbackCodeForStatus(res.status);
-    const message =
-      (typeof contractError?.message === "string" && contractError.message) ||
-      (typeof record.message === "string" && record.message) ||
-      res.statusText;
-    throw new ApiClientError(res.status, code, message, contractError?.details);
-  }
-
-  return body as T;
+  return parseResponse<T>(res);
 }
 
 export const api = {
