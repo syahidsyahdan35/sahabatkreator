@@ -73,7 +73,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 4 tabel Fase 13F (carts, cart_items, orders, order_items)
 // + 5 tabel Fase 13G (appointment_services, appointment_settings,
 //   appointment_availability, bookings, google_calendar_connections)
-assert.equal(Number(tablesRes.rows[0].count), 58);
+// + 1 tabel Fase 14A (payment_provider_configs)
+assert.equal(Number(tablesRes.rows[0].count), 59);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -177,7 +178,9 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada appointment_services, appointment_settings,
 //   appointment_availability, bookings, google_calendar_connections
 //   (Fase 13G, migrasi 0006) = 72.
-assert.equal(Number(policies.rows[0].count), 72);
+// + tenant_isolation pada payment_provider_configs
+//   (Fase 14A, migrasi 0007) = 73.
+assert.equal(Number(policies.rows[0].count), 73);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -204,7 +207,8 @@ await db.exec(`
     flow_experiment_assignments,
     carts, cart_items, orders, order_items,
     appointment_services, appointment_settings, appointment_availability,
-    bookings, google_calendar_connections
+    bookings, google_calendar_connections,
+    payment_provider_configs
   TO app_user;
 `);
 
@@ -2291,6 +2295,8 @@ function oneHotVector(index: number): string {
   // menambah 5 tabel janji temu (appointment_services,
   // appointment_settings, appointment_availability, bookings,
   // google_calendar_connections) + 5 policy tenant_isolation → 58 / 72.
+  // Fase 14A menambah 1 tabel (payment_provider_configs) + 1 policy
+  // tenant_isolation → 59 / 73.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2298,8 +2304,8 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "58");
-  assert.equal(counts.rows[0].policies, "72");
+  assert.equal(counts.rows[0].tables, "59");
+  assert.equal(counts.rows[0].policies, "73");
   console.log(
     "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel & policy global sesuai hitungan berjalan: OK",
   );
@@ -3005,6 +3011,98 @@ function oneHotVector(index: number): string {
   assert.equal(views.crossBlocked, true);
   console.log(
     "[40] Fase 13G: 5 tabel janji temu terisolasi tenant; eksklusi GiST menolak booking confirmed tumpang tindih (mengizinkan bersebelahan, tenant lain, dan sesudah batal); CHECK ketersediaan (weekday/format/end>start) + koneksi Google unik per tenant: OK",
+  );
+}
+
+// ---------- 41. Fase 14A: payment_provider_configs + kolom provider tautan ----------
+{
+  // Kolom Fase 14A di payment_links: provider_environment NOT NULL
+  // default 'sandbox', provider_ref + checkout_url nullable (hanya ada
+  // bila provider sungguhan membuat sesi checkout).
+  const linkCols = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'payment_links'
+        AND column_name IN ('provider_environment', 'provider_ref', 'checkout_url')`,
+  );
+  assert.equal(linkCols.rows[0].count, "3");
+  const envCol = await db.query<{ is_nullable: string; column_default: string }>(
+    `SELECT is_nullable, column_default FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'payment_links'
+        AND column_name = 'provider_environment'`,
+  );
+  assert.equal(envCol.rows[0].is_nullable, "NO");
+  assert.match(envCol.rows[0].column_default, /sandbox/);
+
+  // Konfigurasi bawaan: satu baris per tenant (unik); provider &
+  // environment tervalidasi CHECK; kolom kunci hanya envelope/null.
+  await db.query(
+    `INSERT INTO payment_provider_configs (tenant_id, provider, environment,
+       midtrans_sandbox_server_key_encrypted)
+     VALUES ($1, 'midtrans', 'sandbox', 'v1:deadbeef')`,
+    [TENANT_A],
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO payment_provider_configs (tenant_id) VALUES ($1)`,
+      [TENANT_A],
+    ),
+    /duplicate key|payment_provider_configs_tenant_unique/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO payment_provider_configs (tenant_id, provider)
+       VALUES ($1, 'paypal')`,
+      [TENANT_B],
+    ),
+    /check constraint|provider_valid/i,
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO payment_provider_configs (tenant_id, environment)
+       VALUES ($1, 'staging')`,
+      [TENANT_B],
+    ),
+    /check constraint|environment_valid/i,
+  );
+  await db.query(
+    `INSERT INTO payment_provider_configs (tenant_id) VALUES ($1)`,
+    [TENANT_B],
+  );
+  const defaults = await db.query<{ provider: string; environment: string }>(
+    `SELECT provider, environment FROM payment_provider_configs WHERE tenant_id = $1`,
+    [TENANT_B],
+  );
+  assert.equal(defaults.rows[0].provider, "simulation");
+  assert.equal(defaults.rows[0].environment, "sandbox");
+
+  // Isolasi RLS sebagai app_user: A melihat konfigurasinya, B hanya
+  // miliknya; sisip lintas tenant ditolak WITH CHECK.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const aRows = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM payment_provider_configs`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const bRows = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM payment_provider_configs`,
+    );
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO payment_provider_configs (tenant_id, provider) VALUES ($1, 'xendit')`,
+        [TENANT_A],
+      );
+    } catch {
+      crossBlocked = true;
+    }
+    return { aRows, bRows, crossBlocked };
+  });
+  assert.equal(views.aRows.rows[0].n, "1");
+  assert.equal(views.bRows.rows[0].n, "1");
+  assert.equal(views.crossBlocked, true);
+  console.log(
+    "[41] Fase 14A: payment_provider_configs unik per tenant + CHECK provider/environment + default simulation/sandbox; payment_links.provider_environment NOT NULL default 'sandbox' (+ provider_ref/checkout_url); isolasi RLS konfigurasi provider: OK",
   );
 }
 

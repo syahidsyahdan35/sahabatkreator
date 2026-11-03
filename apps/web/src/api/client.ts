@@ -124,6 +124,9 @@ import type {
   ProductListResponse,
   ProductResponse,
   PublicPaymentResponse,
+  PaymentSettingsResponse,
+  PaymentSettingsTestResponse,
+  UpdatePaymentSettingsRequest,
   SequenceEnrollmentListResponse,
   SequenceEnrollmentResponse,
   TenantListResponse,
@@ -1943,6 +1946,32 @@ export const api = {
         method: "POST",
         body: JSON.stringify({}),
       });
+    },
+  },
+  paymentSettings: {
+    /** GET /api/tenants/:tenantId/payment-settings → konfigurasi gerbang (tanpa nilai kunci). */
+    get(tenantId: string): Promise<PaymentSettingsResponse> {
+      return request<PaymentSettingsResponse>(
+        `/api/tenants/${tenantId}/payment-settings`,
+        { method: "GET" },
+      );
+    },
+    /** PUT /api/tenants/:tenantId/payment-settings → simpan (kunci dienkripsi server). */
+    update(
+      tenantId: string,
+      input: UpdatePaymentSettingsRequest,
+    ): Promise<PaymentSettingsResponse> {
+      return request<PaymentSettingsResponse>(
+        `/api/tenants/${tenantId}/payment-settings`,
+        { method: "PUT", body: JSON.stringify(input) },
+      );
+    },
+    /** POST /api/tenants/:tenantId/payment-settings/test → uji koneksi provider aktif. */
+    test(tenantId: string): Promise<PaymentSettingsTestResponse> {
+      return request<PaymentSettingsTestResponse>(
+        `/api/tenants/${tenantId}/payment-settings/test`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
     },
   },
   team: {

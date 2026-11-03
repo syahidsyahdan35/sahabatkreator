@@ -363,6 +363,8 @@ export {
   listActiveCatalogProductsTx,
   getOrCreateOpenCartTx,
   getCartViewTx,
+  getCartView,
+  prepareOrderCheckoutLink,
   addToCartTx,
   checkoutCartTx,
   listOrders,
@@ -376,7 +378,36 @@ export {
   type CartView,
   type CheckoutCartResult,
   type OrderWithDetails,
+  type PreparedOrderLink,
 } from "./commerce";
+export {
+  // Fase 14A — gerbang pembayaran sungguhan (Midtrans/Xendit):
+  // konfigurasi provider tenant, sesi checkout, uji koneksi, webhook.
+  getPaymentSettings,
+  updatePaymentSettings,
+  resolvePaymentCredentials,
+  createProviderCheckoutSession,
+  testPaymentConnection,
+  handleMidtransWebhook,
+  handleXenditWebhook,
+  PaymentProviderError,
+  PAYMENT_PROVIDER_MIDTRANS,
+  PAYMENT_PROVIDER_XENDIT,
+  MIDTRANS_SANDBOX_API_BASE,
+  MIDTRANS_PRODUCTION_API_BASE,
+  XENDIT_API_BASE,
+  type PaymentDeps,
+  type PaymentProviderId,
+  type PaymentEnvironment,
+  type PaymentSettingsView,
+  type UpdatePaymentSettingsInput,
+  type UpdatePaymentSettingsResult,
+  type ResolvedPaymentCredentials,
+  type ProviderCheckoutSession,
+  type PaymentConnectionTestResult,
+  type PaymentWebhookOutcome,
+  type PaymentWebhookResult,
+} from "./payments";
 export {
   // Fase 13G — janji temu: pengaturan, layanan, ketersediaan, mesin
   // slot tunggal, booking (buat/batal), render & parsing daftar slot.

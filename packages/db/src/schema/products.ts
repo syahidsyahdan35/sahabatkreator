@@ -28,10 +28,12 @@ import { contacts, conversations } from "./inbox";
  *                   mengubah tautan yang sudah beredar. `code` adalah
  *                   kredensial publik tautan (`pay_...`), sama seperti
  *                   siteKey webchat: dirancang untuk disebar ke pembeli.
- *                   `provider` fase ini selalu 'simulation' — BELUM ada
- *                   gerbang pembayaran sungguhan (Midtrans/Xendit menyusul
- *                   bersama kredensial sandbox-nya); halaman /pay WAJIB
- *                   berlabel simulasi secara jujur di UI.
+ *                   `provider` adalah gerbang pembayaran tautan —
+ *                   'simulation' sampai Fase 13F; sejak Fase 14A juga
+ *                   'midtrans'/'xendit' sungguhan sesuai konfigurasi
+ *                   provider tenant (payment_provider_configs), dan
+ *                   halaman /pay hanya berlabel simulasi untuk provider
+ *                   'simulation'.
  * Semua tabel tenant-scoped: tenant_id + index, dilindungi RLS (migrasi
  * 0012 — termasuk lengan SELECT sempit `app.payment_code` pada
  * payment_links agar halaman bayar publik bisa me-resolve code → tenant,
@@ -127,8 +129,29 @@ export const paymentLinks = pgTable(
     /** Snapshot harga produk saat tautan dibuat (Rupiah penuh). */
     amountIdr: bigint("amount_idr", { mode: "number" }).notNull(),
     status: paymentLinkStatusEnum("status").notNull().default("pending"),
-    /** Gerbang pembayaran; fase ini selalu 'simulation' (BUKAN pembayaran sungguhan). */
+    /** Gerbang pembayaran tautan: 'simulation' | 'midtrans' | 'xendit' (Fase 14A). */
     provider: varchar("provider", { length: 32 }).notNull().default("simulation"),
+    /**
+     * Environment provider saat tautan dibuat (Fase 14A): 'sandbox' |
+     * 'production'. Snapshot per tautan — mengganti environment tenant
+     * sesudahnya tidak menulis ulang tautan yang sudah beredar (sama
+     * seperti snapshot harga). Untuk 'simulation' selalu 'sandbox'.
+     */
+    providerEnvironment: varchar("provider_environment", { length: 16 })
+      .notNull()
+      .default("sandbox"),
+    /**
+     * Referensi transaksi di provider (Fase 14A): token Snap Midtrans /
+     * id invoice Xendit. NULL untuk simulasi dan untuk tautan warisan
+     * pra-14A — referensi hanya ada bila provider sungguhan membuatnya.
+     */
+    providerRef: varchar("provider_ref", { length: 255 }),
+    /**
+     * URL checkout provider (Fase 14A): redirect_url Snap / invoice_url
+     * Xendit. Halaman /pay/:code mengarahkan pembeli ke sini. NULL untuk
+     * simulasi (halaman membayar di tempat).
+     */
+    checkoutUrl: text("checkout_url"),
     paidAt: timestamp("paid_at", { withTimezone: true }),
     /** Kedaluwarsa default 7 hari sejak dibuat (di-set service, bukan DB default). */
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

@@ -28,6 +28,7 @@ import {
   syncBookingToGoogle,
   type CommentGraphActions,
   type GoogleDeps,
+  type PaymentDeps,
   type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
 import {
@@ -218,6 +219,20 @@ const googleDeps: GoogleDeps = {
     tokenBase: env.GOOGLE_TOKEN_BASE,
     authBase: env.GOOGLE_AUTH_BASE,
   },
+};
+
+/**
+ * Dependensi gerbang pembayaran (Fase 14A) untuk node flow
+ * send_payment_link/cart_checkout + tool agent send_payment_link:
+ * secret enkripsi kredensial tenant + override base URL provider
+ * untuk mock rantai. Konfigurasi providernya sendiri dibaca core
+ * dari DB per tenant.
+ */
+const paymentDeps: PaymentDeps = {
+  tokenSecret: env.CHANNEL_TOKEN_SECRET,
+  midtransApiBase: env.MIDTRANS_API_BASE,
+  xenditApiBase: env.XENDIT_API_BASE,
+  publicBaseUrl: env.BETTER_AUTH_URL,
 };
 
 async function resolveAgentLlmProvider(): Promise<LlmProvider> {
@@ -444,6 +459,7 @@ const bullWorker = new Worker<MainJobData>(
           resolveEmbeddingProvider: resolveWorkerEmbeddingProvider,
           publicBaseUrl: env.BETTER_AUTH_URL,
           google: googleDeps,
+          payments: paymentDeps,
         },
       );
       // Pesan `queued` yang dibuat langkah ini → nudge pengiriman.
@@ -598,6 +614,8 @@ const bullWorker = new Worker<MainJobData>(
         // Untuk tool send_payment_link (Fase 4A): URL /pay/:code yang
         // dikirim agent harus absolut, berbasis URL publik aplikasi.
         publicBaseUrl: env.BETTER_AUTH_URL,
+        // Fase 14A: deps gerbang pembayaran untuk tool yang sama.
+        payments: paymentDeps,
         // Fase 9A: jalur job inilah yang dibatch (lihat enqueue di
         // processor automation.evaluate) — menyerah bila ada pesan
         // masuk yang lebih baru di percakapan yang sama.

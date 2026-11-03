@@ -13,7 +13,11 @@ import {
   type InvitationResponse,
   type InvitableRole,
   type MemberRole,
+  type PaymentEnvironment,
+  type PaymentProvider,
+  type PaymentSettingsResponse,
   type TeamMemberResponse,
+  type UpdatePaymentSettingsRequest,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
@@ -27,6 +31,415 @@ type Translate = (
   key: TranslationKey,
   params?: Record<string, string | number>,
 ) => string;
+
+// ---------------------------------------------------------------------------
+// Pengaturan pembayaran (Fase 14A) — Settings → Payments
+// ---------------------------------------------------------------------------
+
+type PaymentKeyField = Exclude<
+  keyof UpdatePaymentSettingsRequest,
+  "provider" | "environment"
+>;
+
+const MIDTRANS_KEY_FIELDS: {
+  field: PaymentKeyField;
+  env: PaymentEnvironment;
+  kind: "server" | "client";
+}[] = [
+  { field: "midtransSandboxServerKey", env: "sandbox", kind: "server" },
+  { field: "midtransSandboxClientKey", env: "sandbox", kind: "client" },
+  { field: "midtransProductionServerKey", env: "production", kind: "server" },
+  { field: "midtransProductionClientKey", env: "production", kind: "client" },
+];
+
+const XENDIT_KEY_FIELDS: {
+  field: PaymentKeyField;
+  env: PaymentEnvironment;
+  kind: "server" | "client" | "callback";
+}[] = [
+  { field: "xenditSandboxServerKey", env: "sandbox", kind: "server" },
+  { field: "xenditSandboxClientKey", env: "sandbox", kind: "client" },
+  { field: "xenditSandboxCallbackToken", env: "sandbox", kind: "callback" },
+  { field: "xenditProductionServerKey", env: "production", kind: "server" },
+  { field: "xenditProductionClientKey", env: "production", kind: "client" },
+  { field: "xenditProductionCallbackToken", env: "production", kind: "callback" },
+];
+
+function keyConfigured(
+  settings: PaymentSettingsResponse,
+  field: PaymentKeyField,
+): boolean {
+  const m = settings.midtrans;
+  const x = settings.xendit;
+  switch (field) {
+    case "midtransSandboxServerKey":
+      return m.sandbox.serverKeyConfigured;
+    case "midtransSandboxClientKey":
+      return m.sandbox.clientKeyConfigured;
+    case "midtransProductionServerKey":
+      return m.production.serverKeyConfigured;
+    case "midtransProductionClientKey":
+      return m.production.clientKeyConfigured;
+    case "xenditSandboxServerKey":
+      return x.sandbox.serverKeyConfigured;
+    case "xenditSandboxClientKey":
+      return x.sandbox.clientKeyConfigured;
+    case "xenditProductionServerKey":
+      return x.production.serverKeyConfigured;
+    case "xenditProductionClientKey":
+      return x.production.clientKeyConfigured;
+    case "xenditSandboxCallbackToken":
+      return x.sandbox.callbackTokenConfigured;
+    case "xenditProductionCallbackToken":
+      return x.production.callbackTokenConfigured;
+  }
+}
+
+/**
+ * Seksi Payments: provider + environment aktif tenant dan kunci per
+ * (provider, environment). Nilai kunci TIDAK PERNAH ditampilkan —
+ * server hanya melaporkan terkonfigurasi/tidak; kolom kosong saat
+ * simpan berarti "pertahankan", tombol hapus mengirim penghapusan
+ * eksplisit. Uji koneksi menguji provider+environment AKTIF.
+ */
+function PaymentsSection({
+  t,
+  tenantId,
+  canManage,
+}: {
+  t: Translate;
+  tenantId: string;
+  canManage: boolean;
+}) {
+  const [settings, setSettings] = useState<PaymentSettingsResponse | null>(
+    null,
+  );
+  const [provider, setProvider] = useState<PaymentProvider>("simulation");
+  const [environment, setEnvironment] =
+    useState<PaymentEnvironment>("sandbox");
+  const [keyValues, setKeyValues] = useState<
+    Partial<Record<PaymentKeyField, string>>
+  >({});
+  const [cleared, setCleared] = useState<PaymentKeyField[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testMessage, setTestMessage] = useState<string | null>(null);
+  const [testOk, setTestOk] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const s = await api.paymentSettings.get(tenantId);
+      setSettings(s);
+      setProvider(s.provider);
+      setEnvironment(s.environment);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [tenantId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    setSaveError(null);
+    setTestMessage(null);
+    try {
+      const input: UpdatePaymentSettingsRequest = { provider, environment };
+      for (const field of [
+        ...MIDTRANS_KEY_FIELDS,
+        ...XENDIT_KEY_FIELDS,
+      ]) {
+        if (cleared.includes(field.field)) input[field.field] = "";
+        else if (keyValues[field.field]) input[field.field] = keyValues[field.field];
+      }
+      const s = await api.paymentSettings.update(tenantId, input);
+      setSettings(s);
+      setProvider(s.provider);
+      setEnvironment(s.environment);
+      setKeyValues({});
+      setCleared([]);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(translateApiError(t, err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runTest = async () => {
+    setTesting(true);
+    setTestMessage(null);
+    try {
+      const r = await api.paymentSettings.test(tenantId);
+      setTestOk(r.ok);
+      setTestMessage(
+        r.ok
+          ? t("settings.payments.testOk")
+          : r.code === "NOT_CONFIGURED"
+            ? t("settings.payments.testNotConfigured")
+            : r.code.endsWith("AUTH_FAILED")
+              ? t("settings.payments.testAuthFailed")
+              : t("settings.payments.testUnreachable"),
+      );
+    } catch (err) {
+      setTestOk(false);
+      setTestMessage(translateApiError(t, err));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const renderKeyField = (
+    field: PaymentKeyField,
+    kind: "server" | "client" | "callback",
+  ) => {
+    const configured = settings ? keyConfigured(settings, field) : false;
+    const isCleared = cleared.includes(field);
+    return (
+      <div key={field}>
+        <label
+          htmlFor={`pay-${field}`}
+          className="mb-1 flex items-center gap-2 text-sm font-medium text-ink"
+        >
+          {kind === "server"
+            ? t("settings.payments.serverKeyLabel")
+            : kind === "client"
+              ? t("settings.payments.clientKeyLabel")
+              : t("settings.payments.callbackTokenLabel")}
+          <span
+            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+              configured && !isCleared
+                ? "bg-elevated text-accent"
+                : "bg-elevated text-muted"
+            }`}
+          >
+            {configured && !isCleared
+              ? t("settings.payments.configuredLabel")
+              : t("settings.payments.notConfiguredLabel")}
+          </span>
+        </label>
+        <PasswordInput
+          t={t}
+          id={`pay-${field}`}
+          value={keyValues[field] ?? ""}
+          onChange={(e) =>
+            setKeyValues((prev) => ({ ...prev, [field]: e.target.value }))
+          }
+          className={inputClassName}
+          autoComplete="off"
+          disabled={!canManage || isCleared}
+          placeholder={
+            configured
+              ? t("settings.payments.keyPlaceholderConfigured")
+              : t("settings.payments.keyPlaceholderEmpty")
+          }
+        />
+        {configured && canManage ? (
+          <button
+            type="button"
+            onClick={() =>
+              setCleared((prev) =>
+                isCleared
+                  ? prev.filter((f) => f !== field)
+                  : [...prev, field],
+              )
+            }
+            className="mt-1 text-xs font-medium text-danger"
+          >
+            {isCleared
+              ? t("common.cancel")
+              : t("settings.payments.clearKeyLabel")}
+          </button>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderEnvGroup = (
+    title: string,
+    fields: { field: PaymentKeyField; kind: "server" | "client" | "callback" }[],
+  ) => (
+    <div className="mt-4">
+      <h4 className="text-sm font-semibold text-ink">{title}</h4>
+      <div className="mt-2 grid gap-3 sm:grid-cols-2">
+        {fields.map((f) => renderKeyField(f.field, f.kind))}
+      </div>
+    </div>
+  );
+
+  return (
+    <section className="mt-10">
+      <h2 className="text-base font-semibold text-ink">
+        {t("settings.payments.title")}
+      </h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted">
+        {t("settings.payments.body")}
+      </p>
+      {!canManage ? (
+        <p className="mt-2 max-w-2xl text-sm text-muted">
+          {t("settings.payments.adminOnlyNote")}
+        </p>
+      ) : null}
+      {loading ? (
+        <p className="mt-4 text-sm text-muted">{t("common.loading")}</p>
+      ) : loadError || !settings ? (
+        <p className="mt-4 text-sm text-danger">
+          {t("settings.payments.loadError")}
+        </p>
+      ) : (
+        <form onSubmit={save} className="mt-4 max-w-2xl">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label
+                htmlFor="pay-provider"
+                className="mb-1 block text-sm font-medium text-ink"
+              >
+                {t("settings.payments.providerLabel")}
+              </label>
+              <select
+                id="pay-provider"
+                value={provider}
+                onChange={(e) =>
+                  setProvider(e.target.value as PaymentProvider)
+                }
+                disabled={!canManage}
+                className={inputClassName}
+              >
+                <option value="simulation">
+                  {t("settings.payments.providerSimulation")}
+                </option>
+                <option value="midtrans">
+                  {t("settings.payments.providerMidtrans")}
+                </option>
+                <option value="xendit">
+                  {t("settings.payments.providerXendit")}
+                </option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="pay-environment"
+                className="mb-1 block text-sm font-medium text-ink"
+              >
+                {t("settings.payments.environmentLabel")}
+              </label>
+              <select
+                id="pay-environment"
+                value={environment}
+                onChange={(e) =>
+                  setEnvironment(e.target.value as PaymentEnvironment)
+                }
+                disabled={!canManage}
+                className={inputClassName}
+              >
+                <option value="sandbox">
+                  {t("settings.payments.environmentSandbox")}
+                </option>
+                <option value="production">
+                  {t("settings.payments.environmentProduction")}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          {provider === "midtrans" ? (
+            <div className="mt-5 rounded-xl border border-line bg-surface p-4">
+              <h3 className="text-sm font-bold text-ink">Midtrans</h3>
+              {renderEnvGroup(
+                t("settings.payments.sandboxTitle"),
+                MIDTRANS_KEY_FIELDS.filter((f) => f.env === "sandbox"),
+              )}
+              {renderEnvGroup(
+                t("settings.payments.productionTitle"),
+                MIDTRANS_KEY_FIELDS.filter((f) => f.env === "production"),
+              )}
+            </div>
+          ) : null}
+
+          {provider === "xendit" ? (
+            <div className="mt-5 rounded-xl border border-line bg-surface p-4">
+              <h3 className="text-sm font-bold text-ink">Xendit</h3>
+              {renderEnvGroup(
+                t("settings.payments.sandboxTitle"),
+                XENDIT_KEY_FIELDS.filter((f) => f.env === "sandbox"),
+              )}
+              {renderEnvGroup(
+                t("settings.payments.productionTitle"),
+                XENDIT_KEY_FIELDS.filter((f) => f.env === "production"),
+              )}
+            </div>
+          ) : null}
+
+          <div className="mt-5 rounded-xl border border-line bg-surface p-4">
+            <h3 className="text-sm font-bold text-ink">
+              {t("settings.payments.webhookTitle")}
+            </h3>
+            <p className="mt-1 text-sm text-muted">
+              {t("settings.payments.webhookBody")}
+            </p>
+            <p className="mt-2 break-all font-mono text-xs text-ink">
+              Midtrans: {settings.webhookUrls.midtrans}
+            </p>
+            <p className="mt-1 break-all font-mono text-xs text-ink">
+              Xendit: {settings.webhookUrls.xendit}
+            </p>
+          </div>
+
+          <FieldError message={saveError} />
+          {saved ? (
+            <p className="mt-3 rounded-lg bg-elevated px-3 py-2 text-sm text-ink">
+              {t("settings.payments.savedLabel")}
+            </p>
+          ) : null}
+          {testMessage ? (
+            <p
+              className={`mt-3 rounded-lg bg-elevated px-3 py-2 text-sm ${
+                testOk ? "text-ink" : "text-danger"
+              }`}
+            >
+              {testMessage}
+            </p>
+          ) : null}
+          {canManage ? (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                {saving
+                  ? t("settings.payments.saving")
+                  : t("settings.payments.saveButton")}
+              </button>
+              <button
+                type="button"
+                disabled={testing || provider === "simulation"}
+                onClick={() => void runTest()}
+                className="rounded-lg bg-elevated px-4 py-2 text-sm font-semibold text-ink disabled:opacity-50"
+              >
+                {testing
+                  ? t("settings.payments.testing")
+                  : t("settings.payments.testButton")}
+              </button>
+            </div>
+          ) : null}
+        </form>
+      )}
+    </section>
+  );
+}
 
 interface SettingsPageProps {
   t: Translate;
@@ -111,6 +524,10 @@ export function SettingsPage({ t, locale }: SettingsPageProps) {
       <p className="mt-1 max-w-2xl text-sm text-muted">{t("settings.intro")}</p>
 
       <ChangePasswordSection t={t} />
+
+      {tenantId ? (
+        <PaymentsSection t={t} tenantId={tenantId} canManage={canManage} />
+      ) : null}
 
       <section className="mt-10">
         <div className="flex items-start justify-between gap-3">

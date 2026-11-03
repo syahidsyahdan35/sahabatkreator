@@ -28,6 +28,7 @@ import {
   updateProduct,
   type OrderWithDetails,
   type PaymentLinkWithNames,
+  type PaymentDeps,
 } from "@sahabat-kreator/core";
 import type { Product } from "@sahabat-kreator/db";
 import type { AuthBundle } from "../../auth";
@@ -38,6 +39,8 @@ import { resolveTenantForUser } from "../tenants/guard";
 export interface ProductsModuleOptions {
   /** Base URL publik aplikasi (env BETTER_AUTH_URL) untuk merangkai url tautan bayar. */
   publicBaseUrl?: string;
+  /** Dependensi gerbang pembayaran (Fase 14A) untuk pembuatan tautan provider sungguhan. */
+  payments?: PaymentDeps;
 }
 
 export function serializeProduct(row: Product): ProductResponse {
@@ -149,6 +152,7 @@ export function createProductsRoutes(
       amountIdr: row.amountIdr,
       status: row.status,
       provider: row.provider,
+      providerEnvironment: row.providerEnvironment,
       paidAt: row.paidAt?.toISOString() ?? null,
       expiresAt: row.expiresAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
@@ -266,12 +270,39 @@ export function createProductsRoutes(
       { tenantId: tenant.id },
       parsed.data,
       { actorType: "user", actorId: c.get("appUser").id },
+      {
+        ...opts.payments,
+        publicBaseUrl: opts.payments?.publicBaseUrl ?? opts.publicBaseUrl,
+      },
     );
     if (result.kind === "product_not_found") {
       return apiError(c, 404, "NOT_FOUND", "Product not found");
     }
     if (result.kind === "contact_not_found") {
       return apiError(c, 404, "NOT_FOUND", "Contact not found");
+    }
+    if (result.kind === "provider_error") {
+      // Fase 14A: provider sungguhan menolak/gagal dihubungi saat
+      // pembuatan — tautan TIDAK dibuat dan kode provider diteruskan
+      // apa adanya (tidak ada fallback diam-diam ke simulasi).
+      const providerCodes = [
+        "PAYMENT_NOT_CONFIGURED",
+        "MIDTRANS_AUTH_FAILED",
+        "MIDTRANS_CREATE_FAILED",
+        "MIDTRANS_UNREACHABLE",
+        "XENDIT_AUTH_FAILED",
+        "XENDIT_CREATE_FAILED",
+        "XENDIT_UNREACHABLE",
+      ] as const;
+      const code = (providerCodes as readonly string[]).includes(result.code)
+        ? (result.code as (typeof providerCodes)[number])
+        : "INTERNAL_ERROR";
+      return apiError(
+        c,
+        502,
+        code,
+        `Payment provider failed while creating the link (${result.provider}: ${result.code})`,
+      );
     }
     // Rangkai respons dari baris yang baru dibuat + nama produk/kontak.
     // Jalur buat-selalu-produk: productId terisi (varian order hanya

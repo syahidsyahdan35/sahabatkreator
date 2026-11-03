@@ -120,6 +120,17 @@ export const ErrorCodeSchema = z.enum([
   "GOOGLE_NOT_CONFIGURED",
   "GOOGLE_NOT_CONNECTED",
   "GOOGLE_UNREACHABLE",
+  // Fase 14A: gerbang pembayaran sungguhan — endpoint simulasi menolak
+  // tautan provider sungguhan (409); pembuatan tautan gagal di provider
+  // (502, kode provider diteruskan); kredensial tenant belum terisi.
+  "PAYMENT_NOT_SIMULATION",
+  "PAYMENT_NOT_CONFIGURED",
+  "MIDTRANS_AUTH_FAILED",
+  "MIDTRANS_CREATE_FAILED",
+  "MIDTRANS_UNREACHABLE",
+  "XENDIT_AUTH_FAILED",
+  "XENDIT_CREATE_FAILED",
+  "XENDIT_UNREACHABLE",
   "RATE_LIMITED",
   "ENTITLEMENT_EXCEEDED",
   "INTERNAL_ERROR",
@@ -1751,6 +1762,22 @@ export const PaymentLinkStatusSchema = z.enum([
 ]);
 export type PaymentLinkStatus = z.infer<typeof PaymentLinkStatusSchema>;
 
+/**
+ * Gerbang pembayaran (Fase 14A): 'simulation' adalah provider bawaan
+ * (tanpa uang sungguhan, halaman /pay berlabel simulasi); 'midtrans' &
+ * 'xendit' adalah gerbang sungguhan dengan kredensial MILIK TENANT.
+ */
+export const PaymentProviderSchema = z.enum([
+  "simulation",
+  "midtrans",
+  "xendit",
+]);
+export type PaymentProvider = z.infer<typeof PaymentProviderSchema>;
+
+/** Environment provider: kunci sandbox & production terpisah per tenant. */
+export const PaymentEnvironmentSchema = z.enum(["sandbox", "production"]);
+export type PaymentEnvironment = z.infer<typeof PaymentEnvironmentSchema>;
+
 export const CreatePaymentLinkRequestSchema = z.object({
   productId: z.string().uuid(),
   /** Opsional: tautan dibuat untuk kontak tertentu. */
@@ -1776,8 +1803,10 @@ export const PaymentLinkResponseSchema = z.object({
   /** Snapshot harga produk / total order saat tautan dibuat. */
   amountIdr: z.number().int().nonnegative(),
   status: PaymentLinkStatusSchema,
-  /** Fase ini selalu 'simulation' — belum ada pembayaran sungguhan. */
+  /** Provider gerbang tautan: 'simulation' | 'midtrans' | 'xendit' (Fase 14A). */
   provider: z.string(),
+  /** Environment provider saat tautan dibuat (snapshot per tautan). */
+  providerEnvironment: PaymentEnvironmentSchema,
   paidAt: z.string().datetime().nullable(),
   expiresAt: z.string().datetime(),
   createdAt: z.string().datetime(),
@@ -1804,13 +1833,103 @@ export const PublicPaymentResponseSchema = z.object({
   amountIdr: z.number().int().nonnegative(),
   status: PaymentLinkStatusSchema,
   tenantName: z.string(),
-  /** Selalu 'simulation' di fase ini; UI wajib menampilkan label simulasi. */
+  /** 'simulation' → halaman berlabel simulasi; selain itu gerbang sungguhan. */
   provider: z.string(),
+  /** Environment provider tautan (Fase 14A). */
+  providerEnvironment: PaymentEnvironmentSchema,
+  /**
+   * URL checkout provider (Fase 14A): halaman /pay mengarahkan pembeli
+   * ke sini untuk provider sungguhan; null untuk simulasi (bayar di
+   * tempat) dan untuk tautan yang sudah tidak pending.
+   */
+  checkoutUrl: z.string().nullable(),
   paidAt: z.string().datetime().nullable(),
   expiresAt: z.string().datetime(),
 });
 export type PublicPaymentResponse = z.infer<
   typeof PublicPaymentResponseSchema
+>;
+
+/**
+ * Konfigurasi gerbang pembayaran tenant (Fase 14A) — Settings →
+ * Payments di dashboard. KEAMANAN: respons TIDAK PERNAH memuat nilai
+ * kunci; yang keluar hanya penanda terkonfigurasi per pasangan
+ * (provider, environment). Permukaan ini dashboard-only (kredensial
+ * tenant; preseden kredensial) — bukan API v1/SDK/MCP.
+ */
+export const PaymentCredentialSetStatusSchema = z.object({
+  serverKeyConfigured: z.boolean(),
+  clientKeyConfigured: z.boolean(),
+});
+export type PaymentCredentialSetStatus = z.infer<
+  typeof PaymentCredentialSetStatusSchema
+>;
+
+export const XenditCredentialSetStatusSchema =
+  PaymentCredentialSetStatusSchema.extend({
+    callbackTokenConfigured: z.boolean(),
+  });
+export type XenditCredentialSetStatus = z.infer<
+  typeof XenditCredentialSetStatusSchema
+>;
+
+export const PaymentSettingsResponseSchema = z.object({
+  provider: PaymentProviderSchema,
+  environment: PaymentEnvironmentSchema,
+  midtrans: z.object({
+    sandbox: PaymentCredentialSetStatusSchema,
+    production: PaymentCredentialSetStatusSchema,
+  }),
+  xendit: z.object({
+    sandbox: XenditCredentialSetStatusSchema,
+    production: XenditCredentialSetStatusSchema,
+  }),
+  /** URL webhook yang harus didaftarkan tenant di dashboard provider. */
+  webhookUrls: z.object({
+    midtrans: z.string(),
+    xendit: z.string(),
+  }),
+});
+export type PaymentSettingsResponse = z.infer<
+  typeof PaymentSettingsResponseSchema
+>;
+
+/**
+ * Pembaruan konfigurasi: field kunci bersifat tri-state per field —
+ * tidak dikirim = tidak berubah; string kosong = hapus (kembali belum
+ * terkonfigurasi); string non-kosong = ganti (dienkripsi server).
+ */
+export const UpdatePaymentSettingsRequestSchema = z.object({
+  provider: PaymentProviderSchema.optional(),
+  environment: PaymentEnvironmentSchema.optional(),
+  midtransSandboxServerKey: z.string().max(512).optional(),
+  midtransSandboxClientKey: z.string().max(512).optional(),
+  midtransProductionServerKey: z.string().max(512).optional(),
+  midtransProductionClientKey: z.string().max(512).optional(),
+  xenditSandboxServerKey: z.string().max(512).optional(),
+  xenditSandboxClientKey: z.string().max(512).optional(),
+  xenditProductionServerKey: z.string().max(512).optional(),
+  xenditProductionClientKey: z.string().max(512).optional(),
+  xenditSandboxCallbackToken: z.string().max(512).optional(),
+  xenditProductionCallbackToken: z.string().max(512).optional(),
+});
+export type UpdatePaymentSettingsRequest = z.infer<
+  typeof UpdatePaymentSettingsRequestSchema
+>;
+
+/**
+ * Hasil uji koneksi provider aktif (preseden probe Resend Fase 11B):
+ * kode jujur — OK | NOT_CONFIGURED | MIDTRANS_AUTH_FAILED |
+ * MIDTRANS_UNREACHABLE | XENDIT_AUTH_FAILED | XENDIT_UNREACHABLE.
+ */
+export const PaymentSettingsTestResponseSchema = z.object({
+  ok: z.boolean(),
+  code: z.string(),
+  provider: PaymentProviderSchema,
+  environment: PaymentEnvironmentSchema,
+});
+export type PaymentSettingsTestResponse = z.infer<
+  typeof PaymentSettingsTestResponseSchema
 >;
 
 // ---------------------------------------------------------------------------
@@ -4510,8 +4629,8 @@ export const OrderResponseSchema = z.object({
   paymentUrl: z.string().nullable(),
   paymentStatus: PaymentLinkStatusSchema.nullable(),
   /** Provider pembayaran order = provider tautan bayarnya (sumber
-   * kebenaran tunggal di payment_links). Fase ini selalu
-   * 'simulation' — belum ada pembayaran sungguhan. */
+   * kebenaran tunggal di payment_links): 'simulation' untuk order
+   * warisan tanpa tautan; sejak Fase 14A bisa 'midtrans'/'xendit'. */
   provider: z.string(),
   paidAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),

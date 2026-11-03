@@ -20,6 +20,8 @@ function serializeView(view: PublicPaymentView): PublicPaymentResponse {
     status: view.status,
     tenantName: view.tenantName,
     provider: view.provider,
+    providerEnvironment: view.providerEnvironment,
+    checkoutUrl: view.checkoutUrl,
     paidAt: view.paidAt?.toISOString() ?? null,
     expiresAt: view.expiresAt.toISOString(),
   });
@@ -34,8 +36,11 @@ function serializeView(view: PublicPaymentView): PublicPaymentResponse {
  * lengan RLS `app.payment_code` (migrasi 0012) di core; code tak dikenal
  * → 404. Respons TIDAK memuat data pribadi kontak.
  *
- * JUJUR: ini SIMULASI. Provider-nya 'simulation', tidak ada uang yang
- * bergerak; gerbang sungguhan (Midtrans/Xendit) adalah fase berikutnya.
+ * Fase 14A: untuk tautan provider sungguhan (midtrans/xendit) respons
+ * membawa `checkoutUrl` dan halaman /pay mengarahkan pembeli ke sana;
+ * label simulasi hanya untuk provider 'simulation', dan endpoint
+ * simulate-pay menolak tautan non-simulasi (409 PAYMENT_NOT_SIMULATION)
+ * — pembayaran sungguhan hanya selesai lewat webhook provider.
  */
 export function createPayRoutes(bundle: AuthBundle | null) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -67,6 +72,16 @@ export function createPayRoutes(bundle: AuthBundle | null) {
         409,
         "VALIDATION_ERROR",
         `Payment link is ${result.view.status} and can no longer be paid`,
+      );
+    }
+    if (result.kind === "not_simulation") {
+      // Fase 14A: tautan provider sungguhan hanya selesai lewat
+      // webhook provider — endpoint simulasi menolaknya dengan jujur.
+      return apiError(
+        c,
+        409,
+        "PAYMENT_NOT_SIMULATION",
+        "This link uses a real payment provider and cannot be simulated",
       );
     }
     return c.json(serializeView(result.view));

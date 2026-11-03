@@ -36,6 +36,7 @@ import {
   createPaymentLink,
   matchActiveProductForPayment,
 } from "./products";
+import type { PaymentDeps } from "./payments";
 
 /**
  * Runtime AI Agent (Fase 3A, RANCANGAN §5.1 langkah 5–9).
@@ -125,6 +126,12 @@ export interface AgentToolOptions {
    * dikirim ke lawan bicara. Kosong → URL relatif (fallback jujur).
    */
   publicBaseUrl?: string;
+  /**
+   * Dependensi gerbang pembayaran (Fase 14A) untuk tool
+   * `send_payment_link`: secret enkripsi + override base URL provider.
+   * Tanpa ini tool hanya berhasil bila provider tenant 'simulation'.
+   */
+  payments?: PaymentDeps;
 }
 
 async function insertAgentAudit(
@@ -292,6 +299,10 @@ export async function executeAgentToolCall(
         conversationId: toolCtx.conversationId,
       },
       { actorType: "agent", actorId: `agent:${toolCtx.agentId}` },
+      {
+        ...options?.payments,
+        publicBaseUrl: options?.payments?.publicBaseUrl ?? options?.publicBaseUrl,
+      },
     );
     if (created.kind !== "ok") {
       return { name: call.name, executed: false, note: created.kind };
@@ -587,6 +598,8 @@ export async function respondToInboundMessage(
     embeddingProvider?: EmbeddingProvider | null;
     /** Base URL publik untuk tool send_payment_link (dari env worker). */
     publicBaseUrl?: string;
+    /** Dependensi gerbang pembayaran (Fase 14A) untuk tool send_payment_link. */
+    payments?: PaymentDeps;
     /**
      * Batching balasan AI (Fase 9A): bila true, job ini MENYERAH
      * (audit `agent.batched`, reason 'batched', TANPA memanggil LLM
@@ -834,6 +847,7 @@ export async function respondToInboundMessage(
     toolOutcomes.push(
       await executeAgentToolCall(db, ctx, toolCtx, call, {
         publicBaseUrl: input.publicBaseUrl,
+        payments: input.payments,
       }),
     );
   }

@@ -24,6 +24,12 @@ import {
   PAYMENT_PROVIDER_SIMULATION,
   type PaymentActor,
 } from "./products";
+import {
+  createProviderCheckoutSession,
+  PaymentProviderError,
+  type PaymentDeps,
+  type ProviderCheckoutSession,
+} from "./payments";
 
 /**
  * Service domain Keranjang & Order (Fase 13F, katalog + keranjang
@@ -42,8 +48,9 @@ import {
  * - Checkout bersifat atomik dalam satu transaksi pemanggil: order +
  *   order_items (snapshot nama/harga) + SATU payment_links varian
  *   order (mesin tautan yang sama dengan produk tunggal; provider
- *   'simulation' — BELUM pembayaran sungguhan, Fase 14A) + keranjang
- *   ditandai checked_out. Status order sesudahnya mengikuti tautan
+ *   mengikuti konfigurasi tenant — Fase 14A: sesi provider sungguhan
+ *   disiapkan di luar transaksi lewat prepareOrderCheckoutLink dan
+ *   diteruskan sebagai preparedLink) + keranjang ditandai checked_out. Status order sesudahnya mengikuti tautan
  *   bayarnya lewat hook di products.ts (simulatePayByCode & penegakan
  *   expired malas) — di sini order selalu lahir `pending`.
  * - Keranjang SENGAJA tidak diekspos permukaan publik v1 (keadaan
@@ -144,8 +151,7 @@ export async function getCartViewTx(
   tx: DbTx,
   tenantId: string,
   contactId: string,
-): Promise<CartView | null> {
-  const cart = await getOpenCartRowTx(tx, tenantId, contactId);
+): Promise<CartView | null> {  const cart = await getOpenCartRowTx(tx, tenantId, contactId);
   if (!cart) return null;
   const rows = await tx
     .select({ item: cartItems, productName: products.name })
@@ -170,6 +176,59 @@ export async function getCartViewTx(
     totalIdr: items.reduce((sum, i) => sum + i.lineTotalIdr, 0),
     itemCount: items.reduce((sum, i) => sum + i.qty, 0),
   };
+}
+
+/**
+ * Tampilan keranjang dalam transaksi tenant mandiri (Fase 14A) —
+ * dipakai node cart_checkout untuk membaca total SEBELUM sesi checkout
+ * provider dibuat di luar transaksi langkah.
+ */
+export async function getCartView(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  contactId: string,
+): Promise<CartView | null> {
+  return withTenantDb(db, ctx.tenantId, (tx) =>
+    getCartViewTx(tx, ctx.tenantId, contactId),
+  );
+}
+
+/**
+ * Sesi tautan order yang disiapkan SEBELUM transaksi checkout (Fase
+ * 14A): code + sesi provider dibuat di luar transaksi karena memanggil
+ * API provider tidak boleh menahan transaksi DB. `amountIdr` adalah
+ * total yang dibaca saat persiapan; checkout MENOLAK (throw
+ * PaymentProviderError 'PAYMENT_AMOUNT_CHANGED') bila total di dalam
+ * transaksi berbeda — tautan tidak pernah lahir dengan jumlah yang
+ * tidak cocok dengan sesi providernya.
+ */
+export interface PreparedOrderLink {
+  code: string;
+  amountIdr: number;
+  session: ProviderCheckoutSession;
+}
+
+/**
+ * Menyiapkan tautan order untuk checkout: mengembalikan null bila
+ * provider tenant adalah simulasi (checkout berjalan persis seperti
+ * Fase 13F). Untuk provider sungguhan, code dibuat di sini dan sesi
+ * checkout provider dibuat sekarang; kegagalan provider melempar
+ * PaymentProviderError dan checkout TIDAK boleh dilanjutkan.
+ */
+export async function prepareOrderCheckoutLink(
+  db: Database,
+  tenantId: string,
+  deps: PaymentDeps | undefined,
+  input: { amountIdr: number; itemLabel: string },
+): Promise<PreparedOrderLink | null> {
+  const code = generatePaymentCode();
+  const session = await createProviderCheckoutSession(db, tenantId, deps, {
+    code,
+    amountIdr: input.amountIdr,
+    itemLabel: input.itemLabel,
+  });
+  if (session.provider === PAYMENT_PROVIDER_SIMULATION) return null;
+  return { code, amountIdr: input.amountIdr, session };
 }
 
 /**
@@ -251,10 +310,29 @@ export async function checkoutCartTx(
     contactId: string;
     conversationId?: string | null;
     actor: PaymentActor;
+    /**
+     * Fase 14A: sesi tautan yang disiapkan di luar transaksi
+     * (prepareOrderCheckoutLink) untuk provider sungguhan. Tanpa ini
+     * tautan lahir sebagai simulasi persis seperti Fase 13F.
+     */
+    preparedLink?: PreparedOrderLink | null;
   },
 ): Promise<CheckoutCartResult> {
   const view = await getCartViewTx(tx, tenantId, input.contactId);
   if (!view || view.items.length === 0) return { kind: "empty_cart" };
+  if (
+    input.preparedLink &&
+    input.preparedLink.amountIdr !== view.totalIdr
+  ) {
+    // Total berubah sejak sesi provider disiapkan — membatalkan
+    // seluruh transaksi checkout lebih jujur daripada melahirkan
+    // tautan yang jumlahnya tidak cocok dengan sesi providernya.
+    throw new PaymentProviderError(
+      "PAYMENT_AMOUNT_CHANGED",
+      input.preparedLink.session.provider,
+      "Total keranjang berubah sejak sesi checkout provider disiapkan",
+    );
+  }
   const now = new Date();
   const [order] = await tx
     .insert(orders)
@@ -279,6 +357,7 @@ export async function checkoutCartTx(
       })),
     )
     .returning();
+  const prepared = input.preparedLink ?? null;
   const [link] = await tx
     .insert(paymentLinks)
     .values({
@@ -287,10 +366,13 @@ export async function checkoutCartTx(
       orderId: order.id,
       contactId: input.contactId,
       conversationId: input.conversationId ?? null,
-      code: generatePaymentCode(),
+      code: prepared?.code ?? generatePaymentCode(),
       amountIdr: view.totalIdr,
       status: "pending",
-      provider: PAYMENT_PROVIDER_SIMULATION,
+      provider: prepared?.session.provider ?? PAYMENT_PROVIDER_SIMULATION,
+      providerEnvironment: prepared?.session.environment ?? "sandbox",
+      providerRef: prepared?.session.providerRef ?? null,
+      checkoutUrl: prepared?.session.checkoutUrl ?? null,
       expiresAt: new Date(
         Date.now() + PAYMENT_LINK_TTL_DAYS * 24 * 60 * 60 * 1000,
       ),
@@ -319,6 +401,7 @@ export async function checkoutCartTx(
       contactId: input.contactId,
       conversationId: input.conversationId ?? null,
       provider: link.provider,
+      environment: link.providerEnvironment,
     },
   });
   return {

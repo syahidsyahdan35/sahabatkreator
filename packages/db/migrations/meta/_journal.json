@@ -50,6 +50,13 @@
       "when": 1793679939476,
       "tag": "0006_appointments_google",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793684712045,
+      "tag": "0007_payments_providers",
+      "breakpoints": true
     }
   ]
 }

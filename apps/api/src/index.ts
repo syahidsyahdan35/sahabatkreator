@@ -25,6 +25,7 @@ import { createAgentsRoutes } from "./modules/agents/routes";
 import { createKnowledgeRoutes } from "./modules/knowledge/routes";
 import { createProductsRoutes } from "./modules/products/routes";
 import { createPayRoutes } from "./modules/pay/routes";
+import { createPaymentsRoutes } from "./modules/payments/routes";
 import { createApiKeysRoutes } from "./modules/api-keys/routes";
 import { createPublicV1Routes } from "./modules/public-v1/routes";
 import { createWebchatRoutes } from "./modules/webchat/routes";
@@ -311,12 +312,34 @@ routes.route(
   }),
 );
 // Modul products (Fase 4A) — katalog produk & tautan bayar /tenants/:tenantId/products|payment-links.
+// Fase 14A: deps gerbang pembayaran diteruskan agar pembuatan tautan
+// memakai provider tenant (Midtrans/Xendit) bila terkonfigurasi.
 routes.route(
   "/",
-  createProductsRoutes(authBundle, { publicBaseUrl: env.BETTER_AUTH_URL }),
+  createProductsRoutes(authBundle, {
+    publicBaseUrl: env.BETTER_AUTH_URL,
+    payments: {
+      tokenSecret: env.CHANNEL_TOKEN_SECRET,
+      midtransApiBase: env.MIDTRANS_API_BASE,
+      xenditApiBase: env.XENDIT_API_BASE,
+    },
+  }),
 );
-// Modul pay publik (Fase 4A) — halaman bayar /pay/:code (simulasi, tanpa sesi).
+// Modul pay publik (Fase 4A) — halaman bayar /pay/:code (tanpa sesi).
 routes.route("/", createPayRoutes(authBundle));
+// Modul payments (Fase 14A) — konfigurasi gerbang per tenant
+// /tenants/:tenantId/payment-settings (Settings → Payments) + webhook
+// provider publik /payments/webhook/{midtrans,xendit} (verifikasi
+// kriptografis per tenant di core; tanpa sesi).
+routes.route(
+  "/",
+  createPaymentsRoutes(authBundle, {
+    tokenSecret: env.CHANNEL_TOKEN_SECRET,
+    midtransApiBase: env.MIDTRANS_API_BASE,
+    xenditApiBase: env.XENDIT_API_BASE,
+    publicBaseUrl: env.BETTER_AUTH_URL,
+  }),
+);
 // Modul api-keys (Fase 5A) — manajemen kunci workspace /tenants/:tenantId/api-keys (sesi + owner/admin).
 routes.route("/", createApiKeysRoutes(authBundle));
 // Modul API publik /v1 (Fase 5A) — auth API key per tenant, tenant dari kunci (bukan URL).

@@ -17,13 +17,16 @@ interface PayPageProps {
 }
 
 /**
- * Halaman bayar publik (Fase 4A) — DI LUAR shell & tanpa login, seperti
- * halaman checkout sungguhan yang dibagikan penjual ke pembeli.
+ * Halaman bayar publik — DI LUAR shell & tanpa login, seperti halaman
+ * checkout sungguhan yang dibagikan penjual ke pembeli.
  *
- * ⚠️ SIMULASI: provider tautan fase ini adalah 'simulation' — TIDAK ADA
- * uang sungguhan yang bergerak. Lencana simulasi ditampilkan BESAR dan
- * permanen di halaman ini (pay.simulationBadge) agar tidak ada pembeli
- * yang terkecoh; tombolnya pun berlabel "Bayar (simulasi)".
+ * Kejujuran label mengikuti provider TAUTAN (Fase 14A):
+ * - 'simulation': lencana SIMULASI besar & permanen + tombol "Bayar
+ *   (simulasi)" — tidak ada uang sungguhan yang bergerak.
+ * - 'midtrans'/'xendit': TANPA lencana simulasi; pembeli diarahkan ke
+ *   halaman checkout provider (checkoutUrl dari provider) dan status
+ *   akhir datang dari webhook provider — halaman ini tidak pernah
+ *   menandai lunas sendiri.
  *
  * Harga selalu diformat Intl id-ID (penetapan desain Fase 4A); teks UI
  * mengikuti locale aplikasi.
@@ -35,6 +38,32 @@ export function PayPage({ t, locale, code }: PayPageProps) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [paying, setPaying] = useState(false);
   const [payFailed, setPayFailed] = useState(false);
+
+  const isSimulation = payment?.provider === "simulation";
+  const providerName =
+    payment?.provider === "midtrans"
+      ? "Midtrans"
+      : payment?.provider === "xendit"
+        ? "Xendit"
+        : "";
+
+  // Provider sungguhan + masih pending → arahkan pembeli ke halaman
+  // checkout provider. Tombol manual di bawah adalah cadangan bila
+  // pengalihan otomatis terhalang.
+  useEffect(() => {
+    if (
+      payment &&
+      payment.provider !== "simulation" &&
+      payment.status === "pending" &&
+      payment.checkoutUrl
+    ) {
+      const url = payment.checkoutUrl;
+      const timer = setTimeout(() => {
+        window.location.replace(url);
+      }, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [payment]);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,13 +104,16 @@ export function PayPage({ t, locale, code }: PayPageProps) {
     <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col bg-bg px-4 py-10 text-ink">
       <div className="text-lg font-bold">{t("app.name")}</div>
 
-      {/* Lencana SIMULASI — besar & permanen, tidak bisa dilewatkan pembeli. */}
-      <div className="mt-6 rounded-xl border-2 border-danger bg-surface p-4 text-center">
-        <p className="text-base font-extrabold uppercase tracking-wide text-danger">
-          {t("pay.simulationBadge")}
-        </p>
-        <p className="mt-1 text-xs text-muted">{t("pay.simulationNote")}</p>
-      </div>
+      {/* Lencana SIMULASI — hanya untuk provider 'simulation', besar &
+          permanen, tidak bisa dilewatkan pembeli. */}
+      {payment && isSimulation ? (
+        <div className="mt-6 rounded-xl border-2 border-danger bg-surface p-4 text-center">
+          <p className="text-base font-extrabold uppercase tracking-wide text-danger">
+            {t("pay.simulationBadge")}
+          </p>
+          <p className="mt-1 text-xs text-muted">{t("pay.simulationNote")}</p>
+        </div>
+      ) : null}
 
       {loading ? (
         <p className="mt-8 text-sm text-muted">{t("common.loading")}</p>
@@ -128,7 +160,9 @@ export function PayPage({ t, locale, code }: PayPageProps) {
               <p className="text-base font-bold text-accent">
                 ✓ {t("pay.paidTitle")} — {t("pay.statusPaid")}
               </p>
-              <p className="mt-1 text-sm text-muted">{t("pay.paidBody")}</p>
+              <p className="mt-1 text-sm text-muted">
+                {isSimulation ? t("pay.paidBody") : t("pay.realPaidBody")}
+              </p>
               {payment.paidAt ? (
                 <p className="mt-1 text-sm text-muted">
                   {t("pay.paidAtLabel", {
@@ -147,6 +181,34 @@ export function PayPage({ t, locale, code }: PayPageProps) {
               <p className="text-base font-bold">{t("pay.cancelledTitle")}</p>
               <p className="mt-1 text-sm text-muted">
                 {t("pay.cancelledBody")}
+              </p>
+            </div>
+          ) : !isSimulation ? (
+            <div className="mt-5">
+              <p className="text-sm font-medium">
+                {t("pay.statusPending")} ·{" "}
+                <span className="text-muted">
+                  {t("pay.expiresLabel", {
+                    date: formatDateTime(payment.expiresAt, locale),
+                  })}
+                </span>
+              </p>
+              <p className="mt-2 text-sm font-semibold">
+                {t("pay.redirectTitle", { provider: providerName })}
+              </p>
+              <p className="mt-1 text-sm text-muted">
+                {t("pay.redirectBody", { provider: providerName })}
+              </p>
+              {payment.checkoutUrl ? (
+                <a
+                  href={payment.checkoutUrl}
+                  className="mt-3 block w-full rounded-lg bg-accent px-4 py-3 text-center text-base font-bold text-white"
+                >
+                  {t("pay.continueButton", { provider: providerName })}
+                </a>
+              ) : null}
+              <p className="mt-2 text-center text-xs text-muted">
+                {t("pay.providerLabel", { provider: providerName })}
               </p>
             </div>
           ) : (

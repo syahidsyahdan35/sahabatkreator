@@ -44,12 +44,18 @@ import { buildPaymentUrl, createPaymentLink, PAYMENT_LINK_TTL_DAYS } from "./pro
 import {
   addToCartTx,
   checkoutCartTx,
+  getCartView,
   getCartViewTx,
   listActiveCatalogProductsTx,
   parseCatalogSelection,
+  prepareOrderCheckoutLink,
   renderCartSummaryText,
   renderCatalogText,
 } from "./commerce";
+import {
+  PaymentProviderError,
+  type PaymentDeps,
+} from "./payments";
 import {
   createBooking,
   getAppointmentSettings,
@@ -4110,6 +4116,14 @@ export interface FlowStepDeps {
    * data internal saja (Google adalah peningkatan, bukan syarat).
    */
   google?: GoogleDeps;
+  /**
+   * Dependensi gerbang pembayaran (Fase 14A) untuk node
+   * `send_payment_link` & `cart_checkout` — konfigurasi provider tenant
+   * dibaca dari DB; deps ini membawa secret enkripsi + override base
+   * URL provider. Tanpa deps, tautan hanya bisa lahir bila provider
+   * tenant 'simulation' (provider sungguhan → provider_error jujur).
+   */
+  payments?: PaymentDeps;
 }
 
 export interface ExecuteFlowStepResult {
@@ -5517,6 +5531,7 @@ export async function executeFlowStep(
             conversationId: run.conversationId,
             messageId: aiMessageId,
             publicBaseUrl: deps.publicBaseUrl,
+            payments: deps.payments,
             embeddingProvider,
           });
           detail = {
@@ -5887,7 +5902,69 @@ export async function executeFlowStep(
     // yang kosong BUKAN kegagalan: ia branch empty_cart yang sah.
     if (node.type === "cart_checkout") {
       const checkoutConfig = cartCheckoutConfigOf(node);
-      const applied: AdvanceResult = await withTenantDb(
+      // Fase 14A: untuk provider sungguhan, sesi checkout provider
+      // disiapkan DI LUAR transaksi langkah (panggilan API tidak boleh
+      // menahan transaksi) dari total keranjang yang dibaca sekarang.
+      // Kegagalan provider = kegagalan keras run (payment_provider_error)
+      // — checkout tidak pernah jatuh diam-diam ke tautan simulasi.
+      let preparedLink: Awaited<
+        ReturnType<typeof prepareOrderCheckoutLink>
+      > = null;
+      if (ctxState.conversation && ctxState.contact) {
+        const cartView = await getCartView(
+          db,
+          { tenantId },
+          run.contactId,
+        );
+        if (cartView && cartView.items.length > 0) {
+          try {
+            preparedLink = await prepareOrderCheckoutLink(
+              db,
+              tenantId,
+              {
+                ...deps.payments,
+                publicBaseUrl:
+                  deps.payments?.publicBaseUrl ?? deps.publicBaseUrl,
+              },
+              {
+                amountIdr: cartView.totalIdr,
+                itemLabel: `Order: ${cartView.items
+                  .map((i) => i.productName)
+                  .join(", ")}`,
+              },
+            );
+          } catch (err) {
+            if (err instanceof PaymentProviderError) {
+              await withTenantDb(db, tenantId, (tx) =>
+                failRun(
+                  tx,
+                  tenantId,
+                  run,
+                  node,
+                  "payment_provider_error",
+                  `checkout gagal di provider: ${err.code}`,
+                  {
+                    outcome: "failed",
+                    reason: "payment_provider_error",
+                    provider: err.provider,
+                    code: err.code,
+                  },
+                ),
+              );
+              return {
+                executed: true,
+                status: "failed",
+                conversationId: run.conversationId,
+                stepsExecuted: stepsExecuted + 1,
+              };
+            }
+            throw err;
+          }
+        }
+      }
+      let applied: AdvanceResult;
+      try {
+        applied = await withTenantDb(
         db,
         tenantId,
         async (tx) => {
@@ -5918,6 +5995,7 @@ export async function executeFlowStep(
             contactId: fresh.contactId,
             conversationId: fresh.conversationId,
             actor: { actorType: "system", actorId: `flow:${run.flowId}` },
+            preparedLink,
           });
           if (result.kind === "empty_cart") {
             let outboundMessageId: string | undefined;
@@ -5972,6 +6050,36 @@ export async function executeFlowStep(
           };
         },
       );
+      } catch (err) {
+        // Total berubah sejak sesi disiapkan (PAYMENT_AMOUNT_CHANGED)
+        // → transaksi langkah sudah rollback; catat kegagalan run
+        // secara jujur, jangan telan sebagai sukses.
+        if (err instanceof PaymentProviderError) {
+          await withTenantDb(db, tenantId, (tx) =>
+            failRun(
+              tx,
+              tenantId,
+              run,
+              node,
+              "payment_provider_error",
+              `checkout gagal di provider: ${err.code}`,
+              {
+                outcome: "failed",
+                reason: "payment_provider_error",
+                provider: err.provider,
+                code: err.code,
+              },
+            ),
+          );
+          return {
+            executed: true,
+            status: "failed",
+            conversationId: run.conversationId,
+            stepsExecuted: stepsExecuted + 1,
+          };
+        }
+        throw err;
+      }
       if (!applied.applied) {
         return {
           executed: stepsExecuted > 0,
@@ -6057,6 +6165,10 @@ export async function executeFlowStep(
           conversationId: run.conversationId,
         },
         { actorType: "system", actorId: `flow:${run.flowId}` },
+        {
+          ...deps.payments,
+          publicBaseUrl: deps.payments?.publicBaseUrl ?? deps.publicBaseUrl,
+        },
       );
       if (created.kind !== "ok") {
         await withTenantDb(db, tenantId, (tx) =>
@@ -6066,7 +6178,9 @@ export async function executeFlowStep(
             run,
             node,
             "payment_link_failed",
-            `payment link gagal dibuat: ${created.kind}`,
+            created.kind === "provider_error"
+              ? `payment link gagal dibuat: provider_error ${created.code}`
+              : `payment link gagal dibuat: ${created.kind}`,
             { outcome: "failed", reason: "payment_link_failed", productId },
           ),
         );

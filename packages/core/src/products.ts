@@ -14,6 +14,12 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
+import {
+  createProviderCheckoutSession,
+  PaymentProviderError,
+  type PaymentDeps,
+  type ProviderCheckoutSession,
+} from "./payments";
 
 /**
  * Service domain Produk & Tautan Bayar (Fase 4A, RANCANGAN §6 & §9).
@@ -213,20 +219,29 @@ export interface CreatePaymentLinkInput {
 export type CreatePaymentLinkResult =
   | { kind: "ok"; link: PaymentLink }
   | { kind: "product_not_found" }
-  | { kind: "contact_not_found" };
+  | { kind: "contact_not_found" }
+  | { kind: "provider_error"; code: string; provider: string };
 
 /**
  * Membuat tautan bayar: snapshot harga produk saat ini, code acak unik,
  * kedaluwarsa +7 hari, audit `payment_link.created` oleh actor pemanggil
  * (user dashboard / agent / system).
+ *
+ * Fase 14A: provider tautan mengikuti konfigurasi provider TENANT.
+ * Untuk provider sungguhan (midtrans/xendit) sesi checkout dibuat
+ * SEBELUM baris tautan ditulis (order_id/external_id provider = code
+ * tautan); kegagalan panggilan provider membatalkan pembuatan dengan
+ * { kind: 'provider_error', code } — tidak ada fallback diam-diam ke
+ * simulasi. Untuk 'simulation' alurnya persis seperti sebelumnya.
  */
 export async function createPaymentLink(
   db: Database,
   ctx: Pick<TenantContext, "tenantId">,
   input: CreatePaymentLinkInput,
   actor: PaymentActor,
+  deps?: PaymentDeps,
 ): Promise<CreatePaymentLinkResult> {
-  return withTenantDb(db, ctx.tenantId, async (tx) => {
+  const prepared = await withTenantDb(db, ctx.tenantId, async (tx) => {
     const product = await getProductRow(tx, ctx.tenantId, input.productId);
     if (!product) return { kind: "product_not_found" as const };
     if (input.contactId) {
@@ -242,6 +257,29 @@ export async function createPaymentLink(
         .limit(1);
       if (!contact) return { kind: "contact_not_found" as const };
     }
+    return { kind: "ready" as const, product };
+  });
+  if (prepared.kind !== "ready") return prepared;
+  const product = prepared.product;
+  const code = generatePaymentCode();
+  let session: ProviderCheckoutSession;
+  try {
+    session = await createProviderCheckoutSession(db, ctx.tenantId, deps, {
+      code,
+      amountIdr: product.priceIdr,
+      itemLabel: product.name,
+    });
+  } catch (err) {
+    if (err instanceof PaymentProviderError) {
+      return {
+        kind: "provider_error" as const,
+        code: err.code,
+        provider: err.provider,
+      };
+    }
+    throw err;
+  }
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
     const [link] = await tx
       .insert(paymentLinks)
       .values({
@@ -249,10 +287,13 @@ export async function createPaymentLink(
         productId: product.id,
         contactId: input.contactId ?? null,
         conversationId: input.conversationId ?? null,
-        code: generatePaymentCode(),
+        code,
         amountIdr: product.priceIdr,
         status: "pending",
-        provider: PAYMENT_PROVIDER_SIMULATION,
+        provider: session.provider,
+        providerEnvironment: session.environment,
+        providerRef: session.providerRef,
+        checkoutUrl: session.checkoutUrl,
         expiresAt: new Date(
           Date.now() + PAYMENT_LINK_TTL_DAYS * 24 * 60 * 60 * 1000,
         ),
@@ -272,6 +313,7 @@ export async function createPaymentLink(
         contactId: link.contactId,
         conversationId: link.conversationId,
         provider: link.provider,
+        environment: link.providerEnvironment,
       },
     });
     return { kind: "ok" as const, link };
@@ -432,6 +474,9 @@ export interface PublicPaymentView {
   status: PaymentLink["status"];
   tenantName: string;
   provider: string;
+  providerEnvironment: string;
+  /** URL checkout provider; hanya untuk tautan pending ber-provider sungguhan. */
+  checkoutUrl: string | null;
   paidAt: Date | null;
   expiresAt: Date;
 }
@@ -497,6 +542,8 @@ async function buildPublicView(
     status: link.status,
     tenantName: tenant?.name ?? "",
     provider: link.provider,
+    providerEnvironment: link.providerEnvironment,
+    checkoutUrl: link.status === "pending" ? link.checkoutUrl : null,
     paidAt: link.paidAt,
     expiresAt: link.expiresAt,
   };
@@ -517,7 +564,8 @@ export async function getPublicPaymentByCode(
 
 export type SimulatePayResult =
   | { kind: "paid"; view: PublicPaymentView }
-  | { kind: "not_payable"; view: PublicPaymentView };
+  | { kind: "not_payable"; view: PublicPaymentView }
+  | { kind: "not_simulation"; view: PublicPaymentView };
 
 /**
  * SIMULASI pembayaran (BUKAN uang sungguhan — provider 'simulation'):
@@ -534,6 +582,14 @@ export async function simulatePayByCode(
   if (!resolved) return null;
   return withTenantDb(db, resolved.tenantId, async (tx) => {
     let link = await markExpiredIfDue(tx, resolved);
+    // Fase 14A: endpoint simulasi HANYA untuk tautan provider
+    // 'simulation'. Tautan Midtrans/Xendit diselesaikan lewat webhook
+    // provider — mensimulasikannya di sini akan memalsukan pembayaran
+    // sungguhan.
+    if (link.provider !== PAYMENT_PROVIDER_SIMULATION) {
+      const view = await buildPublicView(tx, resolved.tenantId, link);
+      return { kind: "not_simulation", view } as const;
+    }
     if (link.status === "pending") {
       const [updated] = await tx
         .update(paymentLinks)

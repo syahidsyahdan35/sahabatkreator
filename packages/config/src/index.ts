@@ -147,6 +147,16 @@ const EnvSchema = z.object({
    */
   RESEND_API_BASE: z.string().url().optional(),
   /**
+   * Base URL API gerbang pembayaran (Fase 14A) — override hanya untuk
+   * mock rantai uji, pola yang sama dengan RESEND_API_BASE. Default di
+   * kode klien core: Midtrans per environment (app.sandbox.midtrans.com
+   * / app.midtrans.com; override berlaku untuk keduanya), Xendit
+   * https://api.xendit.co. Kredensialnya sendiri MILIK TENANT
+   * (payment_provider_configs terenkripsi), bukan env/panel.
+   */
+  MIDTRANS_API_BASE: z.string().url().optional(),
+  XENDIT_API_BASE: z.string().url().optional(),
+  /**
    * Klien OAuth Google milik platform (Fase 13G) — FALLBACK env saja;
    * sumber utama adalah Panel Admin (kunci `google_oauth_client_id` /
    * `google_oauth_client_secret` di platform_settings, resolusi

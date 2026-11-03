@@ -57,8 +57,9 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 | Penugasan percakapan & catatan internal | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Alur kerja tim manusia dalam inbox; catatan internal memang dirancang tidak pernah keluar jalur pesan (tabel terpisah, Fase 9C). |
 | Produk — daftar | Ada | Ada | Ada — `GET /v1/products` (`products:read`) | `listProducts()` | `list_products` (baca) | `sk products list` | |
 | Produk — buat/ubah/arsip | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Katalog dikurasi pemilik di dashboard; pembacaan publik cukup untuk integrasi checkout eksternal. |
-| Tautan bayar (payment links) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Permukaan bayar masih SIMULASI berlabel; eksposur publik diputuskan saat pembayaran asli (Fase 14A, Midtrans/Xendit). Halaman `/pay/:code` adalah permukaan publik non-v1 (kode tautan, tanpa kunci). |
-| Order — daftar & detail (Fase 13F) | Ada | Ada | **Ada (baru 13F)** — `GET /v1/orders`, `GET /v1/orders/:id` (`orders:read`) | `listOrders()` / `getOrder()` | `list_orders` / `get_order` (baca) | `sk orders list` / `sk orders get` | Order lahir dari checkout flow (node `cart_checkout`): baris item adalah SNAPSHOT nama+harga saat checkout, total dihitung server dari snapshot keranjang, dan status order MENGIKUTI tautan bayarnya (pending → paid/expired/cancelled; hook sinkron idempoten di titik penyelesaian pembayaran yang sama dengan tautan produk tunggal). Serializer bersama dashboard + v1 persis sama. Pembayaran tetap SIMULASI sampai Fase 14A. |
+| Tautan bayar (payment links) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Halaman `/pay/:code` adalah permukaan publik non-v1 (kode tautan, tanpa kunci). Sejak Fase 14A provider tautan mengikuti konfigurasi tenant: 'simulation' berlabel jujur di halaman, atau Midtrans/Xendit sungguhan — halaman mengarahkan pembeli ke URL checkout provider (`checkoutUrl`) dan status akhir datang dari webhook. Eksposur v1 untuk pembuatan tautan tetap TIDAK dibuat: tautan lahir dari dashboard/flow/agent di dalam percakapan tenant, bukan dari integrasi berkunci API. |
+| Konfigurasi gerbang pembayaran tenant (Fase 14A) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Kredensial provider MILIK TENANT (uang kreator masuk ke akun merchant-nya sendiri): Settings → Payments (`GET/PUT /tenants/:tenantId/payment-settings` + uji koneksi `POST .../test`, owner/admin untuk tulis). Kunci sandbox & production terpisah, tersimpan envelope terenkripsi, dan TIDAK PERNAH keluar lagi — API hanya melaporkan penanda terkonfigurasi per pasangan. Permukaan kredensial tidak pernah menjadi API v1/SDK/MCP (preseden kredensial yang sama dengan token channel & Panel Admin). Webhook provider (`POST /payments/webhook/midtrans|xendit`) adalah permukaan publik non-v1: autentikasi kriptografis per tenant (signature_key SHA512 Midtrans / x-callback-token Xendit, di-resolve dari tautan), jumlah wajib cocok, idempoten, dan tercatat di log integrasi teredaksi. |
+| Order — daftar & detail (Fase 13F) | Ada | Ada | **Ada (baru 13F)** — `GET /v1/orders`, `GET /v1/orders/:id` (`orders:read`) | `listOrders()` / `getOrder()` | `list_orders` / `get_order` (baca) | `sk orders list` / `sk orders get` | Order lahir dari checkout flow (node `cart_checkout`): baris item adalah SNAPSHOT nama+harga saat checkout, total dihitung server dari snapshot keranjang, dan status order MENGIKUTI tautan bayarnya (pending → paid/expired/cancelled; hook sinkron idempoten di titik penyelesaian pembayaran yang sama dengan tautan produk tunggal). Serializer bersama dashboard + v1 persis sama. Sejak Fase 14A tautan order bisa ber-provider Midtrans/Xendit (sesi disiapkan sebelum transaksi checkout) dan penyelesaian webhook membalik order lewat hook yang sama. |
 | Keranjang belanja (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) — tanpa rute v1/SDK/MCP | — | — | — | Keranjang adalah KEADAAN SESI efemeral per kontak di dalam percakapan: diisi node flow `show_catalog` (parkir pilihan, pola mesin parkir yang sama dengan questionnaire), dikonsumsi `cart_checkout`, dan tidak punya siklus hidup integrasi sendiri — mengeksposnya akan membekukan bentuk sesi internal menjadi kontrak publik. Yang terekspos adalah HASILNYA yang stabil: order (baris di atas) + tautan bayarnya. Inspeksi keranjang dari detail kontak disengaja tidak dibuat fase ini (bukan permukaan operator yang diminta; isi keranjang terlihat dari ringkasan chat itu sendiri). |
 | Flow — node show_catalog & cart_checkout (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Kedua node adalah bagian dari GRAF flow (pola yang sama dengan questionnaire 13E): config-nya (`introText?`, `showDescription`, tenggat per parkir, `maxInvalidAttempts`, `invalidPrompt?`, `addedMessage?` untuk katalog; `emptyMessage?` untuk checkout) hidup di dalam graf yang sudah terbaca v1 lewat baris "Flow — daftar & detail" — BUKAN permukaan baru. Balasan pilihan katalog memakai mesin parkir `wait_reply` yang sama dan TIDAK bocor ke agent (gerbang worker menghitung `flowCatalogResumed`). Agent mendapat akses BACA katalog lewat konteks prompt (daftar produk aktif di prompt sistem — runtime agent berjalan satu completion tanpa putaran hasil-tool, jadi tool baca tidak akan pernah dilihat model); tulis keranjang/checkout tetap eksklusif flow. |
 | Booking janji temu — daftar (Fase 13G) | Ada | Ada | **Ada (baru 13G)** — `GET /v1/appointments` (filter from/to/status), `GET /v1/appointment-services` (`appointments:read`) | `listAppointments()` / `listAppointmentServices()` | `list_appointments` / `list_appointment_services` (baca) | `sk appointments list` | Booking lahir dari DUA jalur tulis saja (node flow `book_appointment` + pembuatan manual dashboard) dan keduanya memakai fungsi inti yang sama (`createBooking`) — permukaan publik SENGAJA baca-saja: janji temu adalah hasil percakapan/keputusan operator, bukan artefak yang dibuat integrasi eksternal; yang dibutuhkan integrasi adalah MEMBACA jadwal (sinkron kalender eksternal, pengingat, laporan). Serializer bersama dashboard + v1 persis sama. Anti-double-booking ditegakkan DI DATA: constraint eksklusi GiST atas rentang tstzrange booking `confirmed` per tenant (batal membebaskan rentang). |
@@ -199,4 +200,47 @@ Konsekuensi praktis untuk setiap fase berikutnya:
   dihapus via outbox, freebusy memotong slot, kegagalan sinkron
   tercatat di booking dan tidak pernah menggagalkan booking.
 - `pnpm check:drift` lulus pada permukaan yang diperluas.
+
+## Pembaruan Fase 14A (2026-11-03) — Pembayaran Asli Midtrans + Xendit
+
+- **34 rute** API publik v1 — TIDAK berubah: fase ini tidak menambah
+  rute v1, scope, metode SDK, atau tool MCP. Yang berubah adalah
+  PERILAKU di balik permukaan yang sudah ada (tautan bayar & order),
+  bukan permukaannya.
+- **18 scope** API key — tidak berubah (3 tulis + 15 baca).
+- Skema baru (migrasi 0007): `payment_provider_configs` (satu baris
+  per tenant; provider aktif + environment aktif + kunci Midtrans/
+  Xendit sandbox & production sebagai envelope terenkripsi +
+  token callback Xendit per environment) dan kolom
+  `payment_links.provider_environment` (snapshot per tautan),
+  `provider_ref` (token Snap / id invoice), `checkout_url`.
+- Provider tautan kini mengikuti konfigurasi TENANT: sesi checkout
+  dibuat saat tautan dibuat (Snap `POST /snap/v1/transactions`
+  dengan order_id = kode tautan; Xendit `POST /v2/invoices` dengan
+  external_id = kode tautan). Kegagalan provider membatalkan
+  pembuatan tautan dengan kode provider (502 di dashboard) — tidak
+  ada fallback diam-diam ke simulasi.
+- Penyelesaian pembayaran sungguhan HANYA lewat webhook
+  (`/payments/webhook/midtrans|xendit`): verifikasi kriptografis
+  per tenant, jumlah wajib sama dengan amount tautan, idempoten
+  (transisi hanya dari pending; audit `payment.paid` sekali), dan
+  order 13F membalik lewat hook sinkron yang sama. Endpoint
+  simulate-pay menolak tautan non-simulasi (409
+  `PAYMENT_NOT_SIMULATION`). Kedaluwarsa tetap ditegakkan lokal
+  (lazy/bulk yang sudah ada) — untuk provider sungguhan itu adalah
+  kebenaran TAMPILAN: Snap/invoice di provider punya masa berlakunya
+  sendiri dan webhook `expire`/`EXPIRED` provider tetap didengar
+  selama tautan masih pending di kita.
+- Dashboard: Settings → Payments (provider, toggle environment,
+  kunci per environment tertutup, uji koneksi berkode jujur
+  mengikuti preseden probe Resend 11B, URL webhook untuk
+  didaftarkan di dashboard provider). Halaman `/pay/:code`:
+  simulasi berlabel seperti sebelumnya; provider sungguhan
+  mengarahkan pembeli ke `checkoutUrl` (pengalihan di sisi halaman
+  karena `/pay/:code` adalah rute SPA — API-nya JSON).
+- Bukti live menunggu akun merchant milik user (sandbox Midtrans /
+  Xendit + kunci ditempel di Settings → Payments + URL webhook
+  didaftarkan di dashboard provider); seluruh rantai fase ini
+  dibuktikan terhadap server mock provider.
+- `pnpm check:drift` lulus (34 rute, tanpa perubahan permukaan).
 

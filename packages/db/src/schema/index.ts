@@ -22,3 +22,4 @@ export * from "./saved-replies";
 export * from "./growth";
 export * from "./segments";
 export * from "./appointments";
+export * from "./payments";
