@@ -62,9 +62,12 @@ import { resolveTenantForUser } from "../tenants/guard";
  * - messenger — Facebook Login klasik: dialog membawa `scope`
  *   (pages_show_list, pages_messaging, pages_manage_metadata,
  *   business_management — yang terakhir agar tepi bisnis penemuan
- *   Page bisa dibaca, Hotfix R1); code → user token → long-lived
- *   (fb_exchange_token) → rantai daftar Page. Token channel = Page
- *   Access Token turunan token long-lived per Page.
+ *   Page bisa dibaca, Hotfix R1; ditambah trio engagement
+ *   pages_read_engagement/pages_read_user_content/
+ *   pages_manage_engagement untuk fitur komentar Page, Fase 14B —
+ *   rincian di komentar MESSENGER_OAUTH_SCOPES); code → user token →
+ *   long-lived (fb_exchange_token) → rantai daftar Page. Token
+ *   channel = Page Access Token turunan token long-lived per Page.
  * - instagram — Unified Login: dialog membawa `config_id` (BUKAN scope,
  *   BUKAN JS SDK); exchange code → Business Integration System User
  *   Access Token (SUAT); aset dari RANTAI penemuan multi-tepi
@@ -129,11 +132,31 @@ const FACEBOOK_DIALOG_BASE = "https://www.facebook.com";
  *   Izinnya SUDAH ditambahkan pemilik ke aplikasi Meta — dialog
  *   klasik hanya memberikan scope yang secara eksplisit diminta di
  *   parameter `scope`, jadi menambahkannya di sinilah perbaikannya.
+ * - pages_read_engagement + pages_read_user_content +
+ *   pages_manage_engagement (Fase 14B — inventaris izin dari kode
+ *   untuk App Review): fitur komentar Page Fase 10B menerima event
+ *   komentar lewat langganan field `feed`, membalas publik
+ *   (`POST /{comment-id}/comments`) dan menyembunyikan
+ *   (`POST /{comment-id}?is_hidden=`). Dokumentasi Pages API Meta
+ *   menaruh ketiganya di izin engagement ini — TANPA diminta di
+ *   dialog, token Page hasil OAuth tidak membawanya, jadi moderasi
+ *   komentar untuk Page hasil "Lanjutkan dengan Facebook" akan
+ *   ditolak Graph di luar mode dev (rantai uji lolos hanya karena
+ *   mock tidak menegakkan izin). PRASYARAT KONSOLE: ketiganya harus
+ *   sudah menjadi bagian izin aplikasi (App Review → Permissions
+ *   and Features / use case) SEBELUM dialog dijalankan — bila belum,
+ *   Meta menolak dialog dengan "Invalid Scopes" dan koneksi
+ *   Messenger baru tidak bisa dibuat sampai ditambahkan (koneksi
+ *   yang sudah berjalan tidak terpengaruh). Urutan lengkapnya di
+ *   docs/APP-REVIEW.md §0.
  */
 const MESSENGER_OAUTH_SCOPES = [
   "pages_show_list",
   "pages_messaging",
   "pages_manage_metadata",
+  "pages_read_engagement",
+  "pages_read_user_content",
+  "pages_manage_engagement",
   "business_management",
 ] as const;
 
