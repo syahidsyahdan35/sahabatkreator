@@ -6215,3 +6215,125 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   (perilaku sejak 7C): enqueue ganda ter-dedupe; jalur pengulangan
   yang didukung adalah retry job — rantai membuktikan no-flip lewat
   re-entry fungsi dispatch yang sama.
+
+## Fase 13E — Questionnaire / Lead Capture di Flow (2026-11-03)
+
+- **Tanpa migrasi — jurnal tetap 5 entri; staging tetap 49 tabel /
+  63 policy.** Keadaan kuesioner hidup di `flow_runs.context`
+  (`questionnaire` + penanda parkir `wait` yang sudah ada) dan
+  transkrip di `flow_run_steps.detail` — kolom jsonb yang memang
+  dirancang untuk ini. PGlite verify tetap **38 seksi SEMUA LULUS**
+  (tidak ada seksi baru karena tidak ada skema baru).
+- **Node `questionnaire`** (tipe node ke-17): daftar pertanyaan
+  berurutan dalam SATU node — `{ questions: [{id, prompt,
+  answerType: text|number|email|phone|choice, target, required,
+  options?}], amount, unit, maxInvalidAttempts, invalidPrompt?,
+  completionTag? }`. Eksekusi MEMAKAI ULANG mesin parkir
+  `wait_reply` (BUKAN sistem parkir kedua): penanda `context.wait`
+  yang sama, resolusi balasan di jalur evaluasi pesan masuk yang
+  sama, pembatalan opt-out yang sama. Tenggat berlaku PER
+  PERTANYAAN (setiap parkir — pertanyaan baru maupun prompt ulang —
+  memasang tenggat baru, persis semantik per-parkir wait_reply).
+  Cabang keluar wajib lengkap: `completed` / `invalid` / `timeout`.
+- **Validasi & penulisan jawaban**: text = non-kosong sesudah trim;
+  email = bentuk alamat (regex) + lowercase; phone = normalisasi
+  digit dedup kontak yang sama (`normalizeContactPhone`); number =
+  parse numerik (koma desimal Indonesia diterima) dan disimpan
+  sebagai ANGKA pada field custom (target standar menerima bentuk
+  stringnya) — penangkapan bertipe memang disengaja di node ini,
+  berbeda dari permukaan API custom-fields yang string-only;
+  choice = teks opsi case-insensitive ATAU nomor urut 1..n, yang
+  disimpan teks opsi kanonis. Jawaban sah LANGSUNG ditulis ke field
+  target (progres parsial selamat dari pengabaian — terbukti di
+  timeout F4 rantai). Jawaban tidak sah → prompt ulang
+  (`invalidPrompt` config atau bawaan dwibahasa kontrak
+  `QUESTIONNAIRE_DEFAULT_INVALID_PROMPT`) sampai
+  `maxInvalidAttempts`: pertanyaan wajib keluar branch `invalid`
+  (langkah `attempts_exhausted`), pertanyaan opsional dilewati
+  (tercatat `skipped`). `completed` menerapkan `completionTag` bila
+  diisi. Transkrip penuh (prompt/target/raw/stored/attempts per
+  pertanyaan) disalin ke detail langkah penutup.
+- **Definisi field custom (keputusan terdokumentasi)**: produk
+  TIDAK punya registri definisi field — `set_field`, segmen, dan
+  API v1 semuanya memakai kunci bebas. Agar aturan brief
+  ("target harus resolve ke definisi yang ADA") bermakna, definisi
+  dioperasionalkan sebagai himpunan kunci `custom_fields` yang
+  dibawa kontak-kontak tenant (`tenantCustomFieldKeys`,
+  `jsonb_object_keys`): aktivasi menolak kunci tak dikenal dengan
+  `QUESTIONNAIRE_TARGET_UNKNOWN`; pemilih target builder diberi
+  makan dari kunci yang sama (ditarik dari daftar kontak, pola
+  tags/stages yang sudah ada). Kunci BARU harus lebih dulu ada pada
+  sebuah kontak (editor kontak / `set_field` / API) sebelum bisa
+  menjadi target questionnaire — itulah harga aturan anti-salah-ketik
+  ini, dan dinyatakan apa adanya di teks issue builder.
+- **Degradasi field terhapus**: keberadaan target custom diperiksa
+  ulang SETIAP pertanyaan hendak dikirim. Target wajib hilang →
+  keluar branch `invalid` dengan langkah outcome `target_missing`
+  tanpa mengirim pertanyaan; target opsional hilang → dilewati dan
+  tercatat `target_missing` di transkrip. Jawaban yang sudah
+  telanjur dalam perjalanan tetap ditulis (penulisannya sendiri
+  memulihkan kunci pada kontak itu). Keadaan parkir yang rusak
+  (state hilang) keluar `invalid` dengan outcome `state_missing`,
+  tidak menggantung.
+- **Render choice**: daftar teks bernomor di SEMUA channel —
+  lapisan keluar flow tidak punya infrastruktur tombol
+  quick-reply per channel dan fase ini sengaja tidak membangunnya;
+  balasan angka/teks diterima. Tidak ada janji tombol.
+- **Agent tidak bocor**: hasil evaluasi membawa
+  `flowQuestionnaireResumed`; worker tidak meneruskan pesan yang
+  menjadi jawaban kuesioner ke agent (gerbang yang sama seperti
+  wait_reply 12A). Rantai membuktikannya dengan agent auto aktif:
+  hitungan pesan `sender_type='agent'` + baris `usage_ledger`
+  TIDAK naik selama kuesioner berjalan (baseline diambil sebelum
+  trigger; pesan sambutan di luar kuesioner memang dijawab agent,
+  dan itu tercatat sebagai baseline). Pewarisan yang jujur:
+  matcher consent 13C tetap lebih dulu dari flow — jawaban yang
+  teksnya persis kata opt-in/opt-out tenant ditangkap sebagai
+  perintah consent, sama seperti pada wait_reply.
+- **Permukaan publik**: questionnaire adalah bagian dari graf
+  flow → **dashboard-only** mengikuti preseden semua tipe node
+  (baris matriks baru di `docs/COVERAGE-MATRIX.md`); grafnya
+  sendiri tetap terbaca v1 seperti sejak 15A. **30 rute v1 /
+  16 scope tetap**; `pnpm check:drift` lulus.
+- **Verifikasi**: typecheck monorepo hijau (19 paket);
+  PGlite 38 seksi; build semua dist + grep bundle (api:
+  `QUESTIONNAIRE_TARGET_UNKNOWN` — sisi validasi; worker:
+  `attempts_exhausted`, `target_missing`, `answer_recorded`,
+  `flowQuestionnaireResumed`, teks bawaan prompt — sisi eksekusi;
+  web: string questionnaire en+id). **Rantai terisolasi di server**
+  (DB buangan `sk_chain13e` + API :3216 + worker rantai + Redis
+  DB 15 + mock Telegram :8416): **58 PASS / 0 FAIL** — jalur
+  bahagia 4 pertanyaan (nama/email/pilihan-nomor/angka opsional,
+  semua field tersimpan, tag selesai, transkrip cocok), prompt
+  ulang email tidak valid (bawaan dwibahasa) lalu koreksi diterima,
+  `invalidPrompt` config terpakai, percobaan habis wajib → branch
+  invalid, opsional habis → dilewati & run selesai, timeout 2 dtk
+  dengan jawaban parsial persisten, penolakan aktivasi
+  (TARGET_UNKNOWN / OPTIONS_REQUIRED / BRANCH_TIMEOUT_MISSING),
+  degradasi target terhapus (wajib → invalid, opsional → lewati
+  tercatat), isolasi tenant 404, regresi wait_reply
+  replied+timeout, set_field, dan ab_split eksperimen lengket
+  13D. Satu bug nyata tertangkap rantai & diperbaiki di fase yang
+  sama (commit `fix(core)`): `tenantCustomFieldKeys` membaca
+  `{rows}` dari `tx.execute` driver pg. Deploy: rsync
+  (`.env.staging` dikecualikan; sha256 tetap `9c1ded2a…`), tanpa
+  migrasi, 4 service restart via MainPID, health publik ok. Data
+  live user UTUH: **1 tenant / 4 channel connected / 1 kontak**
+  sebelum & sesudah. Rantai dibersihkan total (DB di-drop, Redis
+  DB 15 di-flush, proses rantai dimatikan, direktori rantai
+  dihapus).
+- **Batas jujur**: (1) Bukti provider asli menunggu ujicoba user —
+  rantai membuktikan perilaku terhadap mock Telegram; pertanyaan
+  bekerja di semua provider karena parkir/resume ada di pipeline
+  inbound bersama (pengiriman per provider mengikuti aturan
+  platform masing-masing, mis. jendela 24 jam WhatsApp). (2)
+  Pemilih target builder memuat kunci dari maks 200 kontak pertama
+  (pola tags/stages); pemeriksaan otoritatif aktivasi memeriksa
+  SELURUH kontak, dan kunci di luar contoh tetap bisa diketik
+  manual di pemilih. (3) Balasan yang melanjutkan questionnaire
+  tetap diproses pemicu flow/automation LAIN seperti biasa
+  (semantik wait_reply yang diwarisi): "dijawab kuesioner" tidak
+  menekan trigger lain, hanya agent yang tidak ikut menjawab.
+  (4) Satu pesan masuk memproses SEMUA run questionnaire parkir
+  di percakapan itu (sama seperti wait_reply) — dua kuesioner
+  bersamaan di satu percakapan akan sama-sama mengonsumsi jawaban.
