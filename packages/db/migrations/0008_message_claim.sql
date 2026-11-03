@@ -1,0 +1,2 @@
+ALTER TABLE "messages" ADD COLUMN "claimed_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "messages_outbound_queued_created_idx" ON "messages" USING btree ("created_at") WHERE "messages"."direction" = 'outbound' AND "messages"."status" = 'queued';

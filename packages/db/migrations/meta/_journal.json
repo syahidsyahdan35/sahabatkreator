@@ -57,6 +57,13 @@
       "when": 1793684712045,
       "tag": "0007_payments_providers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793690050199,
+      "tag": "0008_message_claim",
+      "breakpoints": true
     }
   ]
 }
