@@ -8,7 +8,11 @@ import {
 import type {
   ContactDuplicatesResponse,
   ContactResponse,
+  EffectiveOptInStatus,
   OptInStatus,
+  SegmentCondition,
+  SegmentDefinition,
+  SegmentResponse,
 } from "@sahabat-kreator/contracts";
 import {
   formatNumber,
@@ -41,6 +45,21 @@ function optInLabel(t: Translate, status: OptInStatus): string {
   return t(`contacts.optIn.${status}` as TranslationKey);
 }
 
+function effectiveOptInLabel(
+  t: Translate,
+  status: EffectiveOptInStatus,
+): string {
+  return t(`contacts.optInEffective.${status}` as TranslationKey);
+}
+
+const PROVIDER_VALUES = [
+  "whatsapp",
+  "telegram",
+  "messenger",
+  "instagram",
+  "webchat",
+] as const;
+
 function parseTags(raw: string): string[] {
   return raw
     .split(",")
@@ -69,6 +88,26 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  // Segmen (Fase 13C): daftar untuk filter + pengelola; filter aktif.
+  const [segments, setSegments] = useState<SegmentResponse[]>([]);
+  const [segmentFilter, setSegmentFilter] = useState("");
+  const canManageSegments =
+    active?.role === "owner" || active?.role === "admin";
+
+  const loadSegments = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      const body = await api.segments.list(tenantId);
+      setSegments(body.segments);
+    } catch {
+      // Kegagalan memuat segmen tidak boleh menghalangi daftar kontak.
+      setSegments([]);
+    }
+  }, [tenantId]);
+
+  useEffect(() => {
+    void loadSegments();
+  }, [loadSegments]);
   const [showForm, setShowForm] = useState(false);
   const [selected, setSelected] = useState<ContactResponse | null>(null);
   const requestSeq = useRef(0);
@@ -133,6 +172,7 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
         search: search || undefined,
         limit: PAGE_SIZE,
         offset: 0,
+        segmentId: segmentFilter || undefined,
       });
       if (requestSeq.current !== seq) return;
       setItems(body.contacts);
@@ -145,7 +185,7 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
     } finally {
       if (requestSeq.current === seq) setLoading(false);
     }
-  }, [tenantId, search, t]);
+  }, [tenantId, search, segmentFilter, t]);
 
   useEffect(() => {
     void loadFirst();
@@ -159,6 +199,7 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
         search: search || undefined,
         limit: PAGE_SIZE,
         offset: items.length,
+        segmentId: segmentFilter || undefined,
       });
       setItems((prev) => [...prev, ...body.contacts]);
       setTotal(body.total);
@@ -330,6 +371,14 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
         </div>
       ) : null}
 
+      <SegmentsManager
+        t={t}
+        tenantId={active.id}
+        segments={segments}
+        canManage={canManageSegments}
+        onChanged={() => void loadSegments()}
+      />
+
       <div className="mt-5 flex flex-wrap items-center gap-3">
         <div className="min-w-52 flex-1">
           <input
@@ -341,6 +390,21 @@ export function ContactsPage({ t, locale }: ContactsPageProps) {
             className={inputClassName}
           />
         </div>
+        <label className="flex items-center gap-2 text-sm text-muted">
+          <span>{t("contacts.segmentFilterLabel")}</span>
+          <select
+            value={segmentFilter}
+            onChange={(e) => setSegmentFilter(e.target.value)}
+            className="rounded-lg border border-line bg-surface px-2 py-2 text-sm text-ink"
+          >
+            <option value="">{t("contacts.segmentFilterAll")}</option>
+            {segments.map((seg) => (
+              <option key={seg.id} value={seg.id}>
+                {seg.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <span className="text-sm text-muted">
           {t("contacts.totalLabel", { count: formatNumber(total, locale) })}
         </span>
@@ -724,6 +788,29 @@ function ContactDetailModal({
               </select>
             </label>
           </div>
+          {/* Fase 13C: status EFEKTIF + jejak persetujuan — status
+              inilah yang dipakai gerbang broadcast require_opt_in. */}
+          <div className="rounded-lg bg-elevated/60 px-3 py-2 text-xs text-muted">
+            <p>
+              <span className="font-medium text-ink">
+                {t("contacts.optInEffectiveLabel")}:
+              </span>{" "}
+              {effectiveOptInLabel(t, contact.optInEffectiveStatus)}
+            </p>
+            {contact.optInSource ? (
+              <p className="mt-0.5">
+                <span className="font-medium text-ink">
+                  {t("contacts.optInSourceLabel")}:
+                </span>{" "}
+                {contact.optInSource === "keyword"
+                  ? t("contacts.optInSourceKeyword")
+                  : t("contacts.optInSourceManual")}
+                {contact.optInAt
+                  ? ` · ${t("contacts.optInAtLabel")}: ${new Date(contact.optInAt).toLocaleString()}`
+                  : ""}
+              </p>
+            ) : null}
+          </div>
           <FieldError message={error} />
           <div className="flex gap-2 pt-1">
             <button
@@ -745,4 +832,564 @@ function ContactDetailModal({
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Pengelola segmen (Fase 13C): daftar segmen + pembuat kondisi sederhana.
+// Keanggotaan tidak pernah disimpan — pratinjau hitungan memanggil
+// evaluator server yang sama seperti filter daftar & broadcast.
+// ---------------------------------------------------------------------------
+
+const CONDITION_TYPES: SegmentCondition["type"][] = [
+  "tag",
+  "stage",
+  "source_prefix",
+  "opt_in_status",
+  "custom_field",
+  "created_within_days",
+  "last_active_within_days",
+  "has_channel",
+];
+
+function conditionTypeLabel(
+  t: Translate,
+  type: SegmentCondition["type"],
+): string {
+  const keys: Record<SegmentCondition["type"], TranslationKey> = {
+    tag: "contacts.segments.conditionTag",
+    stage: "contacts.segments.conditionStage",
+    source_prefix: "contacts.segments.conditionSourcePrefix",
+    opt_in_status: "contacts.segments.conditionOptInStatus",
+    custom_field: "contacts.segments.conditionCustomField",
+    created_within_days: "contacts.segments.conditionCreatedWithin",
+    last_active_within_days: "contacts.segments.conditionLastActiveWithin",
+    has_channel: "contacts.segments.conditionHasChannel",
+  };
+  return t(keys[type]);
+}
+
+function defaultCondition(
+  type: SegmentCondition["type"],
+): SegmentCondition {
+  switch (type) {
+    case "tag":
+      return { type, tag: "" };
+    case "stage":
+      return { type, stage: "new" };
+    case "source_prefix":
+      return { type, prefix: "growth:" };
+    case "opt_in_status":
+      return { type, status: "opted_in" };
+    case "custom_field":
+      return { type, key: "", op: "eq", value: "" };
+    case "created_within_days":
+      return { type, days: 30 };
+    case "last_active_within_days":
+      return { type, days: 30 };
+    case "has_channel":
+      return { type, provider: "whatsapp" };
+  }
+}
+
+function conditionValid(condition: SegmentCondition): boolean {
+  switch (condition.type) {
+    case "tag":
+      return condition.tag.trim().length > 0;
+    case "stage":
+      return condition.stage.trim().length > 0;
+    case "source_prefix":
+      return condition.prefix.trim().length > 0;
+    case "opt_in_status":
+      return true;
+    case "custom_field":
+      return condition.key.trim().length > 0;
+    case "created_within_days":
+    case "last_active_within_days":
+      return (
+        Number.isInteger(condition.days) &&
+        condition.days >= 1 &&
+        condition.days <= 3650
+      );
+    case "has_channel":
+      return true;
+  }
+}
+
+interface SegmentDraft {
+  id: string | null;
+  name: string;
+  match: "all" | "any";
+  conditions: SegmentCondition[];
+}
+
+function SegmentsManager({
+  t,
+  tenantId,
+  segments,
+  canManage,
+  onChanged,
+}: {
+  t: Translate;
+  tenantId: string;
+  segments: SegmentResponse[];
+  canManage: boolean;
+  onChanged: () => void;
+}) {
+  const [draft, setDraft] = useState<SegmentDraft | null>(null);
+  const [previewCount, setPreviewCount] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const previewSeq = useRef(0);
+
+  const draftValid =
+    draft !== null &&
+    draft.name.trim().length > 0 &&
+    draft.conditions.length > 0 &&
+    draft.conditions.every(conditionValid);
+
+  // Pratinjau hitungan langsung (debounce) untuk definisi draf.
+  useEffect(() => {
+    if (!draft || !draftValid) {
+      setPreviewCount(null);
+      return;
+    }
+    const seq = ++previewSeq.current;
+    const timer = setTimeout(() => {
+      api.segments
+        .preview(tenantId, {
+          match: draft.match,
+          conditions: draft.conditions,
+        } satisfies SegmentDefinition)
+        .then((res) => {
+          if (previewSeq.current === seq) setPreviewCount(res.count);
+        })
+        .catch(() => {
+          if (previewSeq.current === seq) setPreviewCount(null);
+        });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draft, draftValid, tenantId]);
+
+  const openCreate = () =>
+    setDraft({
+      id: null,
+      name: "",
+      match: "all",
+      conditions: [defaultCondition("tag")],
+    });
+
+  const openEdit = (segment: SegmentResponse) =>
+    setDraft({
+      id: segment.id,
+      name: segment.name,
+      match: segment.definition.match,
+      conditions: segment.definition.conditions.map((c) => ({ ...c })),
+    });
+
+  const save = async () => {
+    if (!draft || !draftValid || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const definition: SegmentDefinition = {
+        match: draft.match,
+        conditions: draft.conditions,
+      };
+      if (draft.id) {
+        await api.segments.update(tenantId, draft.id, {
+          name: draft.name.trim(),
+          definition,
+        });
+      } else {
+        await api.segments.create(tenantId, {
+          name: draft.name.trim(),
+          definition,
+        });
+      }
+      setDraft(null);
+      onChanged();
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (segment: SegmentResponse) => {
+    if (confirmDeleteId !== segment.id) {
+      setConfirmDeleteId(segment.id);
+      return;
+    }
+    setConfirmDeleteId(null);
+    try {
+      await api.segments.remove(tenantId, segment.id);
+      onChanged();
+    } catch (err) {
+      setError(translateApiError(t, err));
+    }
+  };
+
+  const patchCondition = (index: number, next: SegmentCondition) => {
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            conditions: prev.conditions.map((c, i) =>
+              i === index ? next : c,
+            ),
+          }
+        : prev,
+    );
+  };
+
+  return (
+    <div className="mt-5 rounded-xl border border-line bg-surface p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-ink">
+            {t("contacts.segments.title")}
+          </h2>
+          <p className="mt-1 max-w-2xl text-xs text-muted">
+            {t("contacts.segments.subtitle")}
+          </p>
+        </div>
+        {canManage && !draft ? (
+          <button
+            type="button"
+            onClick={openCreate}
+            className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white"
+          >
+            {t("contacts.segments.addButton")}
+          </button>
+        ) : null}
+      </div>
+
+      {segments.length === 0 && !draft ? (
+        <p className="mt-3 text-sm text-muted">{t("contacts.segments.empty")}</p>
+      ) : null}
+
+      {segments.length > 0 ? (
+        <ul className="mt-3 space-y-2">
+          {segments.map((segment) => (
+            <li
+              key={segment.id}
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-elevated/40 px-3 py-2 text-sm"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium text-ink">
+                  {segment.name}
+                </span>
+                <span className="block text-xs text-muted">
+                  {segment.definition.match === "all"
+                    ? t("contacts.segments.matchAll")
+                    : t("contacts.segments.matchAny")}
+                  {" · "}
+                  {segment.definition.conditions
+                    .map((c) => conditionTypeLabel(t, c.type))
+                    .join(", ")}
+                </span>
+              </span>
+              {canManage ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openEdit(segment)}
+                    className="rounded-lg bg-elevated px-3 py-1.5 text-xs font-semibold text-ink"
+                  >
+                    {t("contacts.segments.editButton")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void remove(segment)}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${
+                      confirmDeleteId === segment.id
+                        ? "bg-danger text-white"
+                        : "bg-elevated text-ink"
+                    }`}
+                  >
+                    {confirmDeleteId === segment.id
+                      ? t("contacts.segments.confirmDelete")
+                      : t("contacts.segments.deleteButton")}
+                  </button>
+                </>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {draft ? (
+        <div className="mt-4 rounded-lg border border-line p-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-muted">
+                {t("contacts.segments.nameLabel")}
+              </span>
+              <input
+                value={draft.name}
+                onChange={(e) =>
+                  setDraft({ ...draft, name: e.target.value })
+                }
+                placeholder={t("contacts.segments.namePlaceholder")}
+                className={inputClassName}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-muted">
+                {t("contacts.segments.matchLabel")}
+              </span>
+              <select
+                value={draft.match}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    match: e.target.value as "all" | "any",
+                  })
+                }
+                className={inputClassName}
+              >
+                <option value="all">{t("contacts.segments.matchAll")}</option>
+                <option value="any">{t("contacts.segments.matchAny")}</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {draft.conditions.map((condition, index) => (
+              <div
+                key={index}
+                className="flex flex-wrap items-center gap-2 rounded-lg bg-elevated/50 p-2"
+              >
+                <select
+                  value={condition.type}
+                  onChange={(e) =>
+                    patchCondition(
+                      index,
+                      defaultCondition(
+                        e.target.value as SegmentCondition["type"],
+                      ),
+                    )
+                  }
+                  className="rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-ink"
+                >
+                  {CONDITION_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {conditionTypeLabel(t, type)}
+                    </option>
+                  ))}
+                </select>
+                <SegmentConditionValueInputs
+                  t={t}
+                  condition={condition}
+                  onChange={(next) => patchCondition(index, next)}
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      conditions: draft.conditions.filter(
+                        (_, i) => i !== index,
+                      ),
+                    })
+                  }
+                  className="rounded-lg bg-surface px-2 py-1.5 text-xs font-medium text-ink"
+                >
+                  {t("contacts.segments.removeCondition")}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                setDraft({
+                  ...draft,
+                  conditions: [
+                    ...draft.conditions,
+                    defaultCondition("tag"),
+                  ],
+                })
+              }
+              className="rounded-lg bg-elevated px-3 py-1.5 text-xs font-semibold text-ink"
+            >
+              {t("contacts.segments.addCondition")}
+            </button>
+            <span className="text-xs text-muted">
+              {previewCount !== null
+                ? t("contacts.segments.memberCount", { count: previewCount })
+                : ""}
+            </span>
+          </div>
+
+          <FieldError message={error} />
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => void save()}
+              disabled={!draftValid || saving}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            >
+              {t("contacts.segments.saveButton")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDraft(null)}
+              className="rounded-lg bg-elevated px-4 py-2 text-sm font-medium text-ink"
+            >
+              {t("common.cancel")}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SegmentConditionValueInputs({
+  t,
+  condition,
+  onChange,
+}: {
+  t: Translate;
+  condition: SegmentCondition;
+  onChange: (next: SegmentCondition) => void;
+}) {
+  const smallInput =
+    "rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-ink";
+  switch (condition.type) {
+    case "tag":
+      return (
+        <input
+          value={condition.tag}
+          onChange={(e) => onChange({ ...condition, tag: e.target.value })}
+          placeholder={t("contacts.segments.valuePlaceholder")}
+          className={smallInput}
+        />
+      );
+    case "stage": {
+      const options = (KNOWN_STAGES as readonly string[]).includes(
+        condition.stage,
+      )
+        ? [...KNOWN_STAGES]
+        : [condition.stage, ...KNOWN_STAGES];
+      return (
+        <select
+          value={condition.stage}
+          onChange={(e) => onChange({ ...condition, stage: e.target.value })}
+          className={smallInput}
+        >
+          {options.map((stage) => (
+            <option key={stage} value={stage}>
+              {stageLabel(t, stage)}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    case "source_prefix":
+      return (
+        <input
+          value={condition.prefix}
+          onChange={(e) => onChange({ ...condition, prefix: e.target.value })}
+          placeholder={t("contacts.segments.valuePlaceholder")}
+          className={smallInput}
+        />
+      );
+    case "opt_in_status":
+      return (
+        <select
+          value={condition.status}
+          onChange={(e) =>
+            onChange({
+              ...condition,
+              status: e.target.value as EffectiveOptInStatus,
+            })
+          }
+          className={smallInput}
+        >
+          {(["opted_in", "none", "opted_out"] as EffectiveOptInStatus[]).map(
+            (status) => (
+              <option key={status} value={status}>
+                {effectiveOptInLabel(t, status)}
+              </option>
+            ),
+          )}
+        </select>
+      );
+    case "custom_field":
+      return (
+        <>
+          <input
+            value={condition.key}
+            onChange={(e) => onChange({ ...condition, key: e.target.value })}
+            placeholder={t("contacts.segments.keyPlaceholder")}
+            className={smallInput}
+          />
+          <select
+            value={condition.op}
+            onChange={(e) =>
+              onChange({
+                ...condition,
+                op: e.target.value as "eq" | "contains",
+              })
+            }
+            className={smallInput}
+          >
+            <option value="eq">{t("contacts.segments.opEq")}</option>
+            <option value="contains">
+              {t("contacts.segments.opContains")}
+            </option>
+          </select>
+          <input
+            value={condition.value}
+            onChange={(e) =>
+              onChange({ ...condition, value: e.target.value })
+            }
+            placeholder={t("contacts.segments.valuePlaceholder")}
+            className={smallInput}
+          />
+        </>
+      );
+    case "created_within_days":
+    case "last_active_within_days":
+      return (
+        <input
+          type="number"
+          min={1}
+          max={3650}
+          value={condition.days}
+          onChange={(e) =>
+            onChange({
+              ...condition,
+              days: Number.parseInt(e.target.value, 10) || 0,
+            })
+          }
+          placeholder={t("contacts.segments.daysPlaceholder")}
+          className={`${smallInput} w-24`}
+        />
+      );
+    case "has_channel":
+      return (
+        <select
+          value={condition.provider}
+          onChange={(e) =>
+            onChange({
+              ...condition,
+              provider: e.target.value as (typeof PROVIDER_VALUES)[number],
+            })
+          }
+          className={smallInput}
+        >
+          {PROVIDER_VALUES.map((provider) => (
+            <option key={provider} value={provider}>
+              {provider}
+            </option>
+          ))}
+        </select>
+      );
+  }
 }

@@ -49,6 +49,7 @@ const SCOPE_LABEL_KEYS: Record<ApiKeyScope, TranslationKey> = {
   "whatsapp_templates:read": "settings.scopeWhatsappTemplatesRead",
   "knowledge:read": "settings.scopeKnowledgeRead",
   "growth_links:read": "settings.scopeGrowthLinksRead",
+  "segments:read": "settings.scopeSegmentsRead",
 };
 
 /** Scope read tercentang secara bawaan di form (selaras default API). */

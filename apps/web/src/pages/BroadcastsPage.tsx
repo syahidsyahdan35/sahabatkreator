@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  BroadcastAudienceEstimateResponse,
+  BroadcastAudienceFilter,
+  BroadcastAudiencePreviewResponse,
   BroadcastRecipientResponse,
   BroadcastResponse,
   BroadcastStatus,
   ChannelAccountResponse,
   ChannelProvider,
   CreateWhatsAppTemplateRequest,
+  OptInSettingsResponse,
+  SegmentResponse,
   WhatsAppTemplateResponse,
 } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
@@ -90,6 +93,7 @@ const RECIPIENT_STATUS_LABEL_KEYS: Record<string, TranslationKey> = {
 
 const SKIP_REASON_LABEL_KEYS: Record<string, TranslationKey> = {
   opted_out: "broadcasts.skipReasonOptedOut",
+  not_opted_in: "broadcasts.skipReasonNotOptedIn",
   outside_24h_window: "broadcasts.skipReasonOutside24h",
   message_deleted: "broadcasts.skipReasonMessageDeleted",
   template_variable_missing: "broadcasts.skipReasonTemplateVariableMissing",
@@ -480,6 +484,8 @@ export function BroadcastsPage({ t, locale }: BroadcastsPageProps) {
         </div>
       ) : null}
 
+      <OptInSettingsCard t={t} tenantId={tenantId} canManage={canManage} />
+
       <WhatsAppTemplatesSection
         t={t}
         tenantId={tenantId}
@@ -490,6 +496,182 @@ export function BroadcastsPage({ t, locale }: BroadcastsPageProps) {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Kartu "Opt-in Broadcast" (Fase 13C) di halaman Broadcasts:
+ * pengaturan mesin opt-in per tenant — kata kunci opt-in, teks
+ * konfirmasi (opsional), kata opt-out tambahan di atas kata bawaan
+ * sistem (ditampilkan hanya-baca agar aturannya transparan).
+ */
+function OptInSettingsCard({
+  t,
+  tenantId,
+  canManage,
+}: {
+  t: Translate;
+  tenantId: string | null;
+  canManage: boolean;
+}) {
+  const [settings, setSettings] = useState<OptInSettingsResponse | null>(null);
+  const [keywordsText, setKeywordsText] = useState("");
+  const [confirmationText, setConfirmationText] = useState("");
+  const [extraOptOutText, setExtraOptOutText] = useState("");
+  const [loadError, setLoadError] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    api.broadcasts
+      .getOptInSettings(tenantId)
+      .then((res) => {
+        if (cancelled) return;
+        setSettings(res);
+        setKeywordsText(res.optInKeywords.join(", "));
+        setConfirmationText(res.optInConfirmationText ?? "");
+        setExtraOptOutText(res.optOutExtraKeywords.join(", "));
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const save = async () => {
+    if (!tenantId || saving) return;
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+    try {
+      const res = await api.broadcasts.updateOptInSettings(tenantId, {
+        optInKeywords: splitCommaList(keywordsText) ?? [],
+        optInConfirmationText: confirmationText.trim()
+          ? confirmationText.trim()
+          : null,
+        optOutExtraKeywords: splitCommaList(extraOptOutText) ?? [],
+      });
+      setSettings(res);
+      setSaved(true);
+    } catch (err) {
+      setError(translateApiError(t, err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputClass =
+    "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink";
+  const labelClass = "block text-sm font-medium text-ink";
+
+  return (
+    <div className="mt-8 rounded-xl border border-border bg-surface p-4">
+      <h2 className="text-base font-semibold text-ink">
+        {t("broadcasts.optInCard.title")}
+      </h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted">
+        {t("broadcasts.optInCard.subtitle")}
+      </p>
+      {loadError ? (
+        <p className="mt-3 text-sm text-danger">
+          {t("broadcasts.optInCard.loadError")}
+        </p>
+      ) : !settings ? (
+        <p className="mt-3 text-sm text-muted">{t("workspace.loading")}</p>
+      ) : (
+        <div className="mt-4 max-w-2xl space-y-4">
+          <div>
+            <label className={labelClass} htmlFor="optin-keywords">
+              {t("broadcasts.optInCard.keywordsLabel")}
+            </label>
+            <input
+              id="optin-keywords"
+              className={inputClass}
+              value={keywordsText}
+              onChange={(e) => setKeywordsText(e.target.value)}
+              disabled={!canManage}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.optInCard.keywordsHint")}
+            </p>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="optin-confirmation">
+              {t("broadcasts.optInCard.confirmationLabel")}
+            </label>
+            <input
+              id="optin-confirmation"
+              className={inputClass}
+              value={confirmationText}
+              onChange={(e) => setConfirmationText(e.target.value)}
+              placeholder={t("broadcasts.optInCard.confirmationPlaceholder")}
+              maxLength={1000}
+              disabled={!canManage}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.optInCard.confirmationHint")}
+            </p>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="optin-extra-optout">
+              {t("broadcasts.optInCard.extraOptOutLabel")}
+            </label>
+            <input
+              id="optin-extra-optout"
+              className={inputClass}
+              value={extraOptOutText}
+              onChange={(e) => setExtraOptOutText(e.target.value)}
+              disabled={!canManage}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t("broadcasts.optInCard.extraOptOutHint")}
+            </p>
+          </div>
+          <div>
+            <span className={labelClass}>
+              {t("broadcasts.optInCard.defaultOptOutLabel")}
+            </span>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {settings.defaultOptOutKeywords.map((word) => (
+                <span
+                  key={word}
+                  className="rounded-full bg-surface-2 px-2 py-0.5 text-xs font-medium text-muted"
+                >
+                  {word}
+                </span>
+              ))}
+            </div>
+          </div>
+          {error ? (
+            <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">
+              {error}
+            </p>
+          ) : null}
+          {canManage ? (
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void save()}
+                disabled={saving}
+                className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {t("broadcasts.optInCard.saveButton")}
+              </button>
+              {saved ? (
+                <span className="text-sm text-muted">
+                  {t("broadcasts.optInCard.saved")}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface BroadcastFormProps {
   t: Translate;
@@ -521,14 +703,36 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
   const [stagesText, setStagesText] = useState(
     editing?.audienceFilter.stages?.join(", ") ?? "",
   );
+  // Fase 13C: mode audiens (all | tag | segment) + segmen terpilih.
+  // Mode awal diturunkan dari filter tersimpan seperti normalizeFilter
+  // di core (baris lama tanpa `audience` tetap terbaca benar).
+  const [audienceMode, setAudienceMode] = useState<"all" | "tag" | "segment">(
+    () =>
+      editing?.audienceFilter.audience ??
+      (editing?.audienceFilter.segmentId
+        ? "segment"
+        : editing?.audienceFilter.tags?.length ||
+            editing?.audienceFilter.stages?.length
+          ? "tag"
+          : "all"),
+  );
+  const [segmentId, setSegmentId] = useState(
+    editing?.audienceFilter.segmentId ?? "",
+  );
+  const [segments, setSegments] = useState<SegmentResponse[]>([]);
+  // Fase 13C: gerbang opt-in — null = ikuti bawaan server per provider
+  // (WhatsApp menyala, selain itu mati); boolean = pilihan eksplisit.
+  const [requireOptIn, setRequireOptIn] = useState<boolean | null>(
+    editing ? editing.requireOptIn : null,
+  );
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [scheduledAtLocal, setScheduledAtLocal] = useState("");
-  const [estimate, setEstimate] =
-    useState<BroadcastAudienceEstimateResponse | null>(null);
-  const [estimateLoading, setEstimateLoading] = useState(false);
+  const [preview, setPreview] =
+    useState<BroadcastAudiencePreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const estimateSeq = useRef(0);
+  const previewSeq = useRef(0);
 
   useEffect(() => {
     if (!tenantId) return;
@@ -554,6 +758,23 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
+
+  // Daftar segmen tenant untuk pemilih audiens mode segment (13C).
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    api.segments
+      .list(tenantId)
+      .then((res) => {
+        if (!cancelled) setSegments(res.segments);
+      })
+      .catch(() => {
+        if (!cancelled) setSegments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [tenantId]);
 
   const selectedChannel = channels.find((ch) => ch.id === channelAccountId);
@@ -583,39 +804,81 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     };
   }, [tenantId, isWhatsApp, channelAccountId]);
 
-  // Estimasi audiens live (debounce 400ms) mengikuti channel + filter.
+  // Nilai gerbang opt-in EFEKTIF untuk pratinjau & tampilan checkbox:
+  // pilihan eksplisit menang; tanpa pilihan, bawaan per provider
+  // (WhatsApp menyala) — sama seperti bawaan server saat buat.
+  const effectiveRequireOptIn = requireOptIn ?? isWhatsApp;
+
+  // Pratinjau audiens live (debounce 400ms) mengikuti channel + filter.
+  // Dihitung server dengan klasifikasi yang sama seperti dispatch.
   useEffect(() => {
     if (!tenantId || !channelAccountId) {
-      setEstimate(null);
+      setPreview(null);
       return;
     }
-    const seq = ++estimateSeq.current;
-    setEstimateLoading(true);
+    if (audienceMode === "segment" && !segmentId) {
+      setPreview(null);
+      return;
+    }
+    const seq = ++previewSeq.current;
+    setPreviewLoading(true);
     const timer = setTimeout(() => {
       api.broadcasts
-        .estimateAudience(tenantId, {
+        .previewAudience(tenantId, {
           channelAccountId,
-          tags: splitCommaList(tagsText)?.join(","),
-          stages: splitCommaList(stagesText)?.join(","),
+          tags:
+            audienceMode === "tag"
+              ? splitCommaList(tagsText)?.join(",")
+              : undefined,
+          stages:
+            audienceMode === "tag"
+              ? splitCommaList(stagesText)?.join(",")
+              : undefined,
+          segmentId: audienceMode === "segment" ? segmentId : undefined,
+          requireOptIn: effectiveRequireOptIn,
+          whatsappTemplateId: isWhatsApp
+            ? whatsappTemplateId || undefined
+            : undefined,
+          templateVariableSources: isWhatsApp
+            ? variableSources.join(",") || undefined
+            : undefined,
         })
         .then((res) => {
-          if (estimateSeq.current === seq) setEstimate(res);
+          if (previewSeq.current === seq) setPreview(res);
         })
         .catch(() => {
-          if (estimateSeq.current === seq) setEstimate(null);
+          if (previewSeq.current === seq) setPreview(null);
         })
         .finally(() => {
-          if (estimateSeq.current === seq) setEstimateLoading(false);
+          if (previewSeq.current === seq) setPreviewLoading(false);
         });
     }, 400);
     return () => clearTimeout(timer);
-  }, [tenantId, channelAccountId, tagsText, stagesText]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    tenantId,
+    channelAccountId,
+    tagsText,
+    stagesText,
+    audienceMode,
+    segmentId,
+    effectiveRequireOptIn,
+    isWhatsApp,
+    whatsappTemplateId,
+    variableSources,
+  ]);
 
   const buildInput = () => {
-    const audienceFilter = {
-      tags: splitCommaList(tagsText),
-      stages: splitCommaList(stagesText),
-    };
+    const audienceFilter: BroadcastAudienceFilter =
+      audienceMode === "segment"
+        ? { audience: "segment", segmentId: segmentId || undefined }
+        : audienceMode === "tag"
+          ? {
+              audience: "tag",
+              tags: splitCommaList(tagsText),
+              stages: splitCommaList(stagesText),
+            }
+          : { audience: "all" };
     if (isWhatsApp) {
       // Sumber variabel per posisi; posisi kosong di tengah
       // dipertahankan (makna posisional), ekor kosong dipangkas.
@@ -633,6 +896,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
         whatsappTemplateId: whatsappTemplateId || undefined,
         templateVariableSources: sources,
         audienceFilter,
+        ...(requireOptIn !== null ? { requireOptIn } : {}),
       };
     }
     return {
@@ -640,6 +904,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
       channelAccountId,
       messageText: messageText.trim(),
       audienceFilter,
+      ...(requireOptIn !== null ? { requireOptIn } : {}),
     };
   };
 
@@ -675,6 +940,9 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
   const contentReady = isWhatsApp
     ? !!whatsappTemplateId
     : !!messageText.trim();
+  // Mode segment tanpa segmen terpilih belum bisa disimpan (server
+  // juga menolaknya sebagai segment_not_found).
+  const audienceReady = audienceMode !== "segment" || !!segmentId;
 
   return (
     <section>
@@ -749,58 +1017,150 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
           ) : null}
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelClass} htmlFor="bc-tags">
-              {t("broadcasts.tagsLabel")}
-            </label>
-            <input
-              id="bc-tags"
-              className={inputClass}
-              value={tagsText}
-              onChange={(e) => setTagsText(e.target.value)}
-              placeholder={t("broadcasts.tagsPlaceholder")}
-            />
-            <p className="mt-1 text-xs text-muted">{t("broadcasts.tagsHint")}</p>
+        <div>
+          <label className={labelClass} htmlFor="bc-audience-mode">
+            {t("broadcasts.audienceLabel")}
+          </label>
+          <select
+            id="bc-audience-mode"
+            className={inputClass}
+            value={audienceMode}
+            onChange={(e) =>
+              setAudienceMode(e.target.value as "all" | "tag" | "segment")
+            }
+          >
+            <option value="all">{t("broadcasts.audienceModeAll")}</option>
+            <option value="tag">{t("broadcasts.audienceModeTag")}</option>
+            <option value="segment">{t("broadcasts.audienceModeSegment")}</option>
+          </select>
+        </div>
+
+        {audienceMode === "tag" ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className={labelClass} htmlFor="bc-tags">
+                {t("broadcasts.tagsLabel")}
+              </label>
+              <input
+                id="bc-tags"
+                className={inputClass}
+                value={tagsText}
+                onChange={(e) => setTagsText(e.target.value)}
+                placeholder={t("broadcasts.tagsPlaceholder")}
+              />
+              <p className="mt-1 text-xs text-muted">{t("broadcasts.tagsHint")}</p>
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="bc-stages">
+                {t("broadcasts.stagesLabel")}
+              </label>
+              <input
+                id="bc-stages"
+                className={inputClass}
+                value={stagesText}
+                onChange={(e) => setStagesText(e.target.value)}
+                placeholder={t("broadcasts.stagesPlaceholder")}
+              />
+              <p className="mt-1 text-xs text-muted">
+                {t("broadcasts.stagesHint")}
+              </p>
+            </div>
           </div>
+        ) : null}
+
+        {audienceMode === "segment" ? (
           <div>
-            <label className={labelClass} htmlFor="bc-stages">
-              {t("broadcasts.stagesLabel")}
+            <label className={labelClass} htmlFor="bc-segment">
+              {t("broadcasts.segmentLabel")}
             </label>
-            <input
-              id="bc-stages"
+            <select
+              id="bc-segment"
               className={inputClass}
-              value={stagesText}
-              onChange={(e) => setStagesText(e.target.value)}
-              placeholder={t("broadcasts.stagesPlaceholder")}
-            />
-            <p className="mt-1 text-xs text-muted">
-              {t("broadcasts.stagesHint")}
-            </p>
+              value={segmentId}
+              onChange={(e) => setSegmentId(e.target.value)}
+            >
+              <option value="">{t("broadcasts.segmentPlaceholder")}</option>
+              {segments.map((seg) => (
+                <option key={seg.id} value={seg.id}>
+                  {seg.name}
+                </option>
+              ))}
+            </select>
           </div>
+        ) : null}
+
+        <div>
+          <label className="flex items-start gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={effectiveRequireOptIn}
+              onChange={(e) => setRequireOptIn(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">
+                {t("broadcasts.requireOptInLabel")}
+              </span>
+              <span className="mt-0.5 block text-xs font-normal text-muted">
+                {t("broadcasts.requireOptInHint")}
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="rounded-xl border border-border bg-surface p-4">
           <p className="text-sm font-medium text-ink">
-            {t("broadcasts.estimateTitle")}
+            {t("broadcasts.previewTitle")}
           </p>
-          {estimateLoading ? (
+          {previewLoading ? (
             <p className="mt-1 text-sm text-muted">
-              {t("broadcasts.estimateLoading")}
+              {t("broadcasts.previewLoading")}
             </p>
-          ) : estimate ? (
+          ) : preview ? (
             <div className="mt-1 space-y-0.5 text-sm text-muted">
-              <p className="font-medium text-ink">
-                {t("broadcasts.estimateMatched", { count: estimate.matched })}
-              </p>
               <p>
-                {t("broadcasts.estimateOptedOut", { count: estimate.optedOut })}
-              </p>
-              <p>
-                {t("broadcasts.estimateTotal", {
-                  count: estimate.totalWithIdentity,
+                {t("broadcasts.previewTotal", {
+                  count: preview.totalCandidates,
                 })}
               </p>
+              <p className="font-medium text-ink">
+                {t("broadcasts.previewWillSend", { count: preview.willSend })}
+              </p>
+              {preview.skippedOptedOut > 0 ? (
+                <p>
+                  {t("broadcasts.previewSkippedOptedOut", {
+                    count: preview.skippedOptedOut,
+                  })}
+                </p>
+              ) : null}
+              {preview.skippedNotOptedIn > 0 ? (
+                <p>
+                  {t("broadcasts.previewSkippedNotOptedIn", {
+                    count: preview.skippedNotOptedIn,
+                  })}
+                </p>
+              ) : null}
+              {preview.skippedOutside24hWindow > 0 ? (
+                <p>
+                  {t("broadcasts.previewSkippedOutside24h", {
+                    count: preview.skippedOutside24hWindow,
+                  })}
+                </p>
+              ) : null}
+              {preview.skippedMissingPhoneNumber > 0 ? (
+                <p>
+                  {t("broadcasts.previewSkippedMissingPhone", {
+                    count: preview.skippedMissingPhoneNumber,
+                  })}
+                </p>
+              ) : null}
+              {preview.skippedTemplateVariableMissing > 0 ? (
+                <p>
+                  {t("broadcasts.previewSkippedTemplateVariable", {
+                    count: preview.skippedTemplateVariableMissing,
+                  })}
+                </p>
+              ) : null}
               {isMeta ? (
                 <p>{t("broadcasts.estimateWindowNote")}</p>
               ) : null}
@@ -950,7 +1310,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
         <div className="flex flex-wrap gap-2 pb-8">
           <button
             type="button"
-            disabled={saving || !name.trim() || !channelAccountId || !contentReady}
+            disabled={saving || !name.trim() || !channelAccountId || !contentReady || !audienceReady}
             onClick={() => void save(true)}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
           >
@@ -958,7 +1318,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
           </button>
           <button
             type="button"
-            disabled={saving || !name.trim() || !channelAccountId || !contentReady}
+            disabled={saving || !name.trim() || !channelAccountId || !contentReady || !audienceReady}
             onClick={() => void save(false)}
             className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-ink hover:bg-surface-2 disabled:opacity-50"
           >

@@ -15,7 +15,7 @@ import type {
   AutomationResponse,
   AutomationRunListResponse,
   AutomationRunResponse,
-  BroadcastAudienceEstimateResponse,
+  BroadcastAudiencePreviewResponse,
   BroadcastListResponse,
   BroadcastRecipientListResponse,
   BroadcastResponse,
@@ -52,6 +52,14 @@ import type {
   GrowthLinkAttributedContactsResponse,
   GrowthLinkListResponse,
   GrowthLinkResponse,
+  OptInSettingsResponse,
+  SegmentListResponse,
+  SegmentPreviewResponse,
+  SegmentResponse,
+  CreateSegmentRequest,
+  UpdateSegmentRequest,
+  SegmentDefinition,
+  UpdateOptInSettingsRequest,
   UpdateGrowthLinkRequest,
   CreateSavedReplyRequest,
   SavedReplyListResponse,
@@ -307,15 +315,21 @@ export const api = {
     },
   },
   contacts: {
-    /** GET /api/tenants/:tenantId/contacts?search=&limit=&offset= → {contacts,total} */
+    /** GET /api/tenants/:tenantId/contacts?search=&limit=&offset=&segmentId= → {contacts,total} */
     list(
       tenantId: string,
-      opts?: { search?: string; limit?: number; offset?: number },
+      opts?: {
+        search?: string;
+        limit?: number;
+        offset?: number;
+        segmentId?: string;
+      },
     ): Promise<ContactListResponse> {
       const q = new URLSearchParams();
       if (opts?.search) q.set("search", opts.search);
       if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
       if (opts?.offset !== undefined) q.set("offset", String(opts.offset));
+      if (opts?.segmentId) q.set("segmentId", opts.segmentId);
       const qs = q.toString();
       return request<ContactListResponse>(
         `/api/tenants/${tenantId}/contacts${qs ? `?${qs}` : ""}`,
@@ -1177,20 +1191,56 @@ export const api = {
       );
     },
     /**
-     * GET /api/tenants/:tenantId/broadcasts/audience-estimate — estimasi
-     * audiens live untuk formulir (filter sebagai string koma).
+     * GET /api/tenants/:tenantId/broadcasts/audience-preview — pratinjau
+     * audiens live untuk formulir (Fase 13C; filter sebagai string koma).
+     * Rincian dihitung klasifikasi yang sama seperti dispatch.
      */
-    estimateAudience(
+    previewAudience(
       tenantId: string,
-      query: { channelAccountId: string; tags?: string; stages?: string },
-    ): Promise<BroadcastAudienceEstimateResponse> {
+      query: {
+        channelAccountId: string;
+        tags?: string;
+        stages?: string;
+        segmentId?: string;
+        requireOptIn?: boolean;
+        whatsappTemplateId?: string;
+        templateVariableSources?: string;
+      },
+    ): Promise<BroadcastAudiencePreviewResponse> {
       const params = new URLSearchParams();
       params.set("channelAccountId", query.channelAccountId);
       if (query.tags) params.set("tags", query.tags);
       if (query.stages) params.set("stages", query.stages);
-      return request<BroadcastAudienceEstimateResponse>(
-        `/api/tenants/${tenantId}/broadcasts/audience-estimate?${params.toString()}`,
+      if (query.segmentId) params.set("segmentId", query.segmentId);
+      if (query.requireOptIn !== undefined) {
+        params.set("requireOptIn", query.requireOptIn ? "true" : "false");
+      }
+      if (query.whatsappTemplateId) {
+        params.set("whatsappTemplateId", query.whatsappTemplateId);
+      }
+      if (query.templateVariableSources) {
+        params.set("templateVariableSources", query.templateVariableSources);
+      }
+      return request<BroadcastAudiencePreviewResponse>(
+        `/api/tenants/${tenantId}/broadcasts/audience-preview?${params.toString()}`,
         { method: "GET" },
+      );
+    },
+    /** GET /api/tenants/:tenantId/opt-in-settings — pengaturan opt-in (Fase 13C). */
+    getOptInSettings(tenantId: string): Promise<OptInSettingsResponse> {
+      return request<OptInSettingsResponse>(
+        `/api/tenants/${tenantId}/opt-in-settings`,
+        { method: "GET" },
+      );
+    },
+    /** PATCH /api/tenants/:tenantId/opt-in-settings — ubah pengaturan opt-in (owner/admin). */
+    updateOptInSettings(
+      tenantId: string,
+      input: UpdateOptInSettingsRequest,
+    ): Promise<OptInSettingsResponse> {
+      return request<OptInSettingsResponse>(
+        `/api/tenants/${tenantId}/opt-in-settings`,
+        { method: "PATCH", body: JSON.stringify(input) },
       );
     },
     /** GET /api/tenants/:tenantId/broadcasts/:id/recipients → penerima berpaginasi. */
@@ -1567,6 +1617,53 @@ export const api = {
       return request<GrowthLinkAttributedContactsResponse>(
         `/api/tenants/${tenantId}/growth-links/${linkId}/contacts`,
         { method: "GET" },
+      );
+    },
+  },
+  segments: {
+    /** GET /api/tenants/:tenantId/segments → definisi segmen (Fase 13C). */
+    list(tenantId: string): Promise<SegmentListResponse> {
+      return request<SegmentListResponse>(
+        `/api/tenants/${tenantId}/segments`,
+        { method: "GET" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/segments → 201 segmen baru (owner/admin). */
+    create(
+      tenantId: string,
+      input: CreateSegmentRequest,
+    ): Promise<SegmentResponse> {
+      return request<SegmentResponse>(`/api/tenants/${tenantId}/segments`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    },
+    /** PATCH /api/tenants/:tenantId/segments/:id → edit (owner/admin). */
+    update(
+      tenantId: string,
+      segmentId: string,
+      input: UpdateSegmentRequest,
+    ): Promise<SegmentResponse> {
+      return request<SegmentResponse>(
+        `/api/tenants/${tenantId}/segments/${segmentId}`,
+        { method: "PATCH", body: JSON.stringify(input) },
+      );
+    },
+    /** DELETE /api/tenants/:tenantId/segments/:id → hapus (owner/admin). */
+    async remove(tenantId: string, segmentId: string): Promise<void> {
+      await request<unknown>(
+        `/api/tenants/${tenantId}/segments/${segmentId}`,
+        { method: "DELETE" },
+      );
+    },
+    /** POST /api/tenants/:tenantId/segments/preview → hitungan anggota definisi. */
+    preview(
+      tenantId: string,
+      definition: SegmentDefinition,
+    ): Promise<SegmentPreviewResponse> {
+      return request<SegmentPreviewResponse>(
+        `/api/tenants/${tenantId}/segments/preview`,
+        { method: "POST", body: JSON.stringify({ definition }) },
       );
     },
   },
