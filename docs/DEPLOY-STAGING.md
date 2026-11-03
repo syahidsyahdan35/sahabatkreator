@@ -14,9 +14,10 @@ hijau pada tree finalnya:
 3. Rantai verifikasi dari server terhadap API (tenant uji + mock
    bila perlu) dengan hitungan PASS eksplisit — TANPA Playwright
    (aturan user 2026-11-02; UI diuji user sendiri).
-4. `pnpm check:drift` — pemeriksa drift permukaan publik (Fase 15A):
-   gagal bila ada rute kontrak publik v1 tanpa pemetaan SDK/MCP,
-   pemetaan menunjuk nama yang tidak ada, atau tier MCP tidak cocok.
+4. `pnpm check:drift` — pemeriksa drift permukaan publik (Fase 15A;
+   diperluas Fase 14D): gagal bila ada rute kontrak publik v1 tanpa
+   pemetaan SDK/MCP/CLI, pemetaan menunjuk nama yang tidak ada, atau
+   tier MCP tidak cocok.
    Registry: `PUBLIC_V1_SURFACE` di `packages/contracts`; matriks
    cakupan + keputusan permukaan dashboard-only: `docs/COVERAGE-MATRIX.md`.
 5. Build SEMUA dist + grep string baru di bundle lokal DAN server
@@ -25,7 +26,9 @@ hijau pada tree finalnya:
    service systemd aktif, `.env.staging` pulih byte-identik
    (sha256 baseline `9c1ded2a…`), channel asli user utuh.
 7. `verify-sdk` + `verify-mcp` terhadap staging untuk fase yang
-   menyentuh permukaan publik.
+   menyentuh permukaan publik; sejak Fase 14D ditambah `verify:cli`
+   (binary `sk` hasil build, pola yang sama) untuk fase yang
+   menyentuh permukaan CLI/kontrak.
 
 ## Topologi
 
@@ -6797,3 +6800,89 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   brief: rekomendasi terdokumentasi saja). (5) verify-sdk/verify-mcp
   tidak dijalankan — permukaan publik tidak berubah fase ini
   (pengecualian eksplisit; drift PASS adalah gerbangnya).
+
+## Update Fase 14D — CLI `sk` (Fase TERAKHIR antrean, 2026-11-03)
+
+- **Isi**: `apps/cli` menjadi CLI publik `sk` — permukaan klien
+  KEEMPAT dan janji arsitektur v3 terakhir. 34 perintah (satu per
+  rute v1), masing-masing memanggil tepat satu metode
+  `@sahabat-kreator/sdk`; TIDAK ada klien HTTP kedua. API sendiri
+  TIDAK berubah fase ini (34 rute / 18 scope / jurnal 8 / 59 tabel /
+  73 policy — semua tetap), jadi **tidak ada deploy service staging**:
+  tidak ada dist server yang dibangun ulang, tidak ada service yang
+  di-restart (health publik pasca-fase: uptime API berkesinambungan,
+  bukan hasil restart). Yang dikirim ke server hanya salinan
+  `apps/cli` (untuk rantai verifikasi) via rsync `--exclude
+  '.env.staging'`; `.env.staging` byte-identik sebelum & sesudah
+  rantai (sha256 `9c1ded2a5a69f09e…`, prefix yang sama di kedua
+  pembacaan driver).
+- **Aturan sinkronisasi kontrak DITUNTASKAN**: registry
+  `PUBLIC_V1_SURFACE` + field `cliCommand` per rute (tidak pernah
+  null); `pnpm check:drift` + seksi 6 CLI — pasangan
+  (cliCommand ↔ metode SDK) dicocokkan dua arah terhadap tabel
+  perintah `apps/cli/src/commands.ts`, dan penjaga TERBUKTI gagal
+  dua arah saat pemetaan sengaja dirusak (nama perintah di CLI
+  diubah; cliCommand di registry diubah). Matriks cakupan: kolom CLI
+  kini perintah nyata + seksi Pembaruan 14D.
+- **Keputusan desain**: (1) Parser argumen TULISAN TANGAN kecil &
+  ketat — satu-satunya kandidat di pohon dependensi workspace adalah
+  commander@4.1.1 (transitif sucrase) & yargs@15 (transitif), keduanya
+  artefak perangkat build versi tua, bukan pilihan runtime yang
+  sehat; flag asing/nilai hilang/posisi berlebih ditolak (exit 2).
+  (2) Konfigurasi: kunci hanya env `SK_API_KEY` (menang) atau berkas
+  `~/.config/sahabat-kreator/config.json` — tidak pernah lewat flag,
+  tidak pernah dicetak utuh (`sk whoami` = sidik jari tersamar +
+  base URL + tenant + scope dari `GET /v1/me`). Base URL:
+  `--base-url` > `SK_BASE_URL` > berkas > `https://botara.my.id`
+  (bawaan adapter yang sama dengan server MCP; SDK mewajibkan
+  baseUrl eksplisit). (3) Build mengikuti pola apps lain: tsup dist
+  ESM self-contained (paket workspace ter-bundel; `pg` dinyatakan
+  eksternal per aturan 13G walau CLI tak memuatnya) + shim
+  `bin/sk.js` terdaftar sebagai bin `sk`. (4) TANPA gerbang `--yes`:
+  lima perintah tulis (contacts create/update, messages send,
+  comments hide/unhide) tidak destruktif — API v1 memang tidak punya
+  rute DELETE. (5) SENGAJA tidak dibuat: `sk broadcasts send`
+  (keputusan matriks: pengiriman massal tak boleh terpicu API key)
+  dan kandidat tanpa rute v1 (`contacts get`, `flows runs`,
+  `automations runs`, `kb files`, `usage report`) — dinyatakan
+  eksplisit di matriks + README, bukan dibiarkan diam.
+- **Verifikasi**: typecheck SEMUA paket hijau (20 paket
+  bertypecheck, termasuk apps/cli); PGlite 41/41 (gerbang regresi —
+  tak ada perubahan skema); `pnpm check:drift` PASS "34 rute v1 ×
+  kontrak/SDK/MCP/CLI" + uji negatif dua arah di atas. Rantai
+  terisolasi di server (DB
+  buangan `sk_chain14d`, instance API chain :3214, tenant buangan +
+  3 kunci MILIK tenant itu — full 18 scope, `contacts:read` saja,
+  read-default): setup **10/10 PASS** (register→tenant→3 kunci→
+  produk→segmen→channel webchat→sesi→pesan masuk); **verify-cli
+  44 PASS / 0 FAIL** menjalankan BINARY hasil build (bantuan root +
+  2 perintah; whoami manusia & --json, kunci tak tercetak utuh;
+  tulis ujung-ke-ujung create→search→update gabung per kunci; baca
+  per keluarga — contacts/products/segments+get/orders/
+  appointments+services/growth-links/flows/flow-templates/
+  broadcasts/conversations/comments/agents/automations/channels+get/
+  kb list+stats; messages list→send→list pada percakapan webchat
+  rantai; whatsapp-templates pada akun non-WA ditolak bertipe
+  VALIDATION_ERROR exit 1; penolakan scope API_KEY_SCOPE_DENIED
+  exit 1 untuk kunci read-only, kunci salah API_KEY_INVALID exit 1;
+  konfigurasi dari berkas + precedence env>berkas + --base-url);
+  **verify-sdk SEMUA LULUS (20 PASS)** dan **verify-mcp SEMUA LULUS
+  (36 PASS, 0 SKIP)** dalam bentuk biasanya, keduanya terhadap
+  instance chain yang sama. Cleanup driver: proses chain dibunuh
+  via pidfile, DB/role buangan dibuang (terverifikasi 0), port 3214
+  bebas. Hitungan live user UTUH sebelum & sesudah: 1 tenant /
+  4 channel connected / 1 kontak — tidak ada API key yang dibuat di
+  tenant live.
+- **Batas jujur**: (1) Perintah `get` untuk keluarga yang lahir
+  bukan dari API (orders — hanya dari checkout flow; broadcasts;
+  growth-links; flows) dibuktikan pada daftar (tenant rantai kosong
+  untuk keluarga itu) — pola toleran yang sama seperti verify-sdk;
+  `segments get` + `channels get` terbukti penuh pada data tanam.
+  (2) `comments hide/unhide` tidak dijalankan ujung-ke-ujung di
+  rantai (butuh komentar Meta sungguhan); keduanya berbagi jalur
+  tulis yang sama dengan yang terbukti (SDK + gerbang scope identik,
+  dan tool MCP padanannya lulus di verify-mcp fase-fase sebelumnya).
+  (3) `messages send` tidak membawa `--reply-to`: metode SDK
+  `sendMessage` hanya menerima teks — CLI tidak melampaui permukaan
+  SDK yang disahkan.
+
