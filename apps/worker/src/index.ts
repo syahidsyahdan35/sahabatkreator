@@ -280,7 +280,9 @@ const bullWorker = new Worker<MainJobData>(
       // Fase 6G: automation yang menembak membuat pesan outbound
       // `queued` — nudge agar apps/realtime mem-flush ke pengunjung
       // webchat & dashboard menyegar (terbit SETELAH core commit).
-      if (result.fired.length > 0) {
+      // Fase 13C: transisi opt-in juga bisa mengantrekan balasan
+      // konfirmasi — nudge yang sama (kelebihan nudge = refetch murah).
+      if (result.fired.length > 0 || result.consentAction === "opt_in") {
         await realtimePublisher.publishNudge({
           kind: "message.queued",
           tenantId: data.tenantId,
@@ -303,7 +305,11 @@ const bullWorker = new Worker<MainJobData>(
         result.flowDuplicateStarts === 0 &&
         // Fase 12A: pesan yang melanjutkan run wait_reply parkir juga
         // tertangani flow — cabang replied adalah responsnya.
-        result.flowWaitReplyResumed === 0
+        result.flowWaitReplyResumed === 0 &&
+        // Fase 13C: pesan consent (kata opt-in/opt-out persis) adalah
+        // perintah persetujuan yang tertangani sistem — tidak pernah
+        // diteruskan ke agent sebagai pertanyaan biasa.
+        result.consentAction === null
       ) {
         // Fase 9A — batching: job respond ditunda sebesar jendela
         // batch (env AGENT_BATCH_WINDOW_MS, default 5000). Job yang

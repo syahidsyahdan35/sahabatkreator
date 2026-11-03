@@ -39,6 +39,11 @@ export interface UpdateContactInput {
   pipelineStage?: string;
   optInStatus?: "unknown" | "opted_in" | "opted_out";
   /**
+   * Fase 13C: user pelaku perubahan optInStatus (audit
+   * contact.opt_in_changed source "manual"); kosong = jalur sistem.
+   */
+  actorUserId?: string;
+  /**
    * Field kustom (Fase 13A) — semantik GABUNG per kunci: kunci yang
    * dikirim menimpa nilai lama, kunci lain dipertahankan (konsisten
    * dengan node flow `set_field` yang menulis satu kunci).
@@ -50,6 +55,134 @@ export interface ListContactsInput {
   search?: string;
   limit: number;
   offset: number;
+  /**
+   * Fase 13C: batasi ke himpunan id kontak ini (dipakai filter segmen
+   * — API menyelesaikan keanggotaan segmen lewat evaluator core lalu
+   * meneruskan id-nya ke sini). Array kosong = hasil kosong.
+   */
+  onlyIds?: string[];
+}
+
+/** Status opt-in EFEKTIF (Fase 13C) — lihat EffectiveOptInStatusSchema. */
+export type EffectiveOptInStatus = "opted_in" | "none" | "opted_out";
+
+/**
+ * Turunan status opt-in efektif dari kolom tersimpan kontak:
+ * opted_out tersimpan selalu menang; selain itu persetujuan tercatat
+ * (status 'opted_in' ATAU opt_in_at terisi) berarti "opted_in";
+ * sisanya "none" (belum pernah memberi persetujuan). Inilah status
+ * yang dipakai gerbang broadcast dan kondisi segmen — status
+ * tersimpan sendiri tidak cukup karena opt-out tidak menghapus
+ * riwayat opt-in (opt_in_at dipertahankan).
+ */
+export function effectiveOptInStatus(contact: {
+  optInStatus: "unknown" | "opted_in" | "opted_out";
+  optInAt: Date | null;
+}): EffectiveOptInStatus {
+  if (contact.optInStatus === "opted_out") return "opted_out";
+  if (contact.optInStatus === "opted_in" || contact.optInAt !== null) {
+    return "opted_in";
+  }
+  return "none";
+}
+
+export type ContactConsentSource = "keyword" | "manual";
+
+export interface SetContactConsentResult {
+  contact: Contact;
+  /** Status efektif SEBELUM perubahan (untuk audit & idempotensi). */
+  from: EffectiveOptInStatus;
+  /** Status efektif SESUDAH perubahan. */
+  to: EffectiveOptInStatus;
+  /** True bila perubahan ini adalah TRANSISI masuk ke opted_in. */
+  becameOptedIn: boolean;
+}
+
+/**
+ * Mengatur persetujuan broadcast kontak (Fase 13C) — SATU jalur tulis
+ * untuk penangkapan kata kunci di pipeline inbound (source "keyword")
+ * dan toggle manual dashboard/API (source "manual" lewat updateContact
+ * atau pemanggil langsung).
+ *
+ * Semantik:
+ * - opt_in : opt_in_status='opted_in', consent_at=now, opt_in_at=now,
+ *            opt_in_source=source. Opt-in baru mengalahkan opt-out
+ *            lama (status tersimpan ditimpa).
+ * - opt_out: opt_in_status='opted_out', consent_at=null; opt_in_at &
+ *            opt_in_source TIDAK disentuh (riwayat persetujuan tetap
+ *            ada; status efektif yang menang adalah opted_out).
+ * Audit `contact.opt_in_changed` ditulis HANYA bila status efektif
+ * berubah, meta {from, to, source} (+ actor user bila manual).
+ * Null bila kontak tidak ada di tenant ini.
+ */
+export async function setContactConsent(
+  db: Database,
+  input: {
+    tenantId: string;
+    contactId: string;
+    action: "opt_in" | "opt_out";
+    source: ContactConsentSource;
+    /** User pelaku untuk toggle manual; kosong untuk jalur sistem. */
+    actorUserId?: string;
+  },
+): Promise<SetContactConsentResult | null> {
+  return withTenantDb(db, input.tenantId, async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.tenantId, input.tenantId),
+          eq(contacts.id, input.contactId),
+        ),
+      )
+      .limit(1);
+    if (!existing) return null;
+    const from = effectiveOptInStatus(existing);
+    const now = new Date();
+    const patch: Partial<Contact> = { updatedAt: now };
+    if (input.action === "opt_in") {
+      patch.optInStatus = "opted_in";
+      patch.consentAt = now;
+      patch.optInAt = now;
+      patch.optInSource = input.source;
+    } else {
+      patch.optInStatus = "opted_out";
+      patch.consentAt = null;
+    }
+    const [row] = await tx
+      .update(contacts)
+      .set(patch)
+      .where(
+        and(
+          eq(contacts.tenantId, input.tenantId),
+          eq(contacts.id, input.contactId),
+        ),
+      )
+      .returning();
+    const updated = row ?? { ...existing, ...patch };
+    const to = effectiveOptInStatus(updated);
+    if (to !== from) {
+      await tx.insert(auditLogs).values({
+        tenantId: input.tenantId,
+        actorType: input.actorUserId ? "user" : "system",
+        actorId: input.actorUserId ?? `consent:${input.source}`,
+        action: "contact.opt_in_changed",
+        meta: {
+          contactId: input.contactId,
+          from,
+          to,
+          source: input.source,
+        },
+      });
+    }
+    return {
+      contact: updated,
+      from,
+      to,
+      becameOptedIn: to === "opted_in" && from !== "opted_in",
+    };
+  });
 }
 
 export async function createContact(
@@ -80,6 +213,11 @@ export async function listContacts(
 ): Promise<{ contacts: Contact[]; total: number }> {
   return withTenantDb(db, ctx.tenantId, async (tx) => {
     const conditions = [eq(contacts.tenantId, ctx.tenantId)];
+    if (input.onlyIds !== undefined) {
+      // Himpunan kosong harus menghasilkan daftar kosong, bukan semua.
+      if (input.onlyIds.length === 0) return { contacts: [], total: 0 };
+      conditions.push(inArray(contacts.id, input.onlyIds));
+    }
     const search = input.search?.trim();
     if (search) {
       const pattern = `%${search}%`;
@@ -153,10 +291,46 @@ export async function updateContact(
         ...input.customFields,
       };
     }
+    // Fase 13C: perubahan optInStatus lewat PATCH adalah TOGGLE MANUAL
+    // persetujuan — semantiknya sama dengan setContactConsent
+    // source="manual", ditambah satu kekhususan permukaan edit:
+    // memilih "unknown" adalah RESET persetujuan oleh operator
+    // (opt_in_at/opt_in_source ikut dibersihkan agar status efektif
+    // benar-benar kembali "none"). Audit contact.opt_in_changed
+    // ditulis bila status EFEKTIF berubah.
+    let consentAudit: {
+      from: EffectiveOptInStatus;
+      to: EffectiveOptInStatus;
+    } | null = null;
     if (input.optInStatus !== undefined) {
+      const [existing] = await tx
+        .select()
+        .from(contacts)
+        .where(
+          and(eq(contacts.tenantId, ctx.tenantId), eq(contacts.id, contactId)),
+        )
+        .limit(1);
+      if (!existing) return null;
+      const now = new Date();
       patch.optInStatus = input.optInStatus;
-      // opted_in dicatat sebagai consent; opted_out mencabutnya.
-      patch.consentAt = input.optInStatus === "opted_in" ? new Date() : null;
+      if (input.optInStatus === "opted_in") {
+        patch.consentAt = now;
+        patch.optInAt = now;
+        patch.optInSource = "manual";
+      } else if (input.optInStatus === "opted_out") {
+        // Opt-out mencabut consent; riwayat opt-in dipertahankan.
+        patch.consentAt = null;
+      } else {
+        patch.consentAt = null;
+        patch.optInAt = null;
+        patch.optInSource = null;
+      }
+      const from = effectiveOptInStatus(existing);
+      const to = effectiveOptInStatus({
+        optInStatus: patch.optInStatus,
+        optInAt: patch.optInAt !== undefined ? patch.optInAt : existing.optInAt,
+      });
+      if (to !== from) consentAudit = { from, to };
     }
     const [row] = await tx
       .update(contacts)
@@ -165,7 +339,22 @@ export async function updateContact(
         and(eq(contacts.tenantId, ctx.tenantId), eq(contacts.id, contactId)),
       )
       .returning();
-    return row ?? null;
+    if (!row) return null;
+    if (consentAudit) {
+      await tx.insert(auditLogs).values({
+        tenantId: ctx.tenantId,
+        actorType: input.actorUserId ? "user" : "system",
+        actorId: input.actorUserId ?? "consent:manual",
+        action: "contact.opt_in_changed",
+        meta: {
+          contactId,
+          from: consentAudit.from,
+          to: consentAudit.to,
+          source: "manual",
+        },
+      });
+    }
+    return row;
   });
 }
 
@@ -575,6 +764,16 @@ export async function mergeContacts(
       optInStatus === "opted_out"
         ? null
         : (survivor.consentAt ?? merged.consentAt);
+    // Fase 13C: jejak opt-in ikut bergabung — persetujuan yang pernah
+    // diberikan salah satu kontak tidak hilang karena merge: opt_in_at
+    // PALING AWAL dari keduanya menang, sumbernya mengikuti baris asal
+    // nilai itu. (Status opted_out tetap menang di atasnya lewat
+    // turunan status efektif.)
+    const optInTrail = [survivor, merged]
+      .filter((c) => c.optInAt !== null)
+      .sort((a, b) => a.optInAt!.getTime() - b.optInAt!.getTime())[0];
+    const optInAt = optInTrail?.optInAt ?? null;
+    const optInSource = optInTrail?.optInSource ?? null;
     const lastContactedAt =
       survivor.lastContactedAt && merged.lastContactedAt
         ? survivor.lastContactedAt > merged.lastContactedAt
@@ -590,6 +789,8 @@ export async function mergeContacts(
         email: survivor.email ?? merged.email,
         optInStatus,
         consentAt,
+        optInAt,
+        optInSource,
         lastContactedAt,
         updatedAt: new Date(),
       })

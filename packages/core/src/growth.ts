@@ -697,6 +697,14 @@ export type AttributeGrowthResult =
  * berulang): hasil kedua dan seterusnya adalah no-op beralasan.
  * TIDAK PERNAH melempar untuk keadaan bisnis — pemanggil (webhook)
  * tidak boleh gagal karena atribusi; kesalahan DB tetap dilempar.
+ *
+ * Fase 13C — atribusi growth SENGAJA BUKAN opt-in pemasaran: fungsi
+ * ini hanya menulis `contacts.source` (+ auto-tag & event conversion).
+ * Mengklik tautan atau memulai chat adalah sinyal SUMBER, bukan
+ * persetujuan menerima broadcast marketing; persetujuan hanya lahir
+ * dari kata kunci opt-in (pipeline inbound), toggle manual, atau
+ * jalur eksplisit lain (lihat core/optin.ts). Menyetarakan klik
+ * dengan consent akan membuat gerbang require_opt_in tidak berarti.
  */
 export async function attributeContactToGrowthLink(
   db: Database,

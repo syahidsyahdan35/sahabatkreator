@@ -19,6 +19,8 @@ import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
 import { renderMessageText } from "./render-text";
 import { startFlowRunsForInboundMessage } from "./flows";
+import { setContactConsent } from "./contacts";
+import { getOptInSettings, matchConsentKeyword } from "./optin";
 
 /**
  * Service domain automation (Fase 2A, RANCANGAN §5 & §6; Fase 2C sequence).
@@ -462,6 +464,15 @@ export interface EvaluateInboundResult {
   /** Fase 8A: run flow `waiting` yang dibatalkan karena kontak opt-out. */
   cancelledFlowRuns: number;
   /**
+   * Fase 13C: aksi consent tingkat sistem yang ditangkap pesan ini
+   * ("opt_in" / "opt_out" dari kata kunci persetujuan), null bila
+   * bukan pesan consent. Pesan consent TERTANGANI SISTEM: evaluasi
+   * berhenti di sini (keyword automation & flow dilewati) dan worker
+   * TIDAK meneruskannya ke agent — kata persis seperti "ikut" atau
+   * "STOP" bukan pertanyaan untuk AI.
+   */
+  consentAction: "opt_in" | "opt_out" | null;
+  /**
    * Fase 12A: run wait_reply parkir yang dilanjutkan pesan ini lewat
    * branch "replied". Dihitung tertangani flow (worker tidak
    * meneruskan ke agent) — pesan itu adalah bagian dari perjalanan
@@ -608,6 +619,7 @@ export async function evaluateInboundMessageForAutomations(
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
+      consentAction: null,
     };
   // Percakapan channel (Fase 6A.2): dievaluasi = tidak — tidak ada
   // tembakan automation dan (karena `evaluated` false) worker juga tidak
@@ -622,8 +634,88 @@ export async function evaluateInboundMessageForAutomations(
       flowDuplicateStarts: 0,
       cancelledFlowRuns: 0,
       flowWaitReplyResumed: 0,
+      consentAction: null,
     };
   const text = context.message.contentText ?? "";
+
+  // --- Fase 13C: penangkapan consent tingkat sistem ----------------
+  // Dievaluasi SEBELUM automation keyword & flow (dan, lewat flag
+  // consentAction di hasil, sebelum agent): teks yang persis sama
+  // dengan kata kunci opt-in/opt-out tenant adalah perintah
+  // persetujuan, bukan percakapan. Opt-in mengirim balasan konfirmasi
+  // SEKALI per transisi masuk ke opted_in (evaluasi ulang pesan yang
+  // sama tidak mengirim ulang karena transisinya sudah lewat);
+  // opt-out tanpa balasan. Kegagalan kirim konfirmasi TIDAK
+  // menggagalkan perubahan consent-nya.
+  if (context.contact) {
+    const settings = await getOptInSettings(db, tenantId);
+    const consentMatch = matchConsentKeyword(text, settings);
+    if (consentMatch) {
+      const consent = await setContactConsent(db, {
+        tenantId,
+        contactId: context.contact.id,
+        action: consentMatch,
+        source: "keyword",
+      });
+      if (consent) {
+        if (
+          consentMatch === "opt_in" &&
+          consent.becameOptedIn &&
+          settings.optInConfirmationText
+        ) {
+          try {
+            await withTenantDb(db, tenantId, async (tx) => {
+              const rendered = renderMessageText(
+                settings.optInConfirmationText!,
+                { name: context.contact?.name },
+              );
+              const [outbound] = await tx
+                .insert(messages)
+                .values({
+                  tenantId,
+                  conversationId,
+                  direction: "outbound",
+                  senderType: "system",
+                  type: "text",
+                  contentText: rendered,
+                  status: "queued",
+                })
+                .returning();
+              const now = new Date();
+              await tx
+                .update(conversations)
+                .set({ lastMessageAt: now, updatedAt: now })
+                .where(eq(conversations.id, conversationId));
+              await tx.insert(outboxEvents).values({
+                tenantId,
+                type: "message.queued",
+                payload: {
+                  provider: context.conversation.provider,
+                  conversationId,
+                  messageId: outbound.id,
+                  via: "consent",
+                },
+              });
+            });
+          } catch {
+            // Konfirmasi gagal antre ≠ opt-in gagal: persetujuan sudah
+            // tercatat; balasan konfirmasi bersifat sopan-santun.
+          }
+        }
+        return {
+          evaluated: true,
+          fired: [],
+          skippedDuplicates: 0,
+          cancelledEnrollments: context.cancelledEnrollments,
+          flowRunsStarted: 0,
+          flowDuplicateStarts: 0,
+          cancelledFlowRuns: 0,
+          flowWaitReplyResumed: 0,
+          consentAction: consentMatch,
+        };
+      }
+    }
+  }
 
   const fired: AutomationFiredResult[] = [];
   let skippedDuplicates = 0;
@@ -904,6 +996,7 @@ export async function evaluateInboundMessageForAutomations(
     flowDuplicateStarts: flowOutcome.duplicateStarts,
     cancelledFlowRuns: flowOutcome.cancelledRunIds.length,
     flowWaitReplyResumed: flowOutcome.resumedRunIds.length,
+    consentAction: null,
   };
 }
 

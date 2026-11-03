@@ -25,8 +25,15 @@ import {
   type Database,
   type WhatsAppTemplate,
 } from "@sahabat-kreator/db";
+import type { SegmentDefinition } from "@sahabat-kreator/contracts";
 import { withTenantDb, type DbTx } from "./tx";
 import { renderMessageText } from "./render-text";
+import { effectiveOptInStatus } from "./contacts";
+import {
+  evaluateSegmentDefinition,
+  getSegmentRow,
+  loadContactSegmentProfiles,
+} from "./segments";
 
 /**
  * Broadcasts v1 (Fase 7C) — kampanye siaran teks ke audiens kontak pada
@@ -91,8 +98,15 @@ export const META_24H_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const BROADCAST_DISPATCH_CHUNK = 200;
 
 export interface BroadcastAudienceFilter {
+  /**
+   * Mode audiens (Fase 13C). Kosong pada baris lama → diturunkan
+   * normalizeFilter dari isi filter (regresi nol).
+   */
+  audience?: "all" | "tag" | "segment";
   tags?: string[];
   stages?: string[];
+  /** Mode "segment": id segmen milik tenant yang sama. */
+  segmentId?: string;
 }
 
 export interface BroadcastStats {
@@ -159,12 +173,29 @@ function clampLimit(limit: number | undefined): number {
 function normalizeFilter(
   filter: BroadcastAudienceFilter | undefined,
 ): BroadcastAudienceFilter {
-  const out: BroadcastAudienceFilter = {};
   const tags = (filter?.tags ?? []).map((t) => t.trim()).filter(Boolean);
   const stages = (filter?.stages ?? []).map((s) => s.trim()).filter(Boolean);
-  if (tags.length > 0) out.tags = [...new Set(tags)];
-  if (stages.length > 0) out.stages = [...new Set(stages)];
+  const segmentId = filter?.segmentId?.trim() || undefined;
+  // Mode eksplisit menang; tanpa mode, TURUNKAN dari isi (baris lama
+  // pra-13C tidak punya `audience`): segmentId → segment; tags/stages
+  // non-kosong → tag; selain itu all. Perilaku filter lama identik.
+  const audience =
+    filter?.audience ??
+    (segmentId ? "segment" : tags.length > 0 || stages.length > 0 ? "tag" : "all");
+  const out: BroadcastAudienceFilter = { audience };
+  if (audience === "tag") {
+    if (tags.length > 0) out.tags = [...new Set(tags)];
+    if (stages.length > 0) out.stages = [...new Set(stages)];
+  }
+  if (audience === "segment" && segmentId) out.segmentId = segmentId;
   return out;
+}
+
+/** Mode efektif filter (sesudah normalisasi selalu terisi). */
+function filterAudienceMode(
+  filter: BroadcastAudienceFilter,
+): "all" | "tag" | "segment" {
+  return filter.audience ?? "all";
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +208,8 @@ export interface AudienceCandidate {
   /** Fase 10A: dibaca untuk pemetaan variabel template WhatsApp. */
   customFields: Record<string, unknown>;
   optInStatus: "unknown" | "opted_in" | "opted_out";
+  /** Fase 13C: jejak opt-in — penentu status efektif bersama optInStatus. */
+  optInAt: Date | null;
   /** Identitas kontak pada akun ini (alamat kirim cadangan poller). */
   externalUserId: string;
   /** Percakapan 1:1 terbaru kontak pada akun ini; null bila belum ada. */
@@ -220,6 +253,7 @@ async function resolveAudienceCandidates(
       contactName: contacts.name,
       customFields: contacts.customFields,
       optInStatus: contacts.optInStatus,
+      optInAt: contacts.optInAt,
       tags: contacts.tags,
       pipelineStage: contacts.pipelineStage,
       externalUserId: channelIdentities.externalUserId,
@@ -243,6 +277,7 @@ async function resolveAudienceCandidates(
       contactName: row.contactName,
       customFields: (row.customFields ?? {}) as Record<string, unknown>,
       optInStatus: row.optInStatus,
+      optInAt: row.optInAt,
       externalUserId: row.externalUserId,
       conversationId: null,
       lastInboundAt: null,
@@ -250,9 +285,33 @@ async function resolveAudienceCandidates(
       pipelineStage: row.pipelineStage,
     });
   }
-  const all = [...byContact.values()].filter((c) =>
-    contactMatchesFilter(filter, c.tags, c.pipelineStage),
-  );
+  let all = [...byContact.values()];
+  if (filterAudienceMode(filter) === "tag") {
+    all = all.filter((c) =>
+      contactMatchesFilter(filter, c.tags, c.pipelineStage),
+    );
+  } else if (filterAudienceMode(filter) === "segment") {
+    // Fase 13C: keanggotaan segmen dari evaluator TUNGGAL core atas
+    // profil kontak kandidat (segmen tak ditemukan → audiens kosong;
+    // pratinjau memvalidasi keberadaan segmen lebih dulu agar UI
+    // bisa membedakannya dari segmen yang memang kosong).
+    const segment = filter.segmentId
+      ? await getSegmentRow(tx, tenantId, filter.segmentId)
+      : null;
+    if (!segment) return [];
+    const definition = segment.definition as unknown as SegmentDefinition;
+    const profiles = await loadContactSegmentProfiles(
+      tx,
+      tenantId,
+      all.map((c) => c.contactId),
+    );
+    const memberIds = new Set(
+      profiles
+        .filter((p) => evaluateSegmentDefinition(p, definition))
+        .map((p) => p.contactId),
+    );
+    all = all.filter((c) => memberIds.has(c.contactId));
+  }
   if (all.length === 0) return [];
 
   // Percakapan 1:1 (kind 'private') kontak-kontak ini pada akun ini:
@@ -330,21 +389,131 @@ async function resolveAudienceCandidates(
   return all.map(({ tags: _tags, pipelineStage: _stage, ...rest }) => rest);
 }
 
-/** Estimasi audiens untuk formulir (tanpa aturan jendela 24 jam). */
-export async function estimateBroadcastAudience(
+/** Alasan skip yang bisa dihasilkan klasifikasi kandidat (kontrak BroadcastSkipReasonSchema). */
+export type BroadcastSkipClassificationReason =
+  | "opted_out"
+  | "not_opted_in"
+  | "outside_24h_window"
+  | "missing_phone_number"
+  | "template_variable_missing";
+
+export type BroadcastCandidateClassification =
+  | {
+      kind: "send";
+      /** Parameter BODY template WhatsApp; null untuk provider teks. */
+      templateBodyParams: string[] | null;
+      /** Pratinjau teks template berparameter; null untuk provider teks. */
+      templatePreview: string | null;
+    }
+  | { kind: "skip"; reason: BroadcastSkipClassificationReason };
+
+/**
+ * KLASIFIKASI TUNGGAL kandidat audiens (Fase 13C) — dipakai dispatch
+ * (materialisasi penerima) DAN pratinjau audiens, agar angka pratinjau
+ * tidak pernah berbeda logika dari hasil kirim. Urutan gerbang:
+ * 1. opt-out tersimpan → skip `opted_out` (selalu, sejak 7C).
+ * 2. require_opt_in && status efektif bukan opted_in → `not_opted_in`.
+ * 3. Meta (messenger/instagram) di luar jendela 24 jam →
+ *    `outside_24h_window` (aturan platform; WhatsApp template dan
+ *    Telegram tidak tunduk jendela ini).
+ * 4. WhatsApp: alamat kosong → `missing_phone_number`; variabel
+ *    template tak terpetakan → `template_variable_missing`.
+ */
+export function classifyBroadcastCandidate(input: {
+  candidate: AudienceCandidate;
+  provider: BroadcastProvider;
+  requireOptIn: boolean;
+  waTemplate: WhatsAppTemplate | null;
+  templateVariableSources: string[];
+  now: Date;
+}): BroadcastCandidateClassification {
+  const { candidate, provider } = input;
+  if (candidate.optInStatus === "opted_out") {
+    return { kind: "skip", reason: "opted_out" };
+  }
+  if (
+    input.requireOptIn &&
+    effectiveOptInStatus(candidate) !== "opted_in"
+  ) {
+    return { kind: "skip", reason: "not_opted_in" };
+  }
+  const isMeta = provider === "messenger" || provider === "instagram";
+  if (isMeta) {
+    const windowStart = new Date(input.now.getTime() - META_24H_WINDOW_MS);
+    if (!candidate.lastInboundAt || candidate.lastInboundAt < windowStart) {
+      return { kind: "skip", reason: "outside_24h_window" };
+    }
+  }
+  if (provider === "whatsapp") {
+    if (!input.waTemplate) {
+      // Tak tercapai dari dispatch/pratinjau: gerbang template berjalan
+      // lebih dulu. Diperlakukan sebagai variabel tak terpetakan agar
+      // klasifikasi tetap total (tidak pernah melempar).
+      return { kind: "skip", reason: "template_variable_missing" };
+    }
+    if (!candidate.externalUserId || candidate.externalUserId.trim() === "") {
+      return { kind: "skip", reason: "missing_phone_number" };
+    }
+    const params = resolveTemplateBodyParams(
+      input.waTemplate,
+      input.templateVariableSources,
+      candidate,
+    );
+    if (!params) return { kind: "skip", reason: "template_variable_missing" };
+    return {
+      kind: "send",
+      templateBodyParams: params,
+      templatePreview: renderWhatsAppTemplatePreview(
+        input.waTemplate.bodyText ?? "",
+        params,
+      ),
+    };
+  }
+  return { kind: "send", templateBodyParams: null, templatePreview: null };
+}
+
+export interface BroadcastAudiencePreview {
+  totalCandidates: number;
+  willSend: number;
+  skippedOptedOut: number;
+  skippedNotOptedIn: number;
+  skippedOutside24hWindow: number;
+  skippedMissingPhoneNumber: number;
+  skippedTemplateVariableMissing: number;
+}
+
+export type PreviewBroadcastAudienceResult =
+  | { kind: "ok"; preview: BroadcastAudiencePreview }
+  | { kind: "channel_not_found" }
+  | { kind: "segment_not_found" }
+  | { kind: "template_required" }
+  | { kind: "template_not_found" }
+  | { kind: "template_not_approved"; status: string };
+
+/**
+ * Pratinjau audiens untuk formulir (Fase 13C, menggantikan estimasi
+ * 7C): menghitung rincian kirim/skip dengan classifyBroadcastCandidate
+ * yang sama seperti dispatch. `requireOptIn` kosong → bawaan provider
+ * (WhatsApp true, selain itu false), sama seperti bawaan pembuatan.
+ */
+export async function previewBroadcastAudience(
   db: Database,
   input: {
     tenantId: string;
     channelAccountId: string;
     filter?: BroadcastAudienceFilter;
+    requireOptIn?: boolean;
+    whatsappTemplateId?: string | null;
+    templateVariableSources?: string[];
   },
-): Promise<
-  | { kind: "ok"; matched: number; optedOut: number; totalWithIdentity: number }
-  | { kind: "channel_not_found" }
-> {
+): Promise<PreviewBroadcastAudienceResult> {
   return withTenantDb(db, input.tenantId, async (tx) => {
     const [account] = await tx
-      .select({ id: channelAccounts.id, trashedAt: channelAccounts.trashedAt })
+      .select({
+        id: channelAccounts.id,
+        provider: channelAccounts.provider,
+        trashedAt: channelAccounts.trashedAt,
+      })
       .from(channelAccounts)
       .where(
         and(
@@ -353,34 +522,69 @@ export async function estimateBroadcastAudience(
         ),
       )
       .limit(1);
-    if (!account || account.trashedAt) return { kind: "channel_not_found" as const };
-
-    const identityRows = await tx
-      .select({ contactId: channelIdentities.contactId })
-      .from(channelIdentities)
-      .where(
-        and(
-          eq(channelIdentities.tenantId, input.tenantId),
-          eq(channelIdentities.channelAccountId, input.channelAccountId),
-        ),
+    if (!account || account.trashedAt) {
+      return { kind: "channel_not_found" as const };
+    }
+    const provider = account.provider as BroadcastProvider;
+    const filter = normalizeFilter(input.filter);
+    if (filterAudienceMode(filter) === "segment") {
+      const segment = filter.segmentId
+        ? await getSegmentRow(tx, input.tenantId, filter.segmentId)
+        : null;
+      if (!segment) return { kind: "segment_not_found" as const };
+    }
+    let waTemplate: WhatsAppTemplate | null = null;
+    if (provider === "whatsapp") {
+      const tGate = await gateWhatsAppTemplate(
+        tx,
+        input.tenantId,
+        input.channelAccountId,
+        input.whatsappTemplateId,
       );
-    const totalWithIdentity = new Set(identityRows.map((r) => r.contactId)).size;
-
+      if (tGate.kind !== "ok") return tGate;
+      waTemplate = tGate.template;
+    }
+    const requireOptIn = input.requireOptIn ?? provider === "whatsapp";
     const candidates = await resolveAudienceCandidates(
       tx,
       input.tenantId,
       input.channelAccountId,
-      normalizeFilter(input.filter),
+      filter,
     );
-    const optedOut = candidates.filter(
-      (c) => c.optInStatus === "opted_out",
-    ).length;
-    return {
-      kind: "ok" as const,
-      matched: candidates.length - optedOut,
-      optedOut,
-      totalWithIdentity,
+    const preview: BroadcastAudiencePreview = {
+      totalCandidates: candidates.length,
+      willSend: 0,
+      skippedOptedOut: 0,
+      skippedNotOptedIn: 0,
+      skippedOutside24hWindow: 0,
+      skippedMissingPhoneNumber: 0,
+      skippedTemplateVariableMissing: 0,
     };
+    const now = new Date();
+    for (const candidate of candidates) {
+      const classified = classifyBroadcastCandidate({
+        candidate,
+        provider,
+        requireOptIn,
+        waTemplate,
+        templateVariableSources: normalizeTemplateVariableSources(
+          input.templateVariableSources,
+        ),
+        now,
+      });
+      if (classified.kind === "send") preview.willSend += 1;
+      else if (classified.reason === "opted_out") preview.skippedOptedOut += 1;
+      else if (classified.reason === "not_opted_in") {
+        preview.skippedNotOptedIn += 1;
+      } else if (classified.reason === "outside_24h_window") {
+        preview.skippedOutside24hWindow += 1;
+      } else if (classified.reason === "missing_phone_number") {
+        preview.skippedMissingPhoneNumber += 1;
+      } else {
+        preview.skippedTemplateVariableMissing += 1;
+      }
+    }
+    return { kind: "ok" as const, preview };
   });
 }
 
@@ -788,6 +992,7 @@ export type CreateBroadcastResult =
   | { kind: "template_required" }
   | { kind: "template_not_found" }
   | { kind: "template_not_approved"; status: string }
+  | { kind: "segment_not_found" }
   | { kind: "message_required" };
 
 export async function createBroadcast(
@@ -803,6 +1008,12 @@ export async function createBroadcast(
     whatsappTemplateId?: string | null;
     templateVariableSources?: string[];
     filter?: BroadcastAudienceFilter;
+    /**
+     * Fase 13C: gerbang opt-in; kosong = bawaan provider (WhatsApp
+     * true — broadcast template adalah pesan pemasaran proaktif —
+     * selain itu false).
+     */
+    requireOptIn?: boolean;
   },
 ): Promise<CreateBroadcastResult> {
   return withTenantDb(db, input.tenantId, async (tx) => {
@@ -812,6 +1023,13 @@ export async function createBroadcast(
       input.channelAccountId,
     );
     if (gate.kind !== "ok") return gate;
+    const normalizedFilter = normalizeFilter(input.filter);
+    if (filterAudienceMode(normalizedFilter) === "segment") {
+      const segment = normalizedFilter.segmentId
+        ? await getSegmentRow(tx, input.tenantId, normalizedFilter.segmentId)
+        : null;
+      if (!segment) return { kind: "segment_not_found" as const };
+    }
     let messageText = input.messageText;
     let whatsappTemplateId: string | null = null;
     let templateVariableSources: string[] = [];
@@ -842,7 +1060,8 @@ export async function createBroadcast(
         messageText: messageText!,
         whatsappTemplateId,
         templateVariableSources,
-        audienceFilter: normalizeFilter(input.filter),
+        audienceFilter: normalizedFilter,
+        requireOptIn: input.requireOptIn ?? gate.provider === "whatsapp",
         status: "draft",
         createdByUserId: input.userId,
       })
@@ -876,7 +1095,8 @@ export type UpdateBroadcastResult =
   | { kind: "channel_unsupported"; provider: string }
   | { kind: "template_required" }
   | { kind: "template_not_found" }
-  | { kind: "template_not_approved"; status: string };
+  | { kind: "template_not_approved"; status: string }
+  | { kind: "segment_not_found" };
 
 export async function updateBroadcast(
   db: Database,
@@ -891,6 +1111,8 @@ export async function updateBroadcast(
       whatsappTemplateId?: string | null;
       templateVariableSources?: string[];
       filter?: BroadcastAudienceFilter;
+      /** Fase 13C: ubah gerbang opt-in (hanya selama draft). */
+      requireOptIn?: boolean;
     };
   },
 ): Promise<UpdateBroadcastResult> {
@@ -925,7 +1147,17 @@ export async function updateBroadcast(
       patch.messageText = input.patch.messageText;
     }
     if (input.patch.filter !== undefined) {
-      patch.audienceFilter = normalizeFilter(input.patch.filter);
+      const normalized = normalizeFilter(input.patch.filter);
+      if (filterAudienceMode(normalized) === "segment") {
+        const segment = normalized.segmentId
+          ? await getSegmentRow(tx, input.tenantId, normalized.segmentId)
+          : null;
+        if (!segment) return { kind: "segment_not_found" as const };
+      }
+      patch.audienceFilter = normalized;
+    }
+    if (input.patch.requireOptIn !== undefined) {
+      patch.requireOptIn = input.patch.requireOptIn;
     }
     // Fase 10A: keadaan akhir broadcast WhatsApp selalu lolos gerbang
     // template (channel berganti ke WA tanpa template → ditolak);
@@ -1399,7 +1631,6 @@ export async function dispatchBroadcast(
     return { dispatched: false, reason: claim.kind };
   }
   const { broadcast, provider, waTemplate } = claim;
-  const isMeta = provider === "messenger" || provider === "instagram";
   const filter = normalizeFilter(
     broadcast.audienceFilter as BroadcastAudienceFilter,
   );
@@ -1468,89 +1699,38 @@ export async function dispatchBroadcast(
         );
       const existingIds = new Set(existing.map((r) => r.contactId));
       const now = new Date();
-      const windowStart = new Date(now.getTime() - META_24H_WINDOW_MS);
       let m = 0;
       let q = 0;
       let s = 0;
       for (const candidate of chunk) {
         if (existingIds.has(candidate.contactId)) continue;
-        if (candidate.optInStatus === "opted_out") {
-          await tx.insert(broadcastRecipients).values({
-            tenantId,
-            broadcastId,
-            contactId: candidate.contactId,
-            conversationId: candidate.conversationId,
-            status: "skipped",
-            skipReason: "opted_out",
-          });
-          m += 1;
-          s += 1;
-          continue;
-        }
-        if (
-          isMeta &&
-          (!candidate.lastInboundAt || candidate.lastInboundAt < windowStart)
-        ) {
-          await tx.insert(broadcastRecipients).values({
-            tenantId,
-            broadcastId,
-            contactId: candidate.contactId,
-            conversationId: candidate.conversationId,
-            status: "skipped",
-            skipReason: "outside_24h_window",
-          });
-          m += 1;
-          s += 1;
-          continue;
-        }
-        // Fase 10A: WhatsApp — petakan variabel template per penerima.
-        // Template TIDAK tunduk aturan 24 jam (isMeta hanya
-        // messenger/instagram); yang bisa menggagalkan penerima di
-        // sini hanya alamat kosong atau variabel tak terpetakan.
-        let templateBodyParams: string[] | null = null;
-        let templatePreview: string | null = null;
-        if (provider === "whatsapp") {
-          if (!waTemplate) {
-            // Tak tercapai: gerbang klaim menjamin template ada.
-            continue;
-          }
-          if (!candidate.externalUserId || candidate.externalUserId.trim() === "") {
-            await tx.insert(broadcastRecipients).values({
-              tenantId,
-              broadcastId,
-              contactId: candidate.contactId,
-              conversationId: candidate.conversationId,
-              status: "skipped",
-              skipReason: "missing_phone_number",
-            });
-            m += 1;
-            s += 1;
-            continue;
-          }
-          const params = resolveTemplateBodyParams(
-            waTemplate,
+        // Fase 13C: klasifikasi TUNGGAL (fungsi yang sama dengan
+        // pratinjau audiens) — opt-out → gerbang opt-in → jendela
+        // 24 jam Meta → pemeriksaan alamat/variabel WhatsApp.
+        const classified = classifyBroadcastCandidate({
+          candidate,
+          provider,
+          requireOptIn: broadcast.requireOptIn,
+          waTemplate,
+          templateVariableSources:
             (broadcast.templateVariableSources as string[] | null) ?? [],
-            candidate,
-          );
-          if (!params) {
-            await tx.insert(broadcastRecipients).values({
-              tenantId,
-              broadcastId,
-              contactId: candidate.contactId,
-              conversationId: candidate.conversationId,
-              status: "skipped",
-              skipReason: "template_variable_missing",
-            });
-            m += 1;
-            s += 1;
-            continue;
-          }
-          templateBodyParams = params;
-          templatePreview = renderWhatsAppTemplatePreview(
-            waTemplate.bodyText ?? "",
-            params,
-          );
+          now,
+        });
+        if (classified.kind === "skip") {
+          await tx.insert(broadcastRecipients).values({
+            tenantId,
+            broadcastId,
+            contactId: candidate.contactId,
+            conversationId: candidate.conversationId,
+            status: "skipped",
+            skipReason: classified.reason,
+          });
+          m += 1;
+          s += 1;
+          continue;
         }
+        const templateBodyParams = classified.templateBodyParams;
+        const templatePreview = classified.templatePreview;
         // Percakapan 1:1 tujuan: pakai yang sudah ada, atau buat baru
         // (kontak beridentitas tetapi belum pernah membuka percakapan
         // yang tercatat — alamat balasan = id eksternal identitasnya,
