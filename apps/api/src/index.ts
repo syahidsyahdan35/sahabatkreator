@@ -412,6 +412,11 @@ routes.route(
     publicBaseUrl: env.BETTER_AUTH_URL,
     redisUrl: env.REDIS_URL,
     stateSecret: env.BETTER_AUTH_SECRET,
+    // Default mati: izin engagement Page butuh Advanced Access App
+    // Review; memintanya sebelum disetujui membuat dialog Facebook
+    // Login menjawab "Invalid Scopes" dan mematikan onboarding
+    // Messenger. Lihat docs/APP-REVIEW.md §0.
+    engagementScopes: env.META_ENGAGEMENT_SCOPES,
   }),
 );
 

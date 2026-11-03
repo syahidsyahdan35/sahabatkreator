@@ -76,6 +76,26 @@ const EnvSchema = z.object({
   META_APP_ID: z.string().min(1).optional(),
   META_IG_CONFIG_ID: z.string().min(1).optional(),
   META_WA_CONFIG_ID: z.string().min(1).optional(),
+  /**
+   * Minta izin ENGAGEMENT Page di dialog Messenger
+   * (`pages_read_engagement`, `pages_read_user_content`,
+   * `pages_manage_engagement`) — dipakai fitur komentar Fase 10B.
+   *
+   * DEFAULT NONAKTIF, dan itu disengaja. Ketiganya butuh Advanced
+   * Access dari App Review; selama aplikasi belum disetujui, Meta
+   * MENOLAK dialog Facebook Login dengan "Invalid Scopes" dan
+   * koneksi Messenger baru tidak bisa dibuat sama sekali — terbukti
+   * live 2026-11-03. Menyalakannya hanya setelah App Review
+   * menyetujui ketiga izin (docs/APP-REVIEW.md §0).
+   *
+   * Tanpa flag ini, moderasi komentar tetap berjalan di mode
+   * pengembangan tetapi ditolak Graph untuk Page hasil OAuth biasa —
+   * kegagalan yang jujur dan tercatat, bukan dialog mati.
+   */
+  META_ENGAGEMENT_SCOPES: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
   REDIS_URL: z.string().url().optional(),
   /**
    * Pemilihan provider LLM agent (Fase 3A): 'mock' (default, deterministik,

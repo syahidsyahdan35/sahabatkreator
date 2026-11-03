@@ -115,6 +115,14 @@ export interface MetaOAuthModuleOptions {
   redisUrl?: string;
   /** Secret penandatangan state (env BETTER_AUTH_SECRET). */
   stateSecret?: string;
+  /**
+   * Minta izin engagement Page di dialog Messenger (env
+   * META_ENGAGEMENT_SCOPES). Default false — lihat catatan
+   * MESSENGER_ENGAGEMENT_SCOPES: menyalakannya sebelum App Review
+   * membuat dialog menjawab "Invalid Scopes" dan mematikan
+   * onboarding Messenger.
+   */
+  engagementScopes?: boolean;
 }
 
 const OAUTH_TTL_SECONDS = 600;
@@ -142,23 +150,45 @@ const FACEBOOK_DIALOG_BASE = "https://www.facebook.com";
  *   dialog, token Page hasil OAuth tidak membawanya, jadi moderasi
  *   komentar untuk Page hasil "Lanjutkan dengan Facebook" akan
  *   ditolak Graph di luar mode dev (rantai uji lolos hanya karena
- *   mock tidak menegakkan izin). PRASYARAT KONSOLE: ketiganya harus
- *   sudah menjadi bagian izin aplikasi (App Review → Permissions
- *   and Features / use case) SEBELUM dialog dijalankan — bila belum,
- *   Meta menolak dialog dengan "Invalid Scopes" dan koneksi
- *   Messenger baru tidak bisa dibuat sampai ditambahkan (koneksi
- *   yang sudah berjalan tidak terpengaruh). Urutan lengkapnya di
- *   docs/APP-REVIEW.md §0.
+ *   mock tidak menegakkan izin).
+ *
+ *   ⚠️ KETIGANYA OPSIONAL DAN DEFAULT MATI. Fase 14B menambahkannya
+ *   tanpa syarat, dan itu MEMATAHKAN onboarding Messenger untuk
+ *   aplikasi yang belum lolos App Review: dialog menjawab "Konten
+ *   ini tidak tersedia untuk saat ini / Invalid Scopes:
+ *   pages_read_engagement, pages_read_user_content,
+ *   pages_manage_engagement", sehingga koneksi Messenger baru tidak
+ *   bisa dibuat sama sekali (terbukti live 2026-11-03). Izin ini
+ *   hanya diminta bila env `META_ENGAGEMENT_SCOPES=1`, dipasang
+ *   SETELAH App Review menyetujui ketiganya. Tanpa flag itu,
+ *   moderasi komentar tetap berfungsi di mode pengembangan tetapi
+ *   ditolak Graph untuk Page hasil OAuth biasa — kegagalan yang
+ *   jujur dan tercatat, bukan dialog mati.
+ *   Urutan lengkapnya di docs/APP-REVIEW.md §0.
  */
-const MESSENGER_OAUTH_SCOPES = [
+const MESSENGER_CORE_SCOPES = [
   "pages_show_list",
   "pages_messaging",
   "pages_manage_metadata",
+  "business_management",
+] as const;
+
+/** Izin komentar Page — hanya setelah Advanced Access disetujui. */
+const MESSENGER_ENGAGEMENT_SCOPES = [
   "pages_read_engagement",
   "pages_read_user_content",
   "pages_manage_engagement",
-  "business_management",
 ] as const;
+
+/**
+ * Daftar scope dialog Messenger. Core selalu diminta; engagement hanya
+ * bila `META_ENGAGEMENT_SCOPES` aktif (opsi modul `engagementScopes`).
+ */
+function messengerScopes(engagementScopes: boolean): string[] {
+  return engagementScopes
+    ? [...MESSENGER_CORE_SCOPES, ...MESSENGER_ENGAGEMENT_SCOPES]
+    : [...MESSENGER_CORE_SCOPES];
+}
 
 // ---------------------------------------------------------------------------
 // State bertanda tangan (HMAC-SHA256)
@@ -502,7 +532,8 @@ export function createMetaOAuthRoutes(
     if (provider === "messenger") {
       // Facebook Login klasik: scope di URL (asimetri terdokumentasi —
       // IG/WA memakai config_id, Messenger v1 kita memakai scope).
-      params.set("scope", MESSENGER_OAUTH_SCOPES.join(","));
+      // Engagement trio hanya ikut bila META_ENGAGEMENT_SCOPES aktif.
+      params.set("scope", messengerScopes(opts.engagementScopes ?? false).join(","));
       dialogUrl = `${FACEBOOK_DIALOG_BASE}/${opts.graphApiVersion}/dialog/oauth?${params.toString()}`;
     } else {
       params.set(

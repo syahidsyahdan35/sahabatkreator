@@ -35,13 +35,19 @@ server logs/code.
 3. **[USER] Add the three Page-engagement permissions to the app** —
    App Review → *Permissions and Features* (or the use-case editor):
    confirm `pages_read_engagement`, `pages_read_user_content`,
-   `pages_manage_engagement` are part of the app. **Do this BEFORE the
-   next Messenger connect attempt**: since Fase 14B the OAuth dialog
-   requests them; if they are not yet on the app, Meta rejects the
-   dialog with *"Invalid Scopes"* and **new** Messenger connections
-   cannot be made until they are added (already-connected channels are
-   unaffected). This is the exact sequence that worked for
-   `business_management` in Hotfix R1.
+   `pages_manage_engagement` are part of the app. **Do this BEFORE
+   setting `META_ENGAGEMENT_SCOPES=1`**: the OAuth dialog only
+   requests these scopes when that env flag is on (default off since
+   the 2026-11-03 hotfix). If the flag is turned on before the
+   permissions are on the app, Meta rejects the dialog with *"Invalid
+   Scopes"* and **new** Messenger connections cannot be made until
+   they are added (already-connected channels are unaffected). This
+   is the exact sequence that worked for `business_management` in
+   Hotfix R1.
+   **[MUSE] After App Review approves all three**: set
+   `META_ENGAGEMENT_SCOPES=1` in `.env.staging` (and later
+   `.env.production`), rebuild + restart API, then verify a fresh
+   Messenger connect shows all 7 scopes in the dialog URL.
 4. **[USER] Finish the IG config item** — in the Instagram FLB
    configuration `30196668823256383`, set the permission list to exactly
    `instagram_basic`, `instagram_manage_messages`,
@@ -83,9 +89,10 @@ server logs/code.
 
 Already **[DONE]** by development (no user action): legal pages live
 (/privacy, /terms, /data-deletion), OAuth callback + webhook endpoints
-live and verified (§8), dialog scope list aligned with the submission
-(Fase 14B code change), data-deletion instructions page designated as
-the console's deletion URL.
+live and verified (§8), dialog scope list split into core (always
+requested) + engagement (gated by `META_ENGAGEMENT_SCOPES`, default
+off until App Review approves — hotfix 2026-11-03), data-deletion
+instructions page designated as the console's deletion URL.
 
 ---
 
