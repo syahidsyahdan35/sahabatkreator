@@ -1,6 +1,20 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+/**
+ * Host tunnel uji lokal (Cloudflare Tunnel / ngrok), dibaca dari env
+ * `DEV_TUNNEL_HOST` — diisi di `.env` lalu di-export ke shell
+ * (`set -a; . ./.env; set +a`). Vite TIDAK memuat `.env` ke `process.env`
+ * untuk berkas config, jadi variabelnya harus benar-benar ada di
+ * lingkungan proses.
+ *
+ * Sejak Vite 5.4.12 dev server menolak Host yang tidak dikenal (proteksi
+ * DNS rebinding) dan menjawab 403, sama seperti `preview.allowedHosts`
+ * yang sudah memuat `botara.my.id`. Kosong = perilaku bawaan (localhost
+ * saja), alur dev biasa tidak berubah.
+ */
+const devTunnelHost = process.env.DEV_TUNNEL_HOST?.trim();
+
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -19,6 +33,9 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // Tunnel uji lokal: daftarkan host tunnel agar dev server tidak 403.
+    // Kosong (default) = hanya localhost, alur dev biasa tidak berubah.
+    allowedHosts: devTunnelHost ? [devTunnelHost] : undefined,
     // Dev lokal: teruskan /api ke API lokal dan /realtime ke gateway
     // WebSocket apps/realtime lokal (Fase 6G).
     proxy: {
