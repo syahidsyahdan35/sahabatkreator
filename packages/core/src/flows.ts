@@ -649,13 +649,17 @@ export async function tenantCustomFieldKeys(
   tx: DbTx,
   tenantId: string,
 ): Promise<Set<string>> {
-  const rows = await tx.execute(sql`
+  const result = await tx.execute(sql`
     select distinct jsonb_object_keys(${contacts.customFields}) as key
     from ${contacts}
     where ${contacts.tenantId} = ${tenantId}
   `);
+  // Driver pg membungkus hasil execute sebagai { rows } (pola outbox).
+  const rows = (
+    result as unknown as { rows: Array<{ key?: unknown }> }
+  ).rows;
   const keys = new Set<string>();
-  for (const row of rows as unknown as Array<{ key?: unknown }>) {
+  for (const row of rows) {
     if (typeof row.key === "string" && row.key) keys.add(row.key);
   }
   return keys;
