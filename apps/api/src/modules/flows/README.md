@@ -24,3 +24,14 @@ Keputusan v1:
 - Eksekusi: urutan evaluasi pesan masuk keyword → flow → agent;
   balasan kontak TIDAK membatalkan run flow (berbeda dengan
   sequence), opt-out membatalkan run `waiting`; cap 100 langkah/run.
+
+Fase 13D — eksperimen A/B: node `ab_split` dengan config
+`experiment: true` menugaskan cabang secara deterministik (hash
+stabil flow+node+kontak) dan lengket (baris pertama di
+`flow_experiment_assignments` menang selamanya); tanpa flag itu
+perilaku tetap acak per run (12A). `conversionNodeId` menamai titik
+konversi. Hasil per split: `GET /tenants/:tenantId/flows/:id/experiments`
+(dashboard saja — penugasan unik, run, selesai, konversi, putusan
+uji z dua-proporsi dengan pagar sampel minimum di core
+`experiments.ts`). Nyala/mati mode eksperimen diaudit
+(`flow.experiment_enabled` / `flow.experiment_disabled`).
