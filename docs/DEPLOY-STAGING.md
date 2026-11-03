@@ -7098,3 +7098,60 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   baru di Panel Admin (panel menang atas env). Resend tetap belum
   terisi (sama seperti sebelum reset).
 - Reset ini TIDAK membuat akun apa pun — user mendaftar sendiri.
+
+## Hotfix OAuth KV Split-Brain — 2026-11-04 (dini hari)
+
+- **Pemicu**: bug live memblokir ujicoba user — connect Meta gagal
+  dengan "This Facebook sign-in link has expired or was already used"
+  (kasus yang sama terulang dari kemarin). Bukti log staging:
+  18:42:46Z `claimNonce` menyentuh socket Redis basi ("Stream isn't
+  writeable and enableOfflineQueue options is false" → "[meta-oauth]
+  Redis tidak tersedia") dan jatuh ke Map proses; 18:43:52Z
+  `consumeNonce` membaca Redis yang sudah pulih tapi kosong (GETDEL
+  null) → `META_OAUTH_STATE_INVALID`. Server Redis sendiri sehat
+  (PING PONG; worker nol error Redis) — yang mati adalah klien
+  ephemeral API + desain fallback per-operasi di
+  `apps/api/src/oauth-kv.ts` (otak terbelah dua arah: klaim di satu
+  store tidak terlihat oleh konsumsi di store lainnya). Store yang
+  sama dipakai OAuth Google janji temu (13G) — bug dan perbaikannya
+  sama.
+- **Perbaikan** (commit `969e726`): (1) perintah Redis yang gagal
+  diulang SATU kali pada koneksi segar (klien basi dibuang) sebelum
+  fallback apa pun; (2) klaim/sesi yang sukses di Redis dicerminkan
+  write-through ke Map proses, dan consume/get membaca Redis dulu
+  lalu cermin — nilai ditemukan di kedua keadaan dunia; (3) nisan
+  konsumsi (tombstone) mencegah salinan Redis yang tertinggal
+  diputar ulang sesudah konsumsi lewat cermin saat Redis mati.
+  Tetap fail-soft (nonce tak dikenal tetap ditolak; warn-once hanya
+  sesudah retry gagal). Retry koneksi segar yang sama diterapkan ke
+  `rate-limit-store.ts` (storage auth Better Auth) dan `rate-limit.ts`
+  (limiter publik, sebelum backoff 30 detik). TANPA perubahan
+  permukaan publik / kontrak / DB / env / kode error.
+- **Uji baru** `apps/api/scripts/verify-oauth-kv.ts`
+  (`verify:oauth-kv`, masuk `verify:ci`): harness server Redis palsu
+  yang bisa dihidup/matikan + klien "keracunan" socket-basi lewat
+  jahitan `clientFactory` — **34 PASS / 0 FAIL**, termasuk kasus
+  regresi claim-mati/consume-up (dulu false), consume-mati lewat
+  cermin + anti-replay nisan, dan jalur retry (klaim mendarat di
+  Redis, tepat 2 klien dibuat).
+- **Baterai**: typecheck monorepo bersih semua paket;
+  `pnpm check:drift` PASS (34 rute v1 tanpa drift); PGlite db verify
+  SEMUA LULUS (42 seksi); `verify:http` 22 PASS; build penuh sukses;
+  aturan bundle lulus (api/worker/realtime masing-masing tepat 1
+  impor eksternal `from "pg"`).
+- **Urutan deploy** (kanonik mode pull): server `git fetch origin &&
+  git reset --hard origin/main` → `969e726`, status KOSONG; build di
+  VM; rsync HANYA `apps/api/dist` (`--exclude '.env.staging'`) —
+  hanya kode API yang berubah, worker/realtime/web tidak disentuh;
+  hash `dist/index.js` server byte-identik dengan build lokal
+  (`b3ef76b65003e722…`). Restart HANYA unit API via kill MainPID
+  eksplisit (4022342 → **4048832**, aktif 18:55:2x UTC).
+- **Verifikasi pasca-deploy**: health lokal (`:3101`), lewat proxy
+  web (`:5180/api/health`), dan publik (`https://botara.my.id/api/health`)
+  semua `ok`; jurnal proses API baru (jendela ±1 menit sejak restart,
+  tanpa trafik OAuth) memuat **0** baris "Redis tidak tersedia" dan
+  tidak ada error/fatal lain; `.env.staging` byte-identik sebelum &
+  sesudah (sha256 `9c1ded2a5a69f09e…`, mode 600); `git status` server
+  kosong di `969e726`.
+- Server tertinggal satu commit dokumen ini sampai deploy berikutnya
+  (pola yang sama seperti entri sebelumnya).
