@@ -121,6 +121,45 @@ export interface MetaInstagramCandidate {
   pageAccessToken: string | null;
 }
 
+/**
+ * Target hibah token hasil `debug_token` (fase penemuan SU): union
+ * `target_ids` dari `granular_scopes` token yang diperiksa, dipisah
+ * menurut keluarganya. `instagramTargetIds` = akun IG yang SECARA
+ * EKSPLISIT dihibahkan konfigurasi Login untuk Bisnis kepada token —
+ * satu-satunya sumber kebenaran yang tersisa bila token System User
+ * tidak memegang penugasan aset portofolio (kasus BISU satu
+ * portofolio: tepi assigned_* kosong & /me/businesses graph_100
+ * secara desain). `businessTargetIds` = target business_management,
+ * disimpan sebagai cek silang portofolio (tidak dipakai rantai
+ * sebagai sumber kandidat). `error` = kelas error aman bila
+ * debug_token gagal; pemanggil memperlakukannya best-effort persis
+ * seperti tepi penemuan lain. ID target TIDAK PERNAH masuk log —
+ * hanya JUMLAHNYA yang boleh dicatat lapisan route.
+ */
+export interface MetaTokenGrantTargets {
+  instagramTargetIds: string[];
+  businessTargetIds: string[];
+  error: string | null;
+}
+
+/**
+ * Konteks System User untuk rantai penemuan Instagram (fase penemuan
+ * SU): diisi lapisan route dari probe `getTokenProfile` + konfigurasi
+ * aplikasi. Tepi bisnis-jangkar (e) & target-hibah (f) HANYA berjalan
+ * bila `clientBusinessId` terisi — token user klasik tidak
+ * menyentuhnya sama sekali (perilaku & jejak identik seperti
+ * sebelumnya). `grantTargetCount` adalah kanal keluar gaya trace:
+ * rantai mengisinya dengan jumlah target IG dari debug_token agar
+ * lapisan route bisa mencatat `grants=<n>` di baris log penemuan
+ * (hitung saja — id target tidak pernah keluar dari klien).
+ */
+export interface MetaInstagramDiscoveryContext {
+  clientBusinessId: string | null;
+  appId: string | null;
+  appSecret: string | null;
+  grantTargetCount: number;
+}
+
 /** Kandidat Page dari rantai daftar Page (token bisa belum terisi). */
 export interface MetaPageCandidate {
   id: string;
@@ -428,6 +467,146 @@ export class MetaGraphClient extends GraphHttpClient {
   }
 
   /**
+   * Target hibah token ini sendiri (`GET /debug_token?input_token=…`)
+   * — fase penemuan SU. Panggilan diautentikasi TOKEN APLIKASI
+   * (`{appId}|{appSecret}`) lewat klien pendamping bertoken aplikasi
+   * yang berbagi base URL/versi/fetch/timeout dengan klien ini —
+   * pola resmi Meta untuk debug_token; token yang diperiksa hanya
+   * menjadi `input_token`, tidak pernah menjadi kredensial panggilan
+   * lain dan tidak pernah dicatat. Yang dibaca hanya
+   * `data.granular_scopes`: union `target_ids` untuk keluarga
+   * instagram_basic / instagram_manage_messages /
+   * instagram_manage_comments (akun IG yang dihibahkan konfigurasi
+   * ke token) + business_management (cek silang portofolio).
+   * BEST-EFFORT TOTAL: kegagalan apa pun (Graph menolak, jaringan,
+   * bentuk respons asing) menghasilkan daftar kosong + kelas error
+   * aman di `error` — TIDAK PERNAH melempar ke pemanggil, karena
+   * penemuan tidak boleh mati oleh panggilan diagnostik.
+   */
+  async getTokenGrantTargets(input: {
+    appId: string;
+    appSecret: string;
+  }): Promise<MetaTokenGrantTargets> {
+    const empty: MetaTokenGrantTargets = {
+      instagramTargetIds: [],
+      businessTargetIds: [],
+      error: null,
+    };
+    const inspected = this.accessToken;
+    if (!inspected) return { ...empty, error: "unknown" };
+    try {
+      const appClient = new MetaGraphClient({
+        baseUrl: this.baseUrl,
+        apiVersion: this.apiVersion,
+        accessToken: `${input.appId}|${input.appSecret}`,
+        fetchImpl: this.fetchImpl,
+        timeoutMs: this.timeoutMs,
+      });
+      const body = await appClient.getJsonParams<{
+        data?: {
+          granular_scopes?: Array<{
+            scope?: string;
+            target_ids?: Array<string>;
+          }>;
+        };
+      }>("debug_token", { input_token: inspected });
+      const instagramScopes = new Set([
+        "instagram_basic",
+        "instagram_manage_messages",
+        "instagram_manage_comments",
+      ]);
+      const instagramIds = new Set<string>();
+      const businessIds = new Set<string>();
+      for (const grant of body.data?.granular_scopes ?? []) {
+        const targets = (grant.target_ids ?? []).filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        );
+        if (typeof grant.scope === "string" && instagramScopes.has(grant.scope)) {
+          for (const id of targets) instagramIds.add(id);
+        } else if (grant.scope === "business_management") {
+          for (const id of targets) businessIds.add(id);
+        }
+      }
+      return {
+        instagramTargetIds: [...instagramIds],
+        businessTargetIds: [...businessIds],
+        error: null,
+      };
+    } catch (err) {
+      return { ...empty, error: discoveryErrorClass(err) };
+    }
+  }
+
+  /**
+   * Akun IG milik SATU portofolio bisnis (`GET
+   * /{business-id}/instagram_accounts?fields=id,username`) — fase
+   * penemuan SU: tepi berjangkar-bisnis untuk akun yang merupakan
+   * aset portofolio tetapi TIDAK tertaut Page dan TIDAK terlihat dari
+   * /me milik System User (identitas SU memang tidak memegang daftar
+   * itu). Bila tepi utama ditolak `graph_100` (bentuk error identitas
+   * SU yang sama seperti /me/businesses), jatuh ke gabungan
+   * `owned_instagram_accounts` + `client_instagram_accounts` pada
+   * node yang sama — pola union multi-tepi yang sama seperti
+   * `listPageCandidates`: masing-masing best-effort selama salah satu
+   * berhasil; error pertama dilempar hanya bila keduanya juga gagal
+   * agar jejak rantai mencatat kelas yang benar. Error non-100 pada
+   * tepi utama dilempar apa adanya.
+   */
+  async getBusinessInstagramAccounts(
+    businessId: string,
+  ): Promise<Array<{ id: string; username: string | null }>> {
+    const node = encodeURIComponent(businessId);
+    const parse = (body: {
+      data?: Array<{ id?: string; username?: string }>;
+    }): Array<{ id: string; username: string | null }> => {
+      const accounts: Array<{ id: string; username: string | null }> = [];
+      for (const row of body.data ?? []) {
+        if (typeof row.id !== "string" || !row.id) continue;
+        accounts.push({
+          id: row.id,
+          username: typeof row.username === "string" ? row.username : null,
+        });
+      }
+      return accounts;
+    };
+    const fetchEdge = async (
+      edge: string,
+    ): Promise<Array<{ id: string; username: string | null }>> =>
+      parse(
+        await this.getJsonParams<{
+          data?: Array<{ id?: string; username?: string }>;
+        }>(`${node}/${edge}`, { fields: "id,username", limit: "100" }),
+      );
+    try {
+      return await fetchEdge("instagram_accounts");
+    } catch (err) {
+      if (!(err instanceof MetaGraphError) || err.graphCode !== 100) {
+        throw err;
+      }
+      // graph_100 pada tepi utama → union dua tepi turunan.
+      const byId = new Map<string, { id: string; username: string | null }>();
+      let firstError: unknown = null;
+      let anySuccess = false;
+      for (const edge of [
+        "owned_instagram_accounts",
+        "client_instagram_accounts",
+      ]) {
+        try {
+          const rows = await fetchEdge(edge);
+          anySuccess = true;
+          for (const row of rows) {
+            if (!byId.has(row.id)) byId.set(row.id, row);
+          }
+        } catch (edgeErr) {
+          if (firstError === null) firstError = edgeErr;
+        }
+      }
+      if (!anySuccess) throw firstError ?? err;
+      return [...byId.values()];
+    }
+  }
+
+  /**
    * Akun IG yang dibagikan klien ke aplikasi (`GET
    * /me/assigned_instagram_accounts?fields=id,username`) — klien dibangun
    * dengan SUAT Unified Login. Satu SUAT bisa mencakup banyak akun.
@@ -707,6 +886,19 @@ export class MetaGraphClient extends GraphHttpClient {
    *      Bisnis tidak memuat business_management — jejaknya sengaja
    *      terbaca jelas agar lapisan route bisa menyebutkannya di
    *      petunjuk picker.
+   *   e. `business_instagram_accounts` — /{client_business_id}/
+   *      instagram_accounts (fase penemuan SU; HANYA bila konteks SU
+   *      diberikan): akun IG milik portofolio KLIEN yang menjadi
+   *      jangkar token, dibaca dari node bisnisnya langsung — bukan
+   *      dari /me yang bagi System User memang kosong/galat. Jatuh ke
+   *      owned_/client_instagram_accounts pada graph_100.
+   *   f. `grant_target_instagram_accounts` — target hibah token dari
+   *      debug_token (fase penemuan SU; konteks yang sama): akun yang
+   *      SECARA EKSPLISIT dihibahkan konfigurasi ke token ini,
+   *      diselesaikan username-nya per akun lewat profil objek
+   *      (maks 25 panggilan). Inilah tepi terakhir yang tetap bekerja
+   *      pada kasus portofolio-sama (BISU tanpa penugasan aset):
+   *      hibah konfigurasi adalah satu-satunya daftar yang ada.
    *   d. `page_instagram_business_account` — per-Page lewat rantai
    *      daftar Page (`listPageCandidates`, dibatasi 10 Page): IG
    *      tertaut tiap Page; kandidat membawa token Page itu bila ada.
@@ -718,6 +910,7 @@ export class MetaGraphClient extends GraphHttpClient {
    */
   async discoverInstagramAccounts(
     trace: MetaDiscoveryTraceEntry[],
+    suContext?: MetaInstagramDiscoveryContext | null,
   ): Promise<MetaInstagramCandidate[]> {
     const byId = new Map<string, MetaInstagramCandidate>();
     const addCandidate = (
@@ -827,6 +1020,64 @@ export class MetaGraphClient extends GraphHttpClient {
         label: "businesses_instagram_accounts",
         count: 0,
         error: discoveryErrorClass(err),
+      });
+    }
+
+    // Tepi (e) + (f) — penemuan berjangkar portofolio & hibah token
+    // (fase penemuan SU). HANYA berjalan bila konteks SU membawa
+    // client_business_id; token user klasik tidak menyentuhnya sama
+    // sekali (tak ada panggilan, tak ada entri jejak).
+    const clientBusinessId = suContext?.clientBusinessId ?? null;
+    if (suContext && clientBusinessId) {
+      // Tepi (e) — IG milik portofolio klien dari node bisnisnya.
+      try {
+        const accounts =
+          await this.getBusinessInstagramAccounts(clientBusinessId);
+        for (const account of accounts) {
+          addCandidate(account.id, account.username, null);
+        }
+        trace.push({
+          label: "business_instagram_accounts",
+          count: accounts.length,
+          error: null,
+        });
+      } catch (err) {
+        trace.push({
+          label: "business_instagram_accounts",
+          count: 0,
+          error: discoveryErrorClass(err),
+        });
+      }
+
+      // Tepi (f) — target hibah konfigurasi dari debug_token. Jumlah
+      // target dicerminkan ke konteks untuk baris log route SEBELUM
+      // resolusi profil, karena grants mengukur hibahnya, bukan
+      // keberhasilan pengambilan profilnya.
+      const grants =
+        suContext.appId && suContext.appSecret
+          ? await this.getTokenGrantTargets({
+              appId: suContext.appId,
+              appSecret: suContext.appSecret,
+            })
+          : { instagramTargetIds: [], businessTargetIds: [], error: null };
+      suContext.grantTargetCount = grants.instagramTargetIds.length;
+      let grantFound = 0;
+      const freshTargets = grants.instagramTargetIds
+        .filter((id) => !byId.has(id))
+        .slice(0, 25);
+      for (const targetId of freshTargets) {
+        try {
+          const profile = await this.getInstagramAccountProfile(targetId);
+          addCandidate(profile.id, profile.username, null);
+          grantFound += 1;
+        } catch {
+          /* best-effort per akun — target lain tetap dicoba */
+        }
+      }
+      trace.push({
+        label: "grant_target_instagram_accounts",
+        count: grantFound,
+        error: grants.error,
       });
     }
 

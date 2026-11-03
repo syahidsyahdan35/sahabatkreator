@@ -38,6 +38,7 @@ import {
   MetaGraphClient,
   MetaGraphError,
   type MetaDiscoveryTraceEntry,
+  type MetaInstagramDiscoveryContext,
 } from "@sahabat-kreator/channel-messenger";
 import { WhatsAppCloudClient } from "@sahabat-kreator/channel-whatsapp";
 import type { ChannelAccount } from "@sahabat-kreator/db";
@@ -73,7 +74,9 @@ import { resolveTenantForUser } from "../tenants/guard";
  *   Access Token (SUAT); aset dari RANTAI penemuan multi-tepi
  *   (Fase 7D.3: assigned_instagram_accounts → IG-pada-Page →
  *   IG-milik-portofolio → per-Page; kandidat lewat Page membawa Page
- *   token-nya dan disimpan dengan token itu); probe /me membedakan
+ *   token-nya dan disimpan dengan token itu; fase penemuan SU
+ *   menambah tepi IG-milik-node-bisnis-klien + target hibah
+ *   debug_token khusus token System User); probe /me membedakan
  *   SUAT vs token user untuk petunjuk picker; `client_business_id`
  *   disimpan sebagai parent_external_id.
  * - whatsapp — Embedded Signup (Login for Business): dialog membawa
@@ -682,8 +685,26 @@ export function createMetaOAuthRoutes(
         // → IG-milik-portofolio → per-Page, dedupe by ID akun IG.
         // Kandidat yang ditemukan lewat Page membawa Page token-nya —
         // disimpan per aset di pageTokens dan dipakai saat complete.
+        // Fase penemuan SU: bila probe profil menandai token System
+        // User (client_business_id terisi), rantai menambah dua tepi
+        // berjangkar portofolio SETELAH (c) dan SEBELUM (d) —
+        // (e) IG milik node bisnis klien dan (f) target hibah
+        // konfigurasi dari debug_token — karena bagi SU kedua tepi
+        // /me memang kosong/galat secara desain. Konteks membawa
+        // kredensial aplikasi untuk debug_token dan menerima kembali
+        // JUMLAH target hibah (grants) untuk baris log; id target
+        // tidak pernah meninggalkan klien.
         const trace: MetaDiscoveryTraceEntry[] = [];
-        const candidates = await client.discoverInstagramAccounts(trace);
+        const discoveryContext: MetaInstagramDiscoveryContext = {
+          clientBusinessId,
+          appId: config.appId,
+          appSecret: config.appSecret,
+          grantTargetCount: 0,
+        };
+        const candidates = await client.discoverInstagramAccounts(
+          trace,
+          discoveryContext,
+        );
         const pageTokens: Record<string, string> = {};
         const assets: MetaOAuthAsset[] = candidates.map((candidate) => {
           if (candidate.pageAccessToken) {
@@ -702,7 +723,7 @@ export function createMetaOAuthRoutes(
           };
         });
         console.log(
-          `[meta-oauth] discovery provider=instagram ${formatDiscoveryTrace(trace)} total=${assets.length} token=${
+          `[meta-oauth] discovery provider=instagram ${formatDiscoveryTrace(trace)} total=${assets.length} grants=${discoveryContext.grantTargetCount} token=${
             tokenProfile === null
               ? "unknown"
               : clientBusinessId
