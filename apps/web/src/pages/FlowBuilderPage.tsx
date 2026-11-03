@@ -120,7 +120,18 @@ const NODE_ICON_PATHS: Record<FlowNodeType, string> = {
     "M10.5 13.5a4.24 4.24 0 0 0 6 0l3-3a4.24 4.24 0 1 0-6-6L11.8 6.2M13.5 10.5a4.24 4.24 0 0 0-6 0l-3 3a4.24 4.24 0 1 0 6 6l1.7-1.7",
   wait_reply:
     "M20.5 11.5a8.5 8.5 0 0 1-12.3 7.5L3.5 20.5l1.5-4.7A8.5 8.5 0 1 1 20.5 11.5zM12 7.8V12l2.8 1.8",
+  questionnaire:
+    "M9.5 6.5H20M9.5 12H20M9.5 17.5H20M3.8 6.5l1.1 1.1L6.8 5.4M3.8 12l1.1 1.1 1.9-2.2M3.8 17.5l1.1 1.1 1.9-2.2",
 };
+
+/** Warna label chip cabang: positif hijau, timeout kuning (bila ada cabang ketiga), selainnya merah. */
+function branchColorClass(branch: string, count: number): string {
+  if (branch === "timeout") return count > 2 ? "text-warning" : "text-danger";
+  if (branch === "invalid" || branch === "no" || branch === "b") {
+    return "text-danger";
+  }
+  return "text-success";
+}
 
 /** Node kustom kanvas: label tipe dwibahasa + ringkasan config satu baris. */
 function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
@@ -186,22 +197,31 @@ function FlowNodeCard({ data, selected }: NodeProps<FlowRfNode>) {
       )}
       {branches ? (
         <>
-          <div className="flex items-center justify-between px-8 pb-1 text-[10px] font-semibold">
-            <span className="text-success">{t(branches[0].labelKey)}</span>
-            <span className="text-danger">{t(branches[1].labelKey)}</span>
+          <div
+            className={`flex items-center justify-between pb-1 text-[10px] font-semibold ${
+              branches.length > 2 ? "px-2" : "px-8"
+            }`}
+          >
+            {branches.map((b) => (
+              <span
+                key={b.branch}
+                className={branchColorClass(b.branch, branches.length)}
+              >
+                {t(b.labelKey)}
+              </span>
+            ))}
           </div>
-          <Handle
-            id={branches[0].branch}
-            type="source"
-            position={Position.Bottom}
-            style={{ left: "28%" }}
-          />
-          <Handle
-            id={branches[1].branch}
-            type="source"
-            position={Position.Bottom}
-            style={{ left: "72%" }}
-          />
+          {branches.map((b, i) => (
+            <Handle
+              key={b.branch}
+              id={b.branch}
+              type="source"
+              position={Position.Bottom}
+              style={{
+                left: `${(((i + 0.5) / branches.length) * 100).toFixed(1)}%`,
+              }}
+            />
+          ))}
         </>
       ) : type !== "end" ? (
         <Handle type="source" position={Position.Bottom} />
@@ -324,6 +344,13 @@ interface TenantMeta {
   selfFlow: { id: string; name: string } | null;
   /** Produk aktif tenant (pemilih send_payment_link). */
   products: ProductResponse[];
+  /**
+   * Kunci field custom yang dikenal tenant (dari custom_fields kontak
+   * yang dimuat — pola yang sama seperti tags/stages di atas);
+   * pemilih target questionnaire. Pemeriksaan otoritatifnya adalah
+   * validasi aktivasi di server atas SELURUH kontak.
+   */
+  customFieldKeys: string[];
 }
 
 interface NodeConfigPanelProps {
@@ -1276,6 +1303,421 @@ function NodeConfigPanel({
         </div>
       ) : null}
 
+      {type === "questionnaire"
+        ? (() => {
+            interface QDraft {
+              id: string;
+              prompt: string;
+              answerType: string;
+              target: string;
+              required: boolean;
+              options: string[];
+            }
+            const rawQuestions = Array.isArray(config.questions)
+              ? config.questions
+              : [];
+            const questions: QDraft[] = rawQuestions
+              .filter(
+                (q): q is Record<string, unknown> =>
+                  typeof q === "object" && q !== null,
+              )
+              .map((q) => ({
+                id: str(q.id),
+                prompt: str(q.prompt),
+                answerType: str(q.answerType) || "text",
+                target: str(q.target) || "name",
+                required: q.required !== false,
+                options: Array.isArray(q.options)
+                  ? q.options.filter(
+                      (o): o is string => typeof o === "string",
+                    )
+                  : [],
+              }));
+            const setQuestions = (next: QDraft[]) =>
+              set({ questions: next });
+            const patchQuestion = (idx: number, patch: Partial<QDraft>) =>
+              setQuestions(
+                questions.map((q, i) => (i === idx ? { ...q, ...patch } : q)),
+              );
+            const newQuestionId = () => {
+              let n = questions.length + 1;
+              while (questions.some((q) => q.id === `q${n}`)) n += 1;
+              return `q${n}`;
+            };
+            return (
+              <div className="space-y-4">
+                <p className="text-xs text-muted">
+                  {t("flows.questionnaireHint")}
+                </p>
+                <div>
+                  <span className={labelClass}>
+                    {t("flows.questionnaireQuestionsLabel")}
+                  </span>
+                  <div className="mt-2 space-y-3">
+                    {questions.map((q, idx) => (
+                      <div
+                        key={`${idx}-${q.id}`}
+                        className="space-y-3 rounded-lg border border-line p-3"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-ink">
+                            {t("flows.questionnaireQuestionLabel", {
+                              number: idx + 1,
+                            })}
+                          </span>
+                          <span className="flex gap-1">
+                            <button
+                              type="button"
+                              className="rounded border border-line px-1.5 py-0.5 text-xs text-muted disabled:opacity-40"
+                              disabled={readOnly || idx === 0}
+                              onClick={() => {
+                                const next = [...questions];
+                                [next[idx - 1], next[idx]] = [
+                                  next[idx],
+                                  next[idx - 1],
+                                ];
+                                setQuestions(next);
+                              }}
+                            >
+                              ↑ {t("flows.questionnaireMoveUp")}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded border border-line px-1.5 py-0.5 text-xs text-muted disabled:opacity-40"
+                              disabled={
+                                readOnly || idx === questions.length - 1
+                              }
+                              onClick={() => {
+                                const next = [...questions];
+                                [next[idx], next[idx + 1]] = [
+                                  next[idx + 1],
+                                  next[idx],
+                                ];
+                                setQuestions(next);
+                              }}
+                            >
+                              ↓ {t("flows.questionnaireMoveDown")}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded border border-line px-1.5 py-0.5 text-xs text-danger disabled:opacity-40"
+                              disabled={readOnly || questions.length <= 1}
+                              onClick={() =>
+                                setQuestions(
+                                  questions.filter((_, i) => i !== idx),
+                                )
+                              }
+                            >
+                              {t("flows.questionnaireRemoveQuestion")}
+                            </button>
+                          </span>
+                        </div>
+                        <div>
+                          <label
+                            className={labelClass}
+                            htmlFor={`cfg-qq-${idx}-prompt`}
+                          >
+                            {t("flows.questionPromptLabel")}
+                          </label>
+                          <input
+                            id={`cfg-qq-${idx}-prompt`}
+                            className={inputClass}
+                            disabled={readOnly}
+                            maxLength={1000}
+                            placeholder={t("flows.questionPromptPlaceholder")}
+                            value={q.prompt}
+                            onChange={(e) =>
+                              patchQuestion(idx, { prompt: e.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label
+                              className={labelClass}
+                              htmlFor={`cfg-qq-${idx}-type`}
+                            >
+                              {t("flows.questionTypeLabel")}
+                            </label>
+                            <select
+                              id={`cfg-qq-${idx}-type`}
+                              className={inputClass}
+                              disabled={readOnly}
+                              value={q.answerType}
+                              onChange={(e) =>
+                                patchQuestion(idx, {
+                                  answerType: e.target.value,
+                                })
+                              }
+                            >
+                              <option value="text">
+                                {t("flows.questionTypeText")}
+                              </option>
+                              <option value="number">
+                                {t("flows.questionTypeNumber")}
+                              </option>
+                              <option value="email">
+                                {t("flows.questionTypeEmail")}
+                              </option>
+                              <option value="phone">
+                                {t("flows.questionTypePhone")}
+                              </option>
+                              <option value="choice">
+                                {t("flows.questionTypeChoice")}
+                              </option>
+                            </select>
+                          </div>
+                          <div>
+                            <label
+                              className={labelClass}
+                              htmlFor={`cfg-qq-${idx}-target`}
+                            >
+                              {t("flows.questionTargetLabel")}
+                            </label>
+                            <select
+                              id={`cfg-qq-${idx}-target`}
+                              className={inputClass}
+                              disabled={readOnly}
+                              value={
+                                q.target.startsWith("custom:")
+                                  ? "custom"
+                                  : q.target
+                              }
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                if (v === "custom") {
+                                  patchQuestion(idx, {
+                                    target: q.target.startsWith("custom:")
+                                      ? q.target
+                                      : "custom:",
+                                  });
+                                } else {
+                                  patchQuestion(idx, { target: v });
+                                }
+                              }}
+                            >
+                              <option value="name">
+                                {t("flows.fieldName")}
+                              </option>
+                              <option value="phone">
+                                {t("flows.fieldPhone")}
+                              </option>
+                              <option value="email">
+                                {t("flows.fieldEmail")}
+                              </option>
+                              <option value="custom">custom:*</option>
+                            </select>
+                          </div>
+                        </div>
+                        {q.target.startsWith("custom:") ? (
+                          <div>
+                            <label
+                              className={labelClass}
+                              htmlFor={`cfg-qq-${idx}-key`}
+                            >
+                              {t("flows.questionTargetCustomKeyLabel")}
+                            </label>
+                            <input
+                              id={`cfg-qq-${idx}-key`}
+                              className={inputClass}
+                              disabled={readOnly}
+                              list="flow-custom-field-keys"
+                              placeholder={t(
+                                "flows.questionTargetCustomKeyPlaceholder",
+                              )}
+                              value={q.target.slice("custom:".length)}
+                              onChange={(e) =>
+                                patchQuestion(idx, {
+                                  target: `custom:${e.target.value}`,
+                                })
+                              }
+                            />
+                            <p className="mt-1 text-xs text-muted">
+                              {meta.customFieldKeys.length > 0
+                                ? t("flows.questionnaireKnownKeysHint", {
+                                    keys: meta.customFieldKeys.join(", "),
+                                  })
+                                : t("flows.questionnaireNoKnownKeys")}
+                            </p>
+                          </div>
+                        ) : null}
+                        {q.answerType === "choice" ? (
+                          <div>
+                            <label
+                              className={labelClass}
+                              htmlFor={`cfg-qq-${idx}-options`}
+                            >
+                              {t("flows.questionOptionsLabel")}
+                            </label>
+                            <textarea
+                              id={`cfg-qq-${idx}-options`}
+                              className={inputClass}
+                              rows={3}
+                              disabled={readOnly}
+                              placeholder={t("flows.questionOptionsPlaceholder")}
+                              value={q.options.join("\n")}
+                              onChange={(e) =>
+                                patchQuestion(idx, {
+                                  options: e.target.value
+                                    .split("\n")
+                                    .map((line) => line.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                            />
+                            <p className="mt-1 text-xs text-muted">
+                              {t("flows.questionnaireChoiceHint")}
+                            </p>
+                          </div>
+                        ) : null}
+                        <label className="flex items-start gap-2 text-sm text-ink">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            disabled={readOnly}
+                            checked={q.required}
+                            onChange={(e) =>
+                              patchQuestion(idx, {
+                                required: e.target.checked,
+                              })
+                            }
+                          />
+                          <span>{t("flows.questionRequiredLabel")}</span>
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-2 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-elevated disabled:opacity-40"
+                    disabled={readOnly || questions.length >= 20}
+                    onClick={() =>
+                      setQuestions([
+                        ...questions,
+                        {
+                          id: newQuestionId(),
+                          prompt: "",
+                          answerType: "text",
+                          target: "name",
+                          required: true,
+                          options: [],
+                        },
+                      ])
+                    }
+                  >
+                    + {t("flows.questionnaireAddQuestion")}
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelClass} htmlFor="cfg-qq-amount">
+                      {t("flows.questionnaireAmountLabel")}
+                    </label>
+                    <input
+                      id="cfg-qq-amount"
+                      type="number"
+                      min={0}
+                      step={1}
+                      className={inputClass}
+                      disabled={readOnly}
+                      value={numVal(config.amount, 24)}
+                      onChange={(e) =>
+                        set({
+                          amount: Math.max(
+                            0,
+                            Math.floor(Number(e.target.value) || 0),
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className={labelClass} htmlFor="cfg-qq-unit">
+                      {t("flows.delayUnitLabel")}
+                    </label>
+                    <select
+                      id="cfg-qq-unit"
+                      className={inputClass}
+                      disabled={readOnly}
+                      value={str(config.unit) || "hours"}
+                      onChange={(e) => set({ unit: e.target.value })}
+                    >
+                      <option value="seconds">{t("flows.unitSeconds")}</option>
+                      <option value="minutes">{t("flows.unitMinutes")}</option>
+                      <option value="hours">{t("flows.unitHours")}</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-qq-attempts">
+                    {t("flows.questionnaireAttemptsLabel")}
+                  </label>
+                  <input
+                    id="cfg-qq-attempts"
+                    type="number"
+                    min={1}
+                    max={5}
+                    step={1}
+                    className={inputClass}
+                    disabled={readOnly}
+                    value={numVal(config.maxInvalidAttempts, 2)}
+                    onChange={(e) =>
+                      set({
+                        maxInvalidAttempts: Math.min(
+                          5,
+                          Math.max(
+                            1,
+                            Math.floor(Number(e.target.value) || 2),
+                          ),
+                        ),
+                      })
+                    }
+                  />
+                  <p className="mt-1 text-xs text-muted">
+                    {t("flows.questionnaireAttemptsHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-qq-invalid-prompt">
+                    {t("flows.questionnaireInvalidPromptLabel")}
+                  </label>
+                  <input
+                    id="cfg-qq-invalid-prompt"
+                    className={inputClass}
+                    disabled={readOnly}
+                    maxLength={1000}
+                    placeholder={t("flows.questionnaireInvalidPromptDefault")}
+                    value={str(config.invalidPrompt)}
+                    onChange={(e) =>
+                      set({ invalidPrompt: e.target.value || undefined })
+                    }
+                  />
+                  <p className="mt-1 text-xs text-muted">
+                    {t("flows.questionnaireInvalidPromptHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="cfg-qq-completion-tag">
+                    {t("flows.questionnaireCompletionTagLabel")}
+                  </label>
+                  <input
+                    id="cfg-qq-completion-tag"
+                    className={inputClass}
+                    disabled={readOnly}
+                    list="flow-tag-options"
+                    maxLength={64}
+                    placeholder={t("flows.questionnaireCompletionTagPlaceholder")}
+                    value={str(config.completionTag)}
+                    onChange={(e) =>
+                      set({ completionTag: e.target.value || undefined })
+                    }
+                  />
+                </div>
+              </div>
+            );
+          })()
+        : null}
+
       {type === "ai_response" ? (
         <p className="text-sm text-muted">{t("flows.staticAiResponse")}</p>
       ) : null}
@@ -1289,6 +1731,11 @@ function NodeConfigPanel({
       <datalist id="flow-tag-options">
         {meta.tags.map((tag) => (
           <option key={tag} value={tag} />
+        ))}
+      </datalist>
+      <datalist id="flow-custom-field-keys">
+        {meta.customFieldKeys.map((key) => (
+          <option key={key} value={key} />
         ))}
       </datalist>
     </div>
@@ -1336,6 +1783,13 @@ const STEP_OUTCOME_LABEL_KEYS: Record<string, TranslationKey> = {
   payment_link_sent: "flows.stepOutcomePaymentLinkSent",
   replied: "flows.stepOutcomeReplied",
   timeout: "flows.stepOutcomeTimeout",
+  question_asked: "flows.stepOutcomeQuestionAsked",
+  answer_recorded: "flows.stepOutcomeAnswerRecorded",
+  answer_invalid: "flows.stepOutcomeAnswerInvalid",
+  attempts_exhausted: "flows.stepOutcomeAttemptsExhausted",
+  target_missing: "flows.stepOutcomeTargetMissing",
+  completed: "flows.stepOutcomeCompleted",
+  state_missing: "flows.stepOutcomeStateMissing",
 };
 
 interface FlowExperimentsPanelProps {
@@ -1616,6 +2070,34 @@ function FlowRunsPanel({ t, locale, tenantId, flowId, graph }: FlowRunsPanelProp
     }
     if (outcome === "field_set" && typeof d.field === "string" && d.field) {
       parts.push(d.field);
+    }
+    // Fase 13E: langkah questionnaire — tampilkan nilai tersimpan,
+    // alasan tidak-valid, dan cabang keluar langkah penutupnya.
+    if (
+      outcome === "answer_recorded" &&
+      (typeof d.storedValue === "string" || typeof d.storedValue === "number")
+    ) {
+      parts.push(String(d.storedValue));
+    }
+    if (
+      (outcome === "answer_invalid" ||
+        outcome === "attempts_exhausted" ||
+        outcome === "target_missing") &&
+      typeof d.reason === "string" &&
+      d.reason
+    ) {
+      parts.push(t("flows.stepReason", { reason: d.reason }));
+    }
+    if (
+      (outcome === "completed" ||
+        outcome === "attempts_exhausted" ||
+        outcome === "target_missing" ||
+        outcome === "state_missing") &&
+      typeof d.branch === "string" &&
+      d.branch
+    ) {
+      const branchKey = branchLabelKey(d.branch);
+      if (branchKey) parts.push(t(branchKey));
     }
     if (typeof d.tag === "string" && d.tag) parts.push(d.tag);
     if (typeof d.stage === "string" && d.stage)
@@ -2500,6 +2982,7 @@ export function FlowBuilderPage({
     flows: [],
     selfFlow: null,
     products: [],
+    customFieldKeys: [],
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2524,9 +3007,13 @@ export function FlowBuilderPage({
         setFlow(flowRes);
         const tags = new Set<string>();
         const stages = new Set<string>();
+        const customFieldKeys = new Set<string>();
         for (const contact of contacts?.contacts ?? []) {
           for (const tag of contact.tags) tags.add(tag);
           if (contact.pipelineStage) stages.add(contact.pipelineStage);
+          for (const key of Object.keys(contact.customFields ?? {})) {
+            customFieldKeys.add(key);
+          }
         }
         setMeta({
           tags: [...tags].sort(),
@@ -2537,6 +3024,7 @@ export function FlowBuilderPage({
           flows: flowsRes?.flows ?? [],
           selfFlow: { id: flowRes.id, name: flowRes.name },
           products: products.filter((p) => p.isActive),
+          customFieldKeys: [...customFieldKeys].sort(),
         });
       } catch (err) {
         if (!cancelled) setError(translateApiError(t, err));

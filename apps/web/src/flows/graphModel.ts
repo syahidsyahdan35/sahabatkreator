@@ -38,6 +38,7 @@ export const FLOW_NODE_LABEL_KEYS: Record<FlowNodeType, TranslationKey> = {
   ab_split: "flows.nodeAbSplit",
   send_payment_link: "flows.nodeSendPaymentLink",
   wait_reply: "flows.nodeWaitReply",
+  questionnaire: "flows.nodeQuestionnaire",
 };
 
 /** Tipe yang boleh ditambahkan dari palet (trigger dibuat otomatis & tunggal). */
@@ -58,6 +59,7 @@ export const ADDABLE_NODE_TYPES: FlowNodeType[] = [
   "ab_split",
   "send_payment_link",
   "wait_reply",
+  "questionnaire",
 ];
 
 /**
@@ -79,6 +81,11 @@ export const FLOW_BRANCHED_TYPES: Partial<
   ],
   wait_reply: [
     { branch: "replied", labelKey: "flows.branchReplied" },
+    { branch: "timeout", labelKey: "flows.branchTimeout" },
+  ],
+  questionnaire: [
+    { branch: "completed", labelKey: "flows.branchCompleted" },
+    { branch: "invalid", labelKey: "flows.branchInvalid" },
     { branch: "timeout", labelKey: "flows.branchTimeout" },
   ],
 };
@@ -124,6 +131,21 @@ export function defaultNodeConfig(
       return { productId: "" };
     case "wait_reply":
       return { amount: 1, unit: "hours" };
+    case "questionnaire":
+      return {
+        questions: [
+          {
+            id: "q1",
+            prompt: "",
+            answerType: "text",
+            target: "name",
+            required: true,
+          },
+        ],
+        amount: 24,
+        unit: "hours",
+        maxInvalidAttempts: 2,
+      };
     default:
       return {};
   }
@@ -283,6 +305,12 @@ export function summarizeNodeConfig(
         amount,
         unit: t(unitKey as TranslationKey),
       });
+    }
+    case "questionnaire": {
+      const questions = Array.isArray(c.questions) ? c.questions : [];
+      return questions.length > 0
+        ? t("flows.summaryQuestionnaire", { count: questions.length })
+        : t("flows.summaryNotConfigured");
     }
     default:
       return "";
