@@ -7008,3 +7008,42 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   restart 4 unit via kill MainPID eksplisit → verifikasi health
   publik + grep bundle + sha `.env.staging` + `git status` kosong.
   Deploy sumber via rsync/tar-over-SSH RESMI PENSIUN.
+
+## Deploy Ulang Mode Pull — 2026-11-04 (dini hari)
+
+- **Pemicu**: perintah langsung user ("pull dan deploy ulang server")
+  mengikuti urutan kanonik dari entri konversi mode pull di atas.
+- **Commit yang dideploy**: `c5c8f9c` — `origin/main` sudah bergerak
+  SATU commit melewati `fc08b38`: `c5c8f9c` (instans kontributor,
+  2026-11-03 23:40 WIB) "docs(app-review): paket pengajuan pindah ke
+  app baru Botara 1141276711971314". Isinya: paket App Review
+  diarahkan ke app Meta BARU "Botara" `1141276711971314`; catatan di
+  `.env.example` menyebut app lama "Botara Dev" `2356364001779420`
+  telah dihapus (sumber utama identifier tetap Panel Admin
+  platform_settings; env hanya fallback); `.gitignore` + `.claude/`
+  + `.cursor/`. TANPA perubahan kode sumber / `package.json` /
+  `pnpm-lock.yaml` dari `b9d3503` → `pnpm install` dilewati, runtime
+  identik dengan build sebelumnya.
+- **Urutan yang dijalankan**: server sudah berada di `c5c8f9c` saat
+  deploy dimulai (instans kontributor rupanya sudah menjalankan
+  fetch+reset sendiri); `git fetch origin && git reset --hard
+  origin/main` menegaskan ulang → HEAD `c5c8f9c`, `git status`
+  KOSONG. Build semua dist di VM pengembangan (`pnpm build`), rsync
+  HANYA `dist` (api/worker/realtime/web, `--exclude '.env.staging'`),
+  hash `dist/index.js` server byte-identik dengan build lokal
+  (api `3251210760…`, worker `f6b7a91139…`, realtime `691c1e47af…`);
+  aturan bundle lulus (tepat 1 impor eksternal `from "pg"` di tiap
+  bundle api/worker/realtime; penanda `META_ENGAGEMENT_SCOPES` +
+  `claimed_at` ada). Restart 4 unit via kill MainPID eksplisit
+  (3983886–3983889 → 4018087–4018090, aktif 17:53:19 UTC);
+  `https://botara.my.id/api/health` → `ok`.
+- **Verifikasi**: jurnal migrasi tetap 10; `.env.staging` sha256
+  baseline `9c1ded2a…` sebelum & sesudah (mode 600); git server
+  HEAD `c5c8f9c` + status kosong; deploy ini TANPA tulisan DB sama
+  sekali. **Catatan data**: sensus saat deploy = 1 tenant
+  ("Mas Romo") / 1 user (`mas@romo.com`) / 2 Messenger connected /
+  0 kontak — berbeda dari sensus malam sebelumnya (2 tenant /
+  3 user); perubahan data itu terjadi di antara kedua sensus oleh
+  aktivitas lain di staging, BUKAN akibat deploy ulang ini.
+- Server tertinggal satu commit dokumen ini sampai deploy berikutnya
+  (pola yang sama seperti entri konversi).
