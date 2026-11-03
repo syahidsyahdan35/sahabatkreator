@@ -1,3 +1,4 @@
+import { timingSafeEqual, createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
   getProviderSecret,
@@ -115,7 +116,18 @@ export function createMetaRoutes(
     const mode = c.req.query("hub.mode");
     const token = c.req.query("hub.verify_token");
     const challenge = c.req.query("hub.challenge");
-    if (mode === "subscribe" && token === opts.verifyToken && challenge) {
+    // Perbandingan timing-safe (Hotfix analisis 2026-11-03): token di-hash
+    // dulu agar panjangnya selalu sama (timingSafeEqual melempar bila beda
+    // panjang), lalu dibandingkan konstanta-waktu — token verify ini
+    // rahasia statis jangka panjang, jadi banding biasa === bocor panjang
+    // prefix lewat pengukuran waktu.
+    const expectedDigest = createHash("sha256").update(opts.verifyToken).digest();
+    const presentedDigest = createHash("sha256").update(token ?? "").digest();
+    if (
+      mode === "subscribe" &&
+      timingSafeEqual(expectedDigest, presentedDigest) &&
+      challenge
+    ) {
       // Handshake sukses SENGAJA tidak dicatat (bukan event; menghindari
       // derau dari pemeriksaan berkala Meta) — yang dicatat hanya
       // penolakannya.

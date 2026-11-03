@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -15,6 +15,7 @@ import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
 import { storeProfilePhoto } from "./avatars";
 import { resolveInboundReplyTargetId } from "./conversations";
+import { outboundClaimStale } from "./outbound-claim";
 
 /**
  * Service domain Meta (Fase 7A, RANCANGAN §4 & §12.1) — channel Messenger
@@ -784,6 +785,13 @@ export async function listQueuedMetaDeliveries(
         and(
           eq(messages.direction, "outbound"),
           eq(messages.status, "queued"),
+          // Hanya baris yang bisa diklaim: belum diklaim, atau klaimnya
+          // basi (pengirim sebelumnya mati). Baris yang sedang dikirim
+          // poller lain tidak ikut dipindai — cegah kirim ganda.
+          or(
+            isNull(messages.claimedAt),
+            lt(messages.claimedAt, outboundClaimStale),
+          ),
           inArray(conversations.provider, ["messenger", "instagram", "whatsapp"]),
         ),
       )

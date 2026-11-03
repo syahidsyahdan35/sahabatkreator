@@ -237,6 +237,17 @@ export const messages = pgTable(
     providerMessageId: varchar("provider_message_id", { length: 255 }),
     status: messageStatusEnum("status").notNull().default("received"),
     errorCode: varchar("error_code", { length: 128 }),
+    /**
+     * Klaim pengiriman (Hotfix analisis 2026-11-03): diisi poller tepat
+     * sebelum mengirim lewat `claimOutboundMessage` (UPDATE atomik).
+     * Mencegah dua replica API mengirim baris `queued` yang sama tanpa
+     * menambah nilai enum status baru — status tetap `queued` sampai
+     * provider menjawab, sehingga reconcile broadcast & UI tidak berubah.
+     * Klaim yang lebih tua dari OUTBOUND_CLAIM_STALE_MS dianggap basi
+     * (proses mati di tengah pengiriman) dan boleh diambil alih poller
+     * lain. NULL = belum pernah diklaim.
+     */
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
     /** User pengirim untuk pesan outbound manual dari inbox (sender_type='user'). */
     sentByUserId: uuid("sent_by_user_id").references(() => users.id, {
       onDelete: "set null",
@@ -306,6 +317,14 @@ export const messages = pgTable(
     index("messages_tenant_id_idx").on(t.tenantId),
     index("messages_conversation_created_idx").on(t.conversationId, t.createdAt),
     index("messages_reply_to_message_id_idx").on(t.replyToMessageId),
+    // Hotfix analisis 2026-11-03: index parsial untuk pindai antrean
+    // pengiriman lintas tenant (listQueuedMetaDeliveries &
+    // listQueuedTelegramDeliveries di core) yang dijalankan poller API
+    // tiap ±2 detik dengan filter persis ini + ORDER BY created_at.
+    // Tanpa index ini setiap tick = full scan tabel messages terbesar.
+    index("messages_outbound_queued_created_idx")
+      .on(t.createdAt)
+      .where(sql`${t.direction} = 'outbound' AND ${t.status} = 'queued'`),
     uniqueIndex("messages_provider_message_id_unique")
       .on(t.providerMessageId)
       .where(sql`${t.providerMessageId} IS NOT NULL`),

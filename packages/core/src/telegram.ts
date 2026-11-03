@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -14,6 +14,7 @@ import {
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
 import { resolveInboundReplyTargetId } from "./conversations";
+import { outboundClaimStale } from "./outbound-claim";
 
 /**
  * Service domain Telegram (Fase 6A, RANCANGAN §4) — channel Bot API.
@@ -740,6 +741,13 @@ export async function listQueuedTelegramDeliveries(
         and(
           eq(messages.direction, "outbound"),
           eq(messages.status, "queued"),
+          // Hanya baris yang bisa diklaim: belum diklaim, atau klaimnya
+          // basi (pengirim sebelumnya mati). Baris yang sedang dikirim
+          // poller lain tidak ikut dipindai — cegah kirim ganda.
+          or(
+            isNull(messages.claimedAt),
+            lt(messages.claimedAt, outboundClaimStale),
+          ),
           eq(conversations.provider, "telegram"),
         ),
       )

@@ -21,8 +21,10 @@ import { AGENT_DAILY_RESPONSE_CAP, AGENT_USAGE_REF_TYPE } from "./agent-runtime"
  *   melaporkannya (mock, atau model/rute tanpa cost), baris itu tidak
  *   menyumbang biaya; `costReportedResponses` menunjukkan cakupannya.
  *   TIDAK ada tabel harga statis dan tidak ada estimasi karangan.
- * - Hari dihitung UTC, sama seperti semantik cap harian runtime
- *   (`date_trunc('day', now())` pada Postgres ber-TZ UTC di staging).
+ * - Hari dihitung UTC dan dipatok EKSPLISIT ke UTC (`AT TIME ZONE 'UTC'`
+ *   dua arah) sehingga semantik cap harian runtime & laporan TIDAK
+ *   bergantung pada pengaturan TimeZone server Postgres — sebelumnya
+ *   `date_trunc('day', now())` diam-diam mengikuti TZ server.
  */
 
 export interface AiUsageDayPoint {
@@ -129,7 +131,12 @@ export async function getAiUsageReport(
 ): Promise<AiUsageReport> {
   const days = Math.min(90, Math.max(1, Math.trunc(input.days) || 30));
   return withTenantDb(db, ctx.tenantId, async (tx) => {
-    const since = sql`date_trunc('day', now()) - (${days - 1} * interval '1 day')`;
+    // Batas "hari ini" dipatok UTC eksplisit: date_trunc pada now()
+    // mengikuti TimeZone sesi server; AT TIME ZONE 'UTC' dua arah
+    // (naikkan ke naive UTC, potong harinya, kembalikan ke timestamptz)
+    // menghasilkan tengah malam UTC apa pun TZ server.
+    const since =
+      sql`(date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') - (${days - 1} * interval '1 day')`;
     const baseWhere = and(
       eq(usageLedger.tenantId, ctx.tenantId),
       eq(usageLedger.type, "ai_token"),
@@ -145,12 +152,12 @@ export async function getAiUsageReport(
 
     const dailyRows = await tx
       .select({
-        day: sql<string>`to_char(date_trunc('day', ${usageLedger.createdAt}), 'YYYY-MM-DD')`,
+        day: sql<string>`to_char(date_trunc('day', ${usageLedger.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`,
         ...aggSelect(),
       })
       .from(usageLedger)
       .where(baseWhere)
-      .groupBy(sql`date_trunc('day', ${usageLedger.createdAt})`);
+      .groupBy(sql`date_trunc('day', ${usageLedger.createdAt} AT TIME ZONE 'UTC')`);
     const byDay = new Map(
       dailyRows.map((r) => [r.day, toAgg(r as Record<string, unknown>)]),
     );
@@ -221,7 +228,10 @@ export async function getAiUsageReport(
           eq(usageLedger.tenantId, ctx.tenantId),
           eq(usageLedger.type, "ai_token"),
           eq(usageLedger.refType, AGENT_USAGE_REF_TYPE),
-          gte(usageLedger.createdAt, sql`date_trunc('day', now())`),
+          gte(
+            usageLedger.createdAt,
+            sql`(date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`,
+          ),
         ),
       );
     const usedToday = capRow?.n ?? 0;

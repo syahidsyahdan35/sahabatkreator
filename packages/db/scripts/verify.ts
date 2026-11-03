@@ -3106,5 +3106,67 @@ function oneHotVector(index: number): string {
   );
 }
 
+// ---------- 38. Hotfix analisis: klaim pengiriman outbound (claimed_at) ----------
+{
+  // Kolom klaim ada dan nullable (NULL = belum pernah diklaim).
+  const col = await db.query<{ is_nullable: string }>(
+    `SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'messages'
+        AND column_name = 'claimed_at'`,
+  );
+  assert.equal(col.rows[0]?.is_nullable, "YES");
+
+  // Seed: satu pesan outbound `queued` milik tenant A.
+  const MSG = "c1a10000-0000-4000-8000-0000000000c1";
+  await db.query(
+    `INSERT INTO messages (id, tenant_id, conversation_id, direction, sender_type, type, content_text, status)
+     VALUES ($1, $2, $3, 'outbound', 'user', 'text', 'Klaim uji', 'queued')`,
+    [MSG, TENANT_A, CONV_A],
+  );
+
+  // Syarat klaim yang sama persis dengan claimOutboundMessage di core.
+  const claimSql = `UPDATE messages SET claimed_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND status = 'queued'
+       AND (claimed_at IS NULL OR claimed_at < now() - interval '2 minutes')
+     RETURNING id`;
+
+  // Klaim pertama menang; klaim kedua atas baris yang sama KALAH — inilah
+  // yang mencegah dua replica API mengirim pesan yang sama.
+  const first = await db.query(claimSql, [MSG, TENANT_A]);
+  const second = await db.query(claimSql, [MSG, TENANT_A]);
+  assert.equal(first.rows.length, 1);
+  assert.equal(second.rows.length, 0);
+
+  // Klaim basi (pengirim mati di tengah jalan) boleh diambil alih.
+  await db.query(
+    `UPDATE messages SET claimed_at = now() - interval '5 minutes' WHERE id = $1`,
+    [MSG],
+  );
+  const reclaimed = await db.query(claimSql, [MSG, TENANT_A]);
+  assert.equal(reclaimed.rows.length, 1);
+
+  // Status TETAP `queued` selama klaim → jalur penandaan sent yang sudah
+  // ada (WHERE status = 'queued') tetap bekerja tanpa perubahan.
+  const sent = await db.query(
+    `UPDATE messages SET status = 'sent' WHERE id = $1 AND status = 'queued' RETURNING id`,
+    [MSG],
+  );
+  assert.equal(sent.rows.length, 1);
+
+  // Tenant lain tidak bisa mengklaim pesan tenant A (RLS).
+  const cross = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    return tx.query(
+      `UPDATE messages SET claimed_at = now() WHERE id = $1 RETURNING id`,
+      [MSG],
+    );
+  });
+  assert.equal(cross.rows.length, 0);
+  console.log(
+    "[42] Hotfix analisis: messages.claimed_at ada; klaim atomik hanya satu pemenang, klaim basi boleh diambil alih, status tetap queued (penandaan sent tetap jalan), tenant lain tidak bisa mengklaim: OK",
+  );
+}
+
 await db.close();
 console.log("db verify (PGlite): SEMUA LULUS");

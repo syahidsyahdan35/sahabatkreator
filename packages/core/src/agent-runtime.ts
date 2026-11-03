@@ -710,7 +710,13 @@ export async function respondToInboundMessage(
           eq(usageLedger.tenantId, tenantId),
           eq(usageLedger.type, "ai_token"),
           eq(usageLedger.refType, AGENT_USAGE_REF_TYPE),
-          gte(usageLedger.createdAt, sql`date_trunc('day', now())`),
+          // Cap harian dipatok UTC eksplisit (semua kode ai-usage.ts):
+          // date_trunc('day', now()) polos mengikuti TimeZone server
+          // Postgres dan diam-diam menggeser jendela cap bila TZ bukan UTC.
+          gte(
+            usageLedger.createdAt,
+            sql`(date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`,
+          ),
         ),
       );
     return row?.n ?? 0;

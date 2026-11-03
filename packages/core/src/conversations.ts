@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -13,6 +13,7 @@ import {
 } from "@sahabat-kreator/db";
 import type { TenantContext } from "./tenant";
 import { withTenantDb, type DbTx } from "./tx";
+import { outboundClaimStale } from "./outbound-claim";
 
 /**
  * Service domain percakapan & pesan inbox (Fase 1D, RANCANGAN §5.1 & §6).
@@ -786,6 +787,43 @@ export async function isOutboundMessageQueued(
       )
       .limit(1);
     return row?.status === "queued";
+  });
+}
+
+/**
+ * Mengklaim satu pesan outbound `queued` untuk SATU pengirim (Hotfix
+ * analisis 2026-11-03). Menggantikan pola lama "cek masih queued lalu
+ * kirim" yang hanya aman untuk satu proses API: dua replica bisa sama-sama
+ * lolos cek dan mengirim duplikat.
+ *
+ * UPDATE bersyarat ini atomik — pemanggil yang menang (true) satu-satunya
+ * yang boleh mengirim. Syaratnya: masih `queued` DAN belum diklaim ATAU
+ * klaimnya sudah basi (proses pengirim sebelumnya mati di tengah jalan;
+ * lihat OUTBOUND_CLAIM_STALE_MS). Status TIDAK diubah (tetap `queued`)
+ * agar reconcile broadcast & UI tidak perlu mengenal keadaan baru.
+ */
+export async function claimOutboundMessage(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  messageId: string,
+): Promise<boolean> {
+  return withTenantDb(db, ctx.tenantId, async (tx) => {
+    const [claimed] = await tx
+      .update(messages)
+      .set({ claimedAt: sql`now()` })
+      .where(
+        and(
+          eq(messages.tenantId, ctx.tenantId),
+          eq(messages.id, messageId),
+          eq(messages.status, "queued"),
+          or(
+            isNull(messages.claimedAt),
+            lt(messages.claimedAt, outboundClaimStale),
+          ),
+        ),
+      )
+      .returning({ id: messages.id });
+    return Boolean(claimed);
   });
 }
 

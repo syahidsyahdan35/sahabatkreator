@@ -21,6 +21,10 @@ export {
 } from "./tenants";
 export { withTenantDb, type DbTx } from "./tx";
 export {
+  OUTBOUND_CLAIM_STALE_MS,
+  outboundClaimStale,
+} from "./outbound-claim";
+export {
   createContact,
   listContacts,
   getContact,
@@ -83,6 +87,7 @@ export {
   markOutboundMessageSent,
   markOutboundMessageFailed,
   isOutboundMessageQueued,
+  claimOutboundMessage,
   RETRYABLE_FAILED_PROVIDERS,
   listFailedOutboundMessages,
   retryFailedOutboundMessage,
