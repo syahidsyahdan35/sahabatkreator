@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api } from "../api/client";
 import { ApiClientError } from "../api/client";
@@ -31,18 +31,35 @@ interface ResetPasswordPageProps {
  * `?error=INVALID_TOKEN` (atau ditolak endpoint penukar dengan kode
  * yang sama) dan ditampilkan sebagai keadaan tidak-valid dengan jalan
  * meminta tautan baru — tidak ada tebakan status di sisi klien.
+ *
+ * Token dibaca SEKALI saat mount lalu segera dibuang dari address bar
+ * (`history.replaceState`). Alasannya konkret: token reset yang masih
+ * terpampang di URL ikut terkirim sebagai `Referer` ke setiap sumber
+ * luar yang halaman ini muat, tersimpan di riwayat peramban, dan
+ * terlihat siapa pun yang melihat layar. Nilainya tetap hidup di state
+ * React sampai formulir dikirim, jadi tidak ada yang hilang.
  */
 export function ResetPasswordPage({ t, controls, onNavigate }: ResetPasswordPageProps) {
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get("token") ?? "";
-  const [invalid, setInvalid] = useState(
-    () => params.get("error") === "INVALID_TOKEN" || !params.get("token"),
+  const [token] = useState(
+    () => new URLSearchParams(window.location.search).get("token") ?? "",
   );
+  const [invalid, setInvalid] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("error") === "INVALID_TOKEN" || !params.get("token");
+  });
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("token")) return;
+    url.searchParams.delete("token");
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState(window.history.state, "", next);
+  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
