@@ -97,6 +97,18 @@ export const contacts = pgTable(
     source: varchar("source", { length: 128 }),
     optInStatus: optInStatusEnum("opt_in_status").notNull().default("unknown"),
     consentAt: timestamp("consent_at", { withTimezone: true }),
+    /**
+     * Jejak opt-in pemasaran (Fase 13C): kapan & lewat jalur apa kontak
+     * terakhir memberi persetujuan broadcast. Keduanya NULL selama
+     * kontak belum pernah opt-in — memang kondisional (aturan NOT NULL
+     * user 2026-11-03). Opt-out TIDAK menghapus kedua kolom ini
+     * (riwayat persetujuan dipertahankan); status EFEKTIF diturunkan
+     * di core: opt_in_status='opted_out' → "opted_out"; selain itu
+     * opt_in_at terisi (atau status 'opted_in') → "opted_in"; selain
+     * itu "none". `opt_in_source`: 'keyword' | 'manual'.
+     */
+    optInSource: varchar("opt_in_source", { length: 64 }),
+    optInAt: timestamp("opt_in_at", { withTimezone: true }),
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

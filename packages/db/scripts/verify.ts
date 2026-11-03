@@ -64,7 +64,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 10B (comments)
 // + 1 tabel Fase 12C (kb_source_documents)
 // + 2 tabel Fase 13B (growth_links, growth_link_events)
-assert.equal(Number(tablesRes.rows[0].count), 46);
+// + 2 tabel Fase 13C (segments, tenant_opt_in_settings)
+assert.equal(Number(tablesRes.rows[0].count), 48);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -159,7 +160,9 @@ const policies = await db.query<{ count: string }>(
 // + tenant_isolation pada growth_links & growth_link_events dan
 //   lengan publik `growth_link_public_lookup` pada growth_links
 //   (Fase 13B, migrasi 0002 lineage baseline) = 60.
-assert.equal(Number(policies.rows[0].count), 60);
+// + tenant_isolation pada segments & tenant_opt_in_settings
+//   (Fase 13C, migrasi 0003) = 62.
+assert.equal(Number(policies.rows[0].count), 62);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -181,7 +184,8 @@ await db.exec(`
     whatsapp_templates,
     comments,
     kb_source_documents,
-    growth_links, growth_link_events
+    growth_links, growth_link_events,
+    segments, tenant_opt_in_settings
   TO app_user;
 `);
 
@@ -2259,7 +2263,9 @@ function oneHotVector(index: number): string {
 
   // Jumlah tabel & policy: normalisasi sendiri tidak mengubahnya
   // (44 / 57 pada titik 11A.1); Fase 13B menambah 2 tabel growth +
-  // 3 policy (2 tenant_isolation + 1 lengan lookup publik) → 46 / 60.
+  // 3 policy (2 tenant_isolation + 1 lengan lookup publik) → 46 / 60;
+  // Fase 13C menambah 2 tabel (segments, tenant_opt_in_settings) +
+  // 2 policy tenant_isolation → 48 / 62.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2267,10 +2273,10 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "46");
-  assert.equal(counts.rows[0].policies, "60");
+  assert.equal(counts.rows[0].tables, "48");
+  assert.equal(counts.rows[0].policies, "62");
   console.log(
-    "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel 46 & policy 60 sesudah Fase 13B: OK",
+    "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel & policy global sesuai hitungan berjalan: OK",
   );
 }
 
@@ -2477,6 +2483,84 @@ function oneHotVector(index: number): string {
   assert.equal(pub.miss.rows[0].n, "0");
   console.log(
     "[36] Fase 13B: growth_links/growth_link_events — slug unik global, CHECK kind/channel, konversi unik per kontak, isolasi tenant, lengan lookup publik per slug, contacts.source ada: OK",
+  );
+}
+
+// ---------- 37. Fase 13C: segments + tenant_opt_in_settings + kolom opt-in ----------
+{
+  // Kolom baru ada: contacts.opt_in_source/opt_in_at (nullable —
+  // kondisional), broadcasts.require_opt_in (NOT NULL, default false).
+  const cols = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND ((table_name = 'contacts' AND column_name IN ('opt_in_source', 'opt_in_at'))
+          OR (table_name = 'broadcasts' AND column_name = 'require_opt_in'
+              AND is_nullable = 'NO' AND column_default LIKE '%false%'))`,
+  );
+  assert.equal(cols.rows[0].n, "3");
+
+  // Seed tenant A: satu segmen + satu baris pengaturan opt-in.
+  const SEG_A = "13c00000-0000-4000-8000-0000000000a1";
+  await db.query(
+    `INSERT INTO segments (id, tenant_id, name, definition)
+     VALUES ($1, $2, 'Lead Webinar', '{"match":"all","conditions":[{"type":"tag","tag":"webinar"}]}'::jsonb)`,
+    [SEG_A, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO tenant_opt_in_settings (tenant_id, opt_in_keywords, opt_in_confirmation_text, opt_out_extra_keywords)
+     VALUES ($1, '["ikut"]'::jsonb, 'Siap, kamu ikut!', '[]'::jsonb)`,
+    [TENANT_A],
+  );
+  // Kontak tenant A menyimpan jejak opt-in keyword.
+  const CONTACT_13C = "13c00000-0000-4000-8000-0000000000c1";
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name, opt_in_status, opt_in_source, opt_in_at)
+     VALUES ($1, $2, 'Kontak 13C', 'opted_in', 'keyword', now())`,
+    [CONTACT_13C, TENANT_A],
+  );
+  const trail = await db.query<{ opt_in_source: string }>(
+    `SELECT opt_in_source FROM contacts WHERE id = $1`,
+    [CONTACT_13C],
+  );
+  assert.equal(trail.rows[0].opt_in_source, "keyword");
+
+  // Isolasi RLS sebagai app_user: tenant A melihat barisnya; tenant B
+  // 0 baris; insert lintas tenant ditolak WITH CHECK.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const ownSegments = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM segments`,
+    );
+    const ownSettings = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM tenant_opt_in_settings`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const otherSegments = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM segments`,
+    );
+    const otherSettings = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM tenant_opt_in_settings`,
+    );
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO segments (tenant_id, name, definition)
+         VALUES ($1, 'Silang', '{"match":"all","conditions":[]}'::jsonb)`,
+        [TENANT_A],
+      );
+    } catch {
+      crossBlocked = true;
+    }
+    return { ownSegments, ownSettings, otherSegments, otherSettings, crossBlocked };
+  });
+  assert.equal(views.ownSegments.rows[0].n, "1");
+  assert.equal(views.ownSettings.rows[0].n, "1");
+  assert.equal(views.otherSegments.rows[0].n, "0");
+  assert.equal(views.otherSettings.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+  console.log(
+    "[37] Fase 13C: segments & tenant_opt_in_settings terisolasi tenant (insert silang ditolak); contacts.opt_in_source/opt_in_at ada; broadcasts.require_opt_in NOT NULL default false: OK",
   );
 }
 

@@ -213,6 +213,24 @@ export const UpdateContactRequestSchema = z.object({
 });
 export type UpdateContactRequest = z.infer<typeof UpdateContactRequestSchema>;
 
+/**
+ * Status opt-in EFEKTIF (Fase 13C) — diturunkan server dari kolom
+ * tersimpan, bukan disimpan apa adanya:
+ * - optInStatus tersimpan "opted_out"            → "opted_out"
+ * - optInStatus "opted_in" ATAU optInAt terisi   → "opted_in"
+ * - selain itu                                   → "none"
+ * Dipakai kondisi segmen `opt_in_status` dan gerbang broadcast
+ * `require_opt_in`. Status TERSIMPAN tetap diekspos apa adanya lewat
+ * `optInStatus` (enum unknown/opted_in/opted_out) agar permukaan
+ * PATCH yang ada tidak berubah semantik.
+ */
+export const EffectiveOptInStatusSchema = z.enum([
+  "opted_in",
+  "none",
+  "opted_out",
+]);
+export type EffectiveOptInStatus = z.infer<typeof EffectiveOptInStatusSchema>;
+
 export const ContactResponseSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -230,6 +248,18 @@ export const ContactResponseSchema = z.object({
   customFields: z.record(z.unknown()),
   pipelineStage: z.string(),
   optInStatus: OptInStatusSchema,
+  /** Status opt-in efektif (Fase 13C) — lihat EffectiveOptInStatusSchema. */
+  optInEffectiveStatus: EffectiveOptInStatusSchema,
+  /**
+   * Jalur persetujuan opt-in terakhir (Fase 13C): "keyword" (kata kunci
+   * opt-in di pipeline inbound) atau "manual" (toggle dashboard/API);
+   * null bila kontak belum pernah opt-in. Opt-out TIDAK menghapusnya
+   * (riwayat) — status efektiflah yang menentukan boleh-tidaknya
+   * broadcast.
+   */
+  optInSource: z.string().nullable(),
+  /** Kapan opt-in terakhir diberikan (Fase 13C); null bila belum pernah. */
+  optInAt: z.string().datetime().nullable(),
   consentAt: z.string().datetime().nullable(),
   lastContactedAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
@@ -1791,6 +1821,10 @@ export const ApiKeyScopeSchema = z.enum([
   // dashboard-only — slug publik + branding adalah artefak kurasi UI;
   // lihat docs/COVERAGE-MATRIX.md).
   "growth_links:read",
+  // Fase 13C: permukaan BACA publik segmen (tulis tetap dashboard-only
+  // — segmen adalah artefak kurasi UI dengan definisi kondisi kompleks;
+  // lihat docs/COVERAGE-MATRIX.md).
+  "segments:read",
   // Fase 15A: permukaan BACA publik untuk sumber daya yang sebelumnya
   // hanya dashboard (aturan sinkronisasi kontrak dijalankan retrospektif).
   // Tulis untuk sumber daya ini tetap dashboard-only — lihat
@@ -1821,6 +1855,7 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = [
   "whatsapp_templates:read",
   "knowledge:read",
   "growth_links:read",
+  "segments:read",
 ] as const;
 
 /** Default aman saat pembuatan tidak menyebut scope: hanya baca. */
@@ -1837,11 +1872,12 @@ export const API_KEY_DEFAULT_SCOPES: readonly ApiKeyScope[] = [
   "whatsapp_templates:read",
   "knowledge:read",
   "growth_links:read",
+  "segments:read",
 ] as const;
 
 export const CreateApiKeyRequestSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  scopes: z.array(ApiKeyScopeSchema).max(15).optional(),
+  scopes: z.array(ApiKeyScopeSchema).max(16).optional(),
 });
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequestSchema>;
 
@@ -2451,6 +2487,9 @@ export type BroadcastRecipientStatus = z.infer<
 /** Alasan penerima dilewati saat dispatch (tidak dicoba kirim). */
 export const BroadcastSkipReasonSchema = z.enum([
   "opted_out",
+  // Fase 13C: broadcast require_opt_in dan status opt-in efektif
+  // kontak bukan "opted_in".
+  "not_opted_in",
   "outside_24h_window",
   "message_deleted",
   // Fase 10A: variabel template WhatsApp penerima tidak terpetakan,
@@ -2461,14 +2500,22 @@ export const BroadcastSkipReasonSchema = z.enum([
 export type BroadcastSkipReason = z.infer<typeof BroadcastSkipReasonSchema>;
 
 /**
- * Filter audiens: kontak cocok bila punya SALAH SATU tag pada `tags`
- * (OR dalam kelompok) DAN stage pipeline-nya termasuk salah satu
- * `stages`; antar-kelompok digabung AND. Kedua kelompok opsional;
- * filter kosong = semua kontak yang punya identitas di channel itu.
+ * Filter audiens broadcast. Mode ditentukan `audience`:
+ * - "all"     : semua kontak beridentitas di channel itu.
+ * - "tag"     : kontak cocok bila punya SALAH SATU tag pada `tags`
+ *               (OR dalam kelompok) DAN stage pipeline-nya termasuk
+ *               salah satu `stages`; antar-kelompok digabung AND.
+ * - "segment" : keanggotaan ditentukan evaluator segmen (Fase 13C)
+ *               atas segmen `segmentId`.
+ * Baris lama tanpa `audience` diturunkan modenya server dari isi
+ * filter (segmentId → segment; tags/stages non-kosong → tag; selain
+ * itu all) — perilaku tag yang ada tidak berubah (regresi nol).
  */
 export const BroadcastAudienceFilterSchema = z.object({
+  audience: z.enum(["all", "tag", "segment"]).optional(),
   tags: z.array(z.string().min(1).max(64)).max(20).optional(),
   stages: z.array(z.string().min(1).max(64)).max(20).optional(),
+  segmentId: z.string().uuid().optional(),
 });
 export type BroadcastAudienceFilter = z.infer<
   typeof BroadcastAudienceFilterSchema
@@ -2508,6 +2555,12 @@ export const BroadcastResponseSchema = z.object({
    */
   templateVariableSources: z.array(z.string()),
   audienceFilter: BroadcastAudienceFilterSchema,
+  /**
+   * Gerbang opt-in (Fase 13C): true = hanya kontak berstatus opt-in
+   * efektif yang dikirimi; sisanya dicatat skipped `not_opted_in`.
+   * Bawaan server saat buat: true untuk WhatsApp, false selain itu.
+   */
+  requireOptIn: z.boolean(),
   status: BroadcastStatusSchema,
   scheduledAt: z.string().datetime().nullable(),
   startedAt: z.string().datetime().nullable(),
@@ -2552,6 +2605,8 @@ export const CreateBroadcastRequestSchema = z.object({
     .max(25)
     .optional(),
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
+  /** Gerbang opt-in (Fase 13C); kosong = bawaan server per provider. */
+  requireOptIn: z.boolean().optional(),
 });
 export type CreateBroadcastRequest = z.infer<
   typeof CreateBroadcastRequestSchema
@@ -2568,6 +2623,8 @@ export const UpdateBroadcastRequestSchema = z.object({
     .max(25)
     .optional(),
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
+  /** Gerbang opt-in (Fase 13C) — hanya bisa diubah selama draft. */
+  requireOptIn: z.boolean().optional(),
 });
 export type UpdateBroadcastRequest = z.infer<
   typeof UpdateBroadcastRequestSchema
@@ -2586,31 +2643,45 @@ export type ScheduleBroadcastRequest = z.infer<
 >;
 
 /**
- * Estimasi audiens untuk formulir: `matched` = kontak beridentitas di
- * channel yang cocok filter dan TIDAK opt-out (kandidat kirim);
- * `optedOut` = cocok filter tetapi akan dilewati sebagai opt-out;
- * `totalWithIdentity` = seluruh kontak beridentitas di channel itu.
- * Aturan jendela 24 jam Meta TIDAK diterapkan di estimasi (tergantung
- * waktu dispatch) — penerima di luar jendela dilewati saat pengiriman
- * dan terlihat sebagai skipped pada statistik akhir.
+ * Pratinjau audiens broadcast (Fase 13C — menggantikan estimasi 7C):
+ * dihitung dengan KLASIFIKASI YANG SAMA seperti materialisasi
+ * penerima saat dispatch (satu fungsi inti di core — tidak ada dua
+ * logika), jadi angka pratinjau = angka hasil dispatch untuk audiens
+ * dan keadaan yang sama, kecuali perubahan data di antaranya.
+ * `totalCandidates` = kontak beridentitas di channel yang cocok
+ * filter audiens; `willSend` = yang lolos semua gerbang;
+ * sisanya rincian per alasan skip. Jendela 24 jam Meta dievaluasi
+ * terhadap waktu pratinjau (bisa bergeser sedikit sampai dispatch).
  */
-export const BroadcastAudienceEstimateResponseSchema = z.object({
-  matched: z.number().int().nonnegative(),
-  optedOut: z.number().int().nonnegative(),
-  totalWithIdentity: z.number().int().nonnegative(),
+export const BroadcastAudiencePreviewResponseSchema = z.object({
+  totalCandidates: z.number().int().nonnegative(),
+  willSend: z.number().int().nonnegative(),
+  skippedOptedOut: z.number().int().nonnegative(),
+  skippedNotOptedIn: z.number().int().nonnegative(),
+  skippedOutside24hWindow: z.number().int().nonnegative(),
+  skippedMissingPhoneNumber: z.number().int().nonnegative(),
+  skippedTemplateVariableMissing: z.number().int().nonnegative(),
 });
-export type BroadcastAudienceEstimateResponse = z.infer<
-  typeof BroadcastAudienceEstimateResponseSchema
+export type BroadcastAudiencePreviewResponse = z.infer<
+  typeof BroadcastAudiencePreviewResponseSchema
 >;
 
-export const BroadcastAudienceEstimateQuerySchema = z.object({
+export const BroadcastAudiencePreviewQuerySchema = z.object({
   channelAccountId: z.string().uuid(),
   /** Daftar tag terpisah koma (mengikuti pola query daftar kontak). */
   tags: z.string().max(1024).optional(),
   stages: z.string().max(1024).optional(),
+  /** Mode audiens segmen (Fase 13C): id segmen milik tenant. */
+  segmentId: z.string().uuid().optional(),
+  /** Gerbang opt-in yang akan dipakai broadcast ("true"/"false"). */
+  requireOptIn: z.enum(["true", "false"]).optional(),
+  /** Template WhatsApp terpilih — untuk klasifikasi variabel (Fase 13C). */
+  whatsappTemplateId: z.string().uuid().optional(),
+  /** Sumber variabel template terpisah koma, sejajar posisi template. */
+  templateVariableSources: z.string().max(2048).optional(),
 });
-export type BroadcastAudienceEstimateQuery = z.infer<
-  typeof BroadcastAudienceEstimateQuerySchema
+export type BroadcastAudiencePreviewQuery = z.infer<
+  typeof BroadcastAudiencePreviewQuerySchema
 >;
 
 export const BroadcastRecipientResponseSchema = z.object({
@@ -3717,6 +3788,143 @@ export type GrowthLinkAttributedContactsResponse = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
+// Fase 13C — Segmentasi audiens & pengaturan opt-in broadcast.
+//
+// Segmen = definisi kondisi bernama atas kontak tenant, dievaluasi
+// SATU evaluator di core untuk tiga konsumen: filter daftar kontak,
+// pratinjau audiens broadcast, dan materialisasi penerima broadcast.
+// Permukaan v1 untuk segmen BACA saja (segments:read); tulis =
+// dashboard-only (artefak kurasi UI + definisi kompleks — lihat
+// docs/COVERAGE-MATRIX.md). Pengaturan opt-in adalah permukaan
+// dashboard saja (konfigurasi tenant, bukan sumber daya integrasi).
+// ---------------------------------------------------------------------------
+
+/**
+ * Satu kondisi segmen. `last_active_within_days` memakai definisi
+ * aktivitas: waktu pesan MASUK terakhir kontak di semua percakapan
+ * 1:1-nya; bila kontak belum pernah mengirim pesan, jatuh ke
+ * `updated_at` percakapan 1:1 terbarunya; kontak tanpa percakapan
+ * sama sekali tidak pernah "aktif".
+ */
+export const SegmentConditionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("tag"),
+    tag: z.string().trim().min(1).max(64),
+  }),
+  z.object({
+    type: z.literal("stage"),
+    stage: z.string().trim().min(1).max(64),
+  }),
+  z.object({
+    type: z.literal("source_prefix"),
+    prefix: z.string().trim().min(1).max(128),
+  }),
+  z.object({
+    type: z.literal("opt_in_status"),
+    status: EffectiveOptInStatusSchema,
+  }),
+  z.object({
+    type: z.literal("custom_field"),
+    key: z.string().trim().min(1).max(64),
+    op: z.enum(["eq", "contains"]),
+    value: z.string().max(1000),
+  }),
+  z.object({
+    type: z.literal("created_within_days"),
+    days: z.number().int().min(1).max(3650),
+  }),
+  z.object({
+    type: z.literal("last_active_within_days"),
+    days: z.number().int().min(1).max(3650),
+  }),
+  z.object({
+    type: z.literal("has_channel"),
+    provider: ChannelProviderSchema,
+  }),
+]);
+export type SegmentCondition = z.infer<typeof SegmentConditionSchema>;
+
+export const SegmentDefinitionSchema = z.object({
+  /** "all" = semua kondisi harus cocok (AND); "any" = salah satu (OR). */
+  match: z.enum(["all", "any"]),
+  conditions: z.array(SegmentConditionSchema).min(1).max(20),
+});
+export type SegmentDefinition = z.infer<typeof SegmentDefinitionSchema>;
+
+export const SegmentResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  definition: SegmentDefinitionSchema,
+  createdByUserId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type SegmentResponse = z.infer<typeof SegmentResponseSchema>;
+
+export const SegmentListResponseSchema = z.object({
+  segments: z.array(SegmentResponseSchema),
+});
+export type SegmentListResponse = z.infer<typeof SegmentListResponseSchema>;
+
+export const CreateSegmentRequestSchema = z.object({
+  name: z.string().trim().min(1).max(128),
+  definition: SegmentDefinitionSchema,
+});
+export type CreateSegmentRequest = z.infer<typeof CreateSegmentRequestSchema>;
+
+export const UpdateSegmentRequestSchema = z.object({
+  name: z.string().trim().min(1).max(128).optional(),
+  definition: SegmentDefinitionSchema.optional(),
+});
+export type UpdateSegmentRequest = z.infer<typeof UpdateSegmentRequestSchema>;
+
+/** Pratinjau hitungan anggota untuk definisi (tersimpan atau draf). */
+export const SegmentPreviewRequestSchema = z.object({
+  definition: SegmentDefinitionSchema,
+});
+export type SegmentPreviewRequest = z.infer<
+  typeof SegmentPreviewRequestSchema
+>;
+
+export const SegmentPreviewResponseSchema = z.object({
+  count: z.number().int().nonnegative(),
+});
+export type SegmentPreviewResponse = z.infer<
+  typeof SegmentPreviewResponseSchema
+>;
+
+/**
+ * Pengaturan mesin opt-in per tenant (Fase 13C). `defaultOptOutKeywords`
+ * adalah kata bawaan sistem (konstanta core, hanya-baca di UI);
+ * `optOutExtraKeywords` adalah tambahan tenant yang digabung di atasnya.
+ */
+export const OptInSettingsResponseSchema = z.object({
+  optInKeywords: z.array(z.string()),
+  /** Teks konfirmasi opt-in; null = opt-in diam (tanpa balasan). */
+  optInConfirmationText: z.string().nullable(),
+  optOutExtraKeywords: z.array(z.string()),
+  defaultOptOutKeywords: z.array(z.string()),
+});
+export type OptInSettingsResponse = z.infer<
+  typeof OptInSettingsResponseSchema
+>;
+
+export const UpdateOptInSettingsRequestSchema = z.object({
+  optInKeywords: z
+    .array(z.string().trim().min(1).max(64))
+    .max(20)
+    .optional(),
+  optInConfirmationText: z.string().trim().max(1000).nullable().optional(),
+  optOutExtraKeywords: z
+    .array(z.string().trim().min(1).max(64))
+    .max(20)
+    .optional(),
+});
+export type UpdateOptInSettingsRequest = z.infer<
+  typeof UpdateOptInSettingsRequestSchema
+>;
+
+// ---------------------------------------------------------------------------
 // Fase 15A — Permukaan publik v1: query tambahan + REGISTRY permukaan.
 //
 // Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
@@ -4050,6 +4258,25 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     contractSchemas: ["GrowthLinkResponseSchema"],
     sdkMethod: "getGrowthLink",
     mcpTool: "get_growth_link",
+    mcpTier: "read",
+  },
+  // --- Fase 13C: segmen — permukaan BACA (tulis dashboard-only) --
+  {
+    method: "GET",
+    path: "/v1/segments",
+    scope: "segments:read",
+    contractSchemas: ["SegmentListResponseSchema"],
+    sdkMethod: "listSegments",
+    mcpTool: "list_segments",
+    mcpTier: "read",
+  },
+  {
+    method: "GET",
+    path: "/v1/segments/:id",
+    scope: "segments:read",
+    contractSchemas: ["SegmentResponseSchema"],
+    sdkMethod: "getSegment",
+    mcpTool: "get_segment",
     mcpTier: "read",
   },
 ];

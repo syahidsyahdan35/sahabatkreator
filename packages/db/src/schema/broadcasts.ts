@@ -1,4 +1,5 @@
 import {
+  boolean,
   index,
   jsonb,
   pgEnum,
@@ -92,12 +93,26 @@ export const broadcasts = pgTable(
       .default([])
       .$type<string[]>(),
     /**
-     * Filter audiens: { tags?: string[], stages?: string[] } — kontak
-     * cocok bila punya SALAH SATU tag terdaftar (OR dalam kelompok tag)
-     * DAN stage-nya termasuk salah satu stage terdaftar; kedua kelompok
-     * digabung AND. Kosong = semua kontak beridentitas di channel itu.
+     * Filter audiens: { audience?: "all"|"tag"|"segment", tags?,
+     * stages?, segmentId? } — mode "tag": kontak cocok bila punya
+     * SALAH SATU tag terdaftar (OR dalam kelompok tag) DAN stage-nya
+     * termasuk salah satu stage terdaftar; kedua kelompok digabung
+     * AND. Mode "segment" (Fase 13C): keanggotaan ditentukan evaluator
+     * segmen tunggal di core. Baris lama tanpa `audience` diturunkan
+     * modenya dari isi filter (segmentId → segment; tags/stages
+     * non-kosong → tag; selain itu all) — regresi nol.
      */
     audienceFilter: jsonb("audience_filter").notNull().default({}),
+    /**
+     * Gerbang opt-in (Fase 13C): TRUE = hanya kontak berstatus opt-in
+     * EFEKTIF ("opted_in") yang dikirimi; yang belum opt-in dicatat
+     * sebagai penerima `skipped` beralasan `not_opted_in` saat
+     * dispatch. Bawaan dihitung core saat buat: TRUE untuk broadcast
+     * WhatsApp (selalu bertemplate resmi), FALSE selain itu; pemilik
+     * bisa mengubahnya selama broadcast masih draft. NOT NULL — setiap
+     * broadcast selalu punya keputusan gerbang yang eksplisit.
+     */
+    requireOptIn: boolean("require_opt_in").notNull().default(false),
     status: broadcastStatusEnum("status").notNull().default("draft"),
     /** Waktu kirim yang diminta; NULL selama draft. */
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
