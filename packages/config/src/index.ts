@@ -203,7 +203,41 @@ export function resolveR2Bucket(override?: string): string {
 
 export type Env = z.infer<typeof EnvSchema>;
 
-/** Parse & validasi env; gagal cepat (throw) bila ada nilai yang tidak valid. */
+/**
+ * Kunci yang WAJIB ada saat NODE_ENV=production (Hotfix analisis
+ * 2026-11-03). Sebelumnya semua kunci `.optional()` sehingga API bisa
+ * boot di produksi tanpa secret sesi/enkripsi — kegagalan baru muncul
+ * sebagai 503 per request atau, lebih buruk, kredensial channel tak bisa
+ * didekripsi. Arah gagal yang benar: tolak boot, sebutkan kuncinya.
+ *
+ * Yang TIDAK masuk daftar (sengaja): kredensial provider (META_APP_SECRET,
+ * RESEND_*, OPENROUTER_*) karena punya jalur Panel Admin + perilaku
+ * fail-closed sendiri, dan R2_BUCKET karena default-nya sudah aman
+ * (bucket staging) — lihat resolveR2Bucket.
+ */
+export const PRODUCTION_REQUIRED_KEYS = [
+  "DATABASE_URL",
+  "BETTER_AUTH_SECRET",
+  "BETTER_AUTH_URL",
+  "CHANNEL_TOKEN_SECRET",
+  "WEBCHAT_SECRET",
+  "PLATFORM_SETTINGS_SECRET",
+] as const satisfies readonly (keyof Env)[];
+
+/**
+ * Parse & validasi env; gagal cepat (throw) bila ada nilai yang tidak valid.
+ * Di produksi juga menolak boot bila kunci kritikal belum diisi.
+ */
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  return EnvSchema.parse(source);
+  const parsed = EnvSchema.parse(source);
+  if (parsed.NODE_ENV === "production") {
+    const missing = PRODUCTION_REQUIRED_KEYS.filter((key) => !parsed[key]);
+    if (missing.length > 0) {
+      throw new Error(
+        `[config] env produksi tidak lengkap — wajib diisi: ${missing.join(", ")}. ` +
+          "API menolak boot tanpa kunci ini (fail-closed). Lihat .env.example.",
+      );
+    }
+  }
+  return parsed;
 }
