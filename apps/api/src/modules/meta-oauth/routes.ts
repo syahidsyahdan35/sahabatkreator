@@ -60,9 +60,11 @@ import { resolveTenantForUser } from "../tenants/guard";
  * Tiga rasa alur Meta di balik satu callback (dokumentasi resmi yang
  * terverifikasi; lihat docs/DEPLOY-STAGING.md Fase 7D):
  * - messenger — Facebook Login klasik: dialog membawa `scope`
- *   (pages_show_list, pages_messaging, pages_manage_metadata); code →
- *   user token → long-lived (fb_exchange_token) → /me/accounts. Token
- *   channel = Page Access Token turunan token long-lived per Page.
+ *   (pages_show_list, pages_messaging, pages_manage_metadata,
+ *   business_management — yang terakhir agar tepi bisnis penemuan
+ *   Page bisa dibaca, Hotfix R1); code → user token → long-lived
+ *   (fb_exchange_token) → rantai daftar Page. Token channel = Page
+ *   Access Token turunan token long-lived per Page.
  * - instagram — Unified Login: dialog membawa `config_id` (BUKAN scope,
  *   BUKAN JS SDK); exchange code → Business Integration System User
  *   Access Token (SUAT); aset dari RANTAI penemuan multi-tepi
@@ -114,11 +116,25 @@ export interface MetaOAuthModuleOptions {
 
 const OAUTH_TTL_SECONDS = 600;
 const FACEBOOK_DIALOG_BASE = "https://www.facebook.com";
-/** Scope minimum Messenger yang terbukti untuk alur kita (daftar Page + kirim + subscribed_apps). */
+/**
+ * Scope Messenger untuk dialog Facebook Login klasik kita.
+ * - pages_show_list/pages_messaging/pages_manage_metadata: minimum
+ *   terbukti untuk alur kita (daftar Page + kirim + subscribed_apps).
+ * - business_management (Hotfix R1): WAJIB agar token bisa membaca
+ *   tepi bisnis penemuan Page — /me/assigned_pages menolak dengan
+ *   graph_10 dan /me/businesses dengan graph_100 tanpa izin ini
+ *   (terbukti dari log percobaan live user 2026-11-03: hanya Page
+ *   yang dikelola langsung yang muncul di pemilih; Page yang hanya
+ *   terlihat lewat portofolio bisnis tidak pernah jadi kandidat).
+ *   Izinnya SUDAH ditambahkan pemilik ke aplikasi Meta — dialog
+ *   klasik hanya memberikan scope yang secara eksplisit diminta di
+ *   parameter `scope`, jadi menambahkannya di sinilah perbaikannya.
+ */
 const MESSENGER_OAUTH_SCOPES = [
   "pages_show_list",
   "pages_messaging",
   "pages_manage_metadata",
+  "business_management",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -650,16 +666,22 @@ export function createMetaOAuthRoutes(
         // pengisian token. Untuk token user klasik hasil /me/accounts
         // dipertahankan persis (kemunculan pertama menang) — rantai
         // hanya menemukan Page tambahan untuk token bisnis.
+        // Hotfix R1: kandidat diambil UTUH (listPageCandidates), bukan
+        // disaring bertoken seperti getManagedPages dulu — Page yang
+        // ditemukan tetapi tokennya tidak berhasil diisi TETAP masuk
+        // pemilih sebagai aset nonaktif beralasan
+        // (connectable=false), tidak hilang diam-diam.
         const pageTrace: MetaDiscoveryTraceEntry[] = [];
-        const pages = await graphClient(longLived.accessToken).getManagedPages(
+        const pages = await graphClient(longLived.accessToken).listPageCandidates(
           pageTrace,
         );
+        const connectableCount = pages.filter((p) => p.accessToken).length;
         console.log(
-          `[meta-oauth] discovery provider=messenger ${formatDiscoveryTrace(pageTrace)} total=${pages.length}`,
+          `[meta-oauth] discovery provider=messenger ${formatDiscoveryTrace(pageTrace)} total=${pages.length} connectable=${connectableCount}`,
         );
         const pageTokens: Record<string, string> = {};
         const assets: MetaOAuthAsset[] = pages.map((page) => {
-          pageTokens[page.id] = page.accessToken;
+          if (page.accessToken) pageTokens[page.id] = page.accessToken;
           return {
             assetId: page.id,
             kind: "page" as const,
@@ -668,6 +690,10 @@ export function createMetaOAuthRoutes(
             parentId: null,
             parentName: null,
             linkedIgUsername: page.linkedIg?.username ?? null,
+            connectable: Boolean(page.accessToken),
+            unavailableReason: page.accessToken
+              ? null
+              : ("missing_page_token" as const),
           };
         });
         session = {
@@ -724,6 +750,8 @@ export function createMetaOAuthRoutes(
             parentId: clientBusinessId,
             parentName: null,
             linkedIgUsername: null,
+            connectable: true,
+            unavailableReason: null,
           };
         });
         console.log(
@@ -791,6 +819,8 @@ export function createMetaOAuthRoutes(
               parentId: waba.id,
               parentName: waba.name,
               linkedIgUsername: null,
+              connectable: true,
+              unavailableReason: null,
             });
           }
         }
@@ -955,6 +985,18 @@ export function createMetaOAuthRoutes(
         422,
         "META_OAUTH_ASSET_NOT_FOUND",
         "The selected asset is not part of this OAuth session",
+      );
+    }
+    // Hotfix R1: aset yang ditampilkan nonaktif di pemilih (Page tanpa
+    // Page Access Token yang dapat dipakai) ditolak eksplisit di sini
+    // juga — UI menonaktifkan tombolnya, tetapi API tidak bergantung
+    // pada UI untuk penjagaan ini. Sesi TIDAK dikonsumsi.
+    if (asset.connectable === false) {
+      return apiError(
+        c,
+        422,
+        "META_OAUTH_ASSET_NOT_CONNECTABLE",
+        "This Page was found but Meta did not provide a Page access token for it, so it cannot be connected",
       );
     }
     const provider = session.provider;
@@ -1135,7 +1177,10 @@ export function createMetaOAuthRoutes(
     );
 
     // Foto profil best-effort (pola 6D/7A/7B) — tidak menggagalkan.
-    scheduleOAuthAccountPhoto(bundle, opts, {
+    // Hotfix R1: DI-AWAIT (batas lunak) sebelum serialisasi, dengan
+    // permukaan per provider, agar respons complete langsung memuat
+    // avatarUrl akun baru.
+    await fetchOAuthAccountPhoto(bundle, opts, {
       tenantId: tenant.id,
       channelAccountId: row.id,
       provider,
@@ -1160,13 +1205,21 @@ export function createMetaOAuthRoutes(
   return app;
 }
 
+/** Batas lunak menunggu foto profil pada complete OAuth (Hotfix R1). */
+const OAUTH_PHOTO_SOFT_DEADLINE_MS = 6_000;
+
 /**
- * Ambil & simpan foto profil akun hasil OAuth (best-effort,
- * fire-and-forget — pola scheduleMetaAccountPhoto Fase 7A): Page/akun IG
- * lewat MetaGraphClient, bisnis WhatsApp lewat WhatsAppCloudClient.
- * Kegagalan foto tidak pernah menggagalkan koneksi.
+ * Ambil & simpan foto profil akun hasil OAuth (best-effort — pola
+ * pengambilan foto Fase 7A): Page/akun IG lewat MetaGraphClient
+ * dengan permukaan per provider (Hotfix R1: Page /picture, akun IG
+ * profile_picture_url — /picture tidak bekerja untuk akun IG),
+ * bisnis WhatsApp lewat WhatsAppCloudClient. Kini DI-AWAIT dengan
+ * batas lunak sebelum respons complete diserialkan, agar avatarUrl
+ * langsung termuat; lewat batas itu koneksi tetap selesai dan foto
+ * menyusul lewat backfill daftar channel. Kegagalan foto tidak
+ * pernah menggagalkan koneksi.
  */
-function scheduleOAuthAccountPhoto(
+async function fetchOAuthAccountPhoto(
   bundle: AuthBundle,
   opts: MetaOAuthModuleOptions,
   input: {
@@ -1176,8 +1229,8 @@ function scheduleOAuthAccountPhoto(
     externalId: string;
     accessToken: string;
   },
-): void {
-  void (async () => {
+): Promise<void> {
+  const work = (async () => {
     try {
       let picture: { data: Buffer; contentType: string } | null = null;
       if (input.provider === "whatsapp") {
@@ -1193,7 +1246,10 @@ function scheduleOAuthAccountPhoto(
           apiVersion: opts.graphApiVersion,
           accessToken: input.accessToken,
         });
-        picture = await client.getAccountPicture(input.externalId);
+        picture = await client.getChannelProfilePicture(
+          input.provider,
+          input.externalId,
+        );
       }
       if (!picture) return;
       await storeProfilePhoto(bundle.db, { tenantId: input.tenantId }, {
@@ -1208,4 +1264,10 @@ function scheduleOAuthAccountPhoto(
       );
     }
   })();
+  await Promise.race([
+    work,
+    new Promise<void>((resolve) =>
+      setTimeout(resolve, OAUTH_PHOTO_SOFT_DEADLINE_MS),
+    ),
+  ]);
 }

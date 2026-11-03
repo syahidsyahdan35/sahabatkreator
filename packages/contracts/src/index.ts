@@ -26,6 +26,10 @@ export const ErrorCodeSchema = z.enum([
   "META_OAUTH_STATE_INVALID",
   "META_OAUTH_SESSION_NOT_FOUND",
   "META_OAUTH_ASSET_NOT_FOUND",
+  // Hotfix R1: aset pemilih ditemukan tetapi tidak punya kredensial
+  // yang dapat dipakai (Page tanpa Page Access Token) → 422 saat
+  // complete dicoba untuk aset nonaktif itu.
+  "META_OAUTH_ASSET_NOT_CONNECTABLE",
   "META_OAUTH_EXCHANGE_FAILED",
   "META_OAUTH_CANCELLED",
   "CHANNEL_DELETE_CONFIRMATION_MISMATCH",
@@ -912,6 +916,16 @@ export type MetaOAuthInfoResponse = z.infer<typeof MetaOAuthInfoResponseSchema>;
  * Number ID). Untuk WhatsApp, `parentId`/`parentName` = WABA pemilik
  * nomor; untuk Instagram, `parentId` = client_business_id portfolio
  * klien; untuk Messenger selalu null dan `linkedIgUsername` hanya info.
+ *
+ * `connectable` (Hotfix R1): false bila aset DITEMUKAN tetapi tidak
+ * memiliki kredensial yang dapat dipakai untuk connect — saat ini
+ * hanya untuk Page Messenger yang terlihat lewat tepi bisnis
+ * (assigned/businesses) tetapi Page Access Token-nya tidak berhasil
+ * diisi dari Graph. Aset seperti itu TETAP ditampilkan di pemilih
+ * (ditandai nonaktif + `unavailableReason`), TIDAK hilang diam-diam;
+ * endpoint complete menolaknya dengan META_OAUTH_ASSET_NOT_CONNECTABLE.
+ * Aset lama di sesi yang tersimpan sebelum field ini ada terbaca
+ * connectable=true lewat default skema.
  */
 export const MetaOAuthAssetSchema = z.object({
   assetId: z.string(),
@@ -921,6 +935,11 @@ export const MetaOAuthAssetSchema = z.object({
   parentId: z.string().nullable(),
   parentName: z.string().nullable(),
   linkedIgUsername: z.string().nullable(),
+  connectable: z.boolean().default(true),
+  unavailableReason: z
+    .enum(["missing_page_token"])
+    .nullable()
+    .default(null),
 });
 export type MetaOAuthAsset = z.infer<typeof MetaOAuthAssetSchema>;
 

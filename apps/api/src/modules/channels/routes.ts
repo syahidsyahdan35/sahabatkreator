@@ -135,6 +135,29 @@ async function serializeChannelWithAvatar(
   );
 }
 
+/**
+ * Batas lunak menunggu pengambilan foto profil pada jalur connect
+ * (Hotfix R1): foto kini DI-AWAIT sebelum respons connect disusun agar
+ * avatarUrl langsung termuat (dulu fire-and-forget — avatar baru
+ * muncul sesudah refresh). Batas ini menjaga connect tidak menggantung
+ * pada Graph yang lambat: lewat 6 detik koneksi tetap selesai, dan
+ * foto yang terlambat tersimpan tetap muncul lewat backfill daftar
+ * channel. Pekerjaan foto sendiri menelan semua error-nya.
+ */
+const PHOTO_FETCH_SOFT_DEADLINE_MS = 6_000;
+
+async function awaitPhotoFetch(work: Promise<unknown>): Promise<void> {
+  await Promise.race([
+    work.then(
+      () => undefined,
+      () => undefined,
+    ),
+    new Promise<void>((resolve) =>
+      setTimeout(resolve, PHOTO_FETCH_SOFT_DEADLINE_MS),
+    ),
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // Backfill malas foto bot (Fase 6D)
 // ---------------------------------------------------------------------------
@@ -188,6 +211,75 @@ function scheduleBotPhotoBackfill(
     .finally(() => {
       botPhotoBackfillInFlight.delete(row.id);
     });
+}
+
+/**
+ * Backfill malas foto Meta (Hotfix R1) — pasangan scheduleBotPhotoBackfill
+ * untuk akun messenger/instagram. Akun yang terhubung SEBELUM permukaan
+ * foto provider-nya benar (khususnya IG: /picture tidak bekerja untuk
+ * akun IG — R1 mengambilnya lewat profile_picture_url) belum punya foto
+ * tersimpan. Saat daftar channel dibaca, akun Meta 'connected' tanpa
+ * foto memicu pengambilan async fire-and-forget memakai TOKEN
+ * TERSIMPAN akun itu sendiri — foto muncul sendiri di pembacaan
+ * berikutnya, TANPA reconnect. Penjaga per proses sama seperti
+ * backfill bot: dedup in-flight per akun + cache negatif 15 menit
+ * (akun memang tidak memasang foto / pengambilan gagal) agar Graph
+ * tidak dipanggil berulang; kegagalan diam (tidak merusak daftar).
+ */
+const metaPhotoBackfillInFlight = new Set<string>();
+const metaPhotoBackfillNegative = new Map<string, number>();
+
+function scheduleMetaPhotoBackfill(
+  bundle: AuthBundle,
+  opts: ChannelsModuleOptions,
+  row: ChannelAccount,
+): void {
+  if (row.provider !== "messenger" && row.provider !== "instagram") return;
+  if (row.status !== "connected") return;
+  if (!row.accessTokenEncrypted || !opts.channelTokenSecret) return;
+  if (metaPhotoBackfillInFlight.has(row.id)) return;
+  const lastNegative = metaPhotoBackfillNegative.get(row.id);
+  if (
+    lastNegative !== undefined &&
+    Date.now() - lastNegative < BOT_PHOTO_BACKFILL_NEGATIVE_TTL_MS
+  ) {
+    return;
+  }
+  const accessToken = decryptChannelSecret(
+    opts.channelTokenSecret,
+    row.accessTokenEncrypted,
+  );
+  if (!accessToken) return;
+  const provider = row.provider;
+  metaPhotoBackfillInFlight.add(row.id);
+  void (async () => {
+    try {
+      const client = new MetaGraphClient({
+        baseUrl: opts.metaApiBase,
+        apiVersion: META_GRAPH_API_VERSION,
+        accessToken,
+      });
+      const picture = await client.getChannelProfilePicture(
+        provider,
+        row.externalId,
+      );
+      if (!picture) {
+        metaPhotoBackfillNegative.set(row.id, Date.now());
+        return;
+      }
+      await storeProfilePhoto(bundle.db, { tenantId: row.tenantId }, {
+        ownerType: "channel_account",
+        ownerId: row.id,
+        contentType: picture.contentType,
+        data: picture.data,
+      });
+      metaPhotoBackfillNegative.delete(row.id);
+    } catch {
+      metaPhotoBackfillNegative.set(row.id, Date.now());
+    } finally {
+      metaPhotoBackfillInFlight.delete(row.id);
+    }
+  })();
 }
 
 /**
@@ -325,7 +417,9 @@ export function createChannelsRoutes(
     const rows = await listChannelAccounts(bundle.db, { tenantId: tenant.id });
     // Fase 6D: avatarUrl dari foto tersimpan; akun telegram connected
     // yang belum punya foto memicu backfill malas (fire-and-forget) —
-    // respons ini tetap menjawab tanpa menunggu Bot API.
+    // respons ini tetap menjawab tanpa menunggu Bot API. Hotfix R1:
+    // akun Meta (messenger/instagram) tanpa foto mendapat backfill
+    // yang sama, agar akun lama ikut beravatar tanpa reconnect.
     const withPhoto = await listProfilePhotoOwnerIds(
       bundle.db,
       { tenantId: tenant.id },
@@ -333,7 +427,9 @@ export function createChannelsRoutes(
       rows.map((r) => r.id),
     );
     for (const row of rows) {
-      if (!withPhoto.has(row.id)) scheduleBotPhotoBackfill(bundle, opts, row);
+      if (withPhoto.has(row.id)) continue;
+      scheduleBotPhotoBackfill(bundle, opts, row);
+      scheduleMetaPhotoBackfill(bundle, opts, row);
     }
     // Fase 7B.3: kesehatan operasional per akun — SATU peta agregat
     // untuk seluruh daftar (bukan kueri per kartu).
@@ -846,19 +942,22 @@ async function connectTelegram(
     );
   }
 
-  // Fase 6D: ambil foto profil bot (best-effort, fire-and-forget) —
-  // token mentah sedang di tangan; kegagalan foto tidak menggagalkan
-  // connect. Foto tampil di daftar channel pembacaan berikutnya.
-  void fetchAndStoreTelegramProfilePhoto(bundle.db, {
-    tenantId: input.tenantId,
-    botToken: input.botToken,
-    telegramApiBase: opts.telegramApiBase,
-    telegramUserId: identity.id,
-    ownerType: "channel_account",
-    ownerId: row.id,
-  });
+  // Fase 6D: ambil foto profil bot (best-effort) — token mentah sedang
+  // di tangan; kegagalan foto tidak menggagalkan connect. Hotfix R1:
+  // pengambilan kini DI-AWAIT (batas lunak) dan respons diserialkan
+  // dengan avatar, jadi foto langsung tampil tanpa refresh.
+  await awaitPhotoFetch(
+    fetchAndStoreTelegramProfilePhoto(bundle.db, {
+      tenantId: input.tenantId,
+      botToken: input.botToken,
+      telegramApiBase: opts.telegramApiBase,
+      telegramUserId: identity.id,
+      ownerType: "channel_account",
+      ownerId: row.id,
+    }),
+  );
 
-  return c.json(await serializeChannelWithHealth(bundle, row), 201);
+  return c.json(await serializeChannelWithAvatar(bundle, row), 201);
 }
 
 /**
@@ -923,18 +1022,21 @@ async function reviveTelegramAccount(
     );
   }
 
-  // Fase 6D: connect ulang = foto bot di-refresh (best-effort,
-  // fire-and-forget, pola yang sama seperti connect baru).
-  void fetchAndStoreTelegramProfilePhoto(bundle.db, {
-    tenantId: input.tenantId,
-    botToken: input.botToken,
-    telegramApiBase: opts.telegramApiBase,
-    telegramUserId: input.botUserId,
-    ownerType: "channel_account",
-    ownerId: updated.id,
-  });
+  // Fase 6D: connect ulang = foto bot di-refresh (best-effort).
+  // Hotfix R1: di-await (batas lunak) + respons membawa avatarUrl,
+  // pola yang sama seperti connect baru.
+  await awaitPhotoFetch(
+    fetchAndStoreTelegramProfilePhoto(bundle.db, {
+      tenantId: input.tenantId,
+      botToken: input.botToken,
+      telegramApiBase: opts.telegramApiBase,
+      telegramUserId: input.botUserId,
+      ownerType: "channel_account",
+      ownerId: updated.id,
+    }),
+  );
 
-  return c.json(await serializeChannelWithHealth(bundle, updated), 200);
+  return c.json(await serializeChannelWithAvatar(bundle, updated), 200);
 }
 
 /**
@@ -955,8 +1057,9 @@ async function reviveTelegramAccount(
  *    (username) disimpan; token TERENKRIPSI (AES-256-GCM). Tidak ada
  *    pendaftaran webhook per akun — webhook Meta adalah milik platform
  *    (satu URL untuk semua akun, dipasang sekali di Meta App).
- * 4. Foto profil Page/akun IG diambil & disimpan (pola 6D,
- *    fire-and-forget).
+ * 4. Foto profil Page/akun IG diambil & disimpan (pola 6D; Hotfix R1:
+ *    di-await berbatas lunak + permukaan per provider — Page /picture,
+ *    IG profile_picture_url — dan respons membawanya sebagai avatarUrl).
  *
  * Varian System User Token untuk Instagram (Fase 7D.3,
  * `tokenType: "system_user_token"`): OAuth Unified Login tidak bisa
@@ -1086,7 +1189,9 @@ async function connectMeta(
     row: ChannelAccount,
     status: 200 | 201,
   ) => {
-    const serialized = await serializeChannelWithHealth(bundle, row);
+    // Hotfix R1: serialkan DENGAN avatar — foto sudah di-await sebelum
+    // titik ini, jadi respons connect langsung memuat avatarUrl.
+    const serialized = await serializeChannelWithAvatar(bundle, row);
     if (!isSuat) return c.json(serialized, status);
     const warnings: Array<"META_SUBSCRIBE_FAILED"> = [];
     try {
@@ -1155,7 +1260,14 @@ async function connectMeta(
     if (!updated) {
       return apiError(c, 404, "NOT_FOUND", "Channel not found");
     }
-    scheduleMetaAccountPhoto(bundle, client, input.tenantId, updated.id, accountExternalId);
+    await fetchAndStoreMetaAccountPhoto(
+      bundle,
+      client,
+      input.provider,
+      input.tenantId,
+      updated.id,
+      accountExternalId,
+    );
     return finishSavedConnect(updated, 200);
   }
 
@@ -1216,26 +1328,43 @@ async function connectMeta(
     );
   }
 
-  scheduleMetaAccountPhoto(bundle, client, input.tenantId, row.id, accountExternalId);
+  await fetchAndStoreMetaAccountPhoto(
+    bundle,
+    client,
+    input.provider,
+    input.tenantId,
+    row.id,
+    accountExternalId,
+  );
   return finishSavedConnect(row, 201);
 }
 
 /**
  * Ambil & simpan foto profil Page/akun IG sesudah connect (Fase 7A,
- * pola 6D): best-effort fire-and-forget memakai token yang sedang di
- * tangan — kegagalan foto tidak pernah menggagalkan connect. Byte
- * disimpan ke `profile_photos`; URL CDN Graph tidak diedarkan ke klien.
+ * pola 6D; Hotfix R1): memakai token yang sedang di tangan dan kini
+ * DI-AWAIT (dengan batas lunak `awaitPhotoFetch`) sebelum respons
+ * connect disusun — avatarUrl langsung termuat di respons, bukan
+ * muncul sesudah refresh. Permukaan per provider dipilih klien
+ * (Page: tepi /picture; akun IG: field profile_picture_url — /picture
+ * TIDAK bekerja untuk akun IG, itulah sebab foto IG tidak pernah
+ * tersimpan sebelum R1). Kegagalan foto tidak pernah menggagalkan
+ * connect. Byte disimpan ke `profile_photos`; URL CDN Graph tidak
+ * diedarkan ke klien.
  */
-function scheduleMetaAccountPhoto(
+async function fetchAndStoreMetaAccountPhoto(
   bundle: AuthBundle,
   client: MetaGraphClient,
+  provider: MetaProvider,
   tenantId: string,
   channelAccountId: string,
   accountExternalId: string,
-): void {
-  void (async () => {
+): Promise<void> {
+  const work = (async () => {
     try {
-      const picture = await client.getAccountPicture(accountExternalId);
+      const picture = await client.getChannelProfilePicture(
+        provider,
+        accountExternalId,
+      );
       if (!picture) return;
       await storeProfilePhoto(bundle.db, { tenantId }, {
         ownerType: "channel_account",
@@ -1249,6 +1378,7 @@ function scheduleMetaAccountPhoto(
       );
     }
   })();
+  await awaitPhotoFetch(work);
 }
 
 /**
@@ -1371,8 +1501,16 @@ async function connectWhatsApp(
     if (!updated) {
       return apiError(c, 404, "NOT_FOUND", "Channel not found");
     }
-    scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, updated.id, input.phoneNumberId);
-    return c.json(await serializeChannelWithHealth(bundle, updated), 200);
+    await awaitPhotoFetch(
+      fetchAndStoreWhatsAppAccountPhoto(
+        bundle,
+        client,
+        input.tenantId,
+        updated.id,
+        input.phoneNumberId,
+      ),
+    );
+    return c.json(await serializeChannelWithAvatar(bundle, updated), 200);
   }
 
   let row: ChannelAccount;
@@ -1429,37 +1567,46 @@ async function connectWhatsApp(
     );
   }
 
-  scheduleWhatsAppAccountPhoto(bundle, client, input.tenantId, row.id, input.phoneNumberId);
-  return c.json(await serializeChannelWithHealth(bundle, row), 201);
+  await awaitPhotoFetch(
+    fetchAndStoreWhatsAppAccountPhoto(
+      bundle,
+      client,
+      input.tenantId,
+      row.id,
+      input.phoneNumberId,
+    ),
+  );
+  return c.json(await serializeChannelWithAvatar(bundle, row), 201);
 }
 
 /**
  * Ambil & simpan foto profil bisnis WhatsApp sesudah connect (Fase 7B,
- * pola 6D/7A): best-effort fire-and-forget — klien mengembalikan null
- * untuk profil kosong/field tak tersedia, jadi ketiadaan foto tidak
- * pernah menggagalkan connect; kartu menampilkan inisial.
+ * pola 6D/7A; Hotfix R1): foto profil bisnis MEMANG tersedia lewat
+ * Cloud API (`whatsapp_business_profile.profile_picture_url`) dan
+ * klien mengembalikan null untuk profil kosong/field tak tersedia,
+ * jadi ketiadaan foto tidak pernah menggagalkan connect; kartu
+ * menampilkan inisial. Kini di-await (batas lunak) agar respons
+ * connect langsung memuat avatarUrl seperti provider lain.
  */
-function scheduleWhatsAppAccountPhoto(
+async function fetchAndStoreWhatsAppAccountPhoto(
   bundle: AuthBundle,
   client: WhatsAppCloudClient,
   tenantId: string,
   channelAccountId: string,
   phoneNumberId: string,
-): void {
-  void (async () => {
-    try {
-      const picture = await client.getBusinessProfilePicture(phoneNumberId);
-      if (!picture) return;
-      await storeProfilePhoto(bundle.db, { tenantId }, {
-        ownerType: "channel_account",
-        ownerId: channelAccountId,
-        contentType: picture.contentType,
-        data: picture.data,
-      });
-    } catch {
-      console.error(
-        `[whatsapp] pengambilan foto profil bisnis akun ${channelAccountId} gagal`,
-      );
-    }
-  })();
+): Promise<void> {
+  try {
+    const picture = await client.getBusinessProfilePicture(phoneNumberId);
+    if (!picture) return;
+    await storeProfilePhoto(bundle.db, { tenantId }, {
+      ownerType: "channel_account",
+      ownerId: channelAccountId,
+      contentType: picture.contentType,
+      data: picture.data,
+    });
+  } catch {
+    console.error(
+      `[whatsapp] pengambilan foto profil bisnis akun ${channelAccountId} gagal`,
+    );
+  }
 }
