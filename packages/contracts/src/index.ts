@@ -4906,13 +4906,14 @@ export type ListAppointmentsQuery = V1ListAppointmentsQuery;
 // Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
 // packages/contracts adalah sumber kebenaran tunggal; setiap kemampuan
 // yang masuk permukaan publik WAJIB punya pemetaan kontrak → API v1 →
-// SDK → MCP dalam fase yang sama. PUBLIC_V1_SURFACE di bawah adalah
-// registry pemetaan itu — satu entri per rute publik. Skrip
-// `check:drift` (packages/sdk/scripts/check-drift.ts, jalankan
-// `pnpm check:drift`) memeriksa registry ini terhadap implementasi
-// nyata (rute di modul public-v1, metode SDK, tool MCP) dan GAGAL
-// bila ada rute publik tanpa pemetaan atau pemetaan yang menunjuk
-// nama yang tidak ada. Matriks cakupan lengkap (termasuk permukaan
+// SDK → MCP → CLI dalam fase yang sama (CLI bergabung Fase 14D).
+// PUBLIC_V1_SURFACE di bawah adalah registry pemetaan itu — satu
+// entri per rute publik. Skrip `check:drift`
+// (packages/sdk/scripts/check-drift.ts, jalankan `pnpm check:drift`)
+// memeriksa registry ini terhadap implementasi nyata (rute di modul
+// public-v1, metode SDK, tool MCP, perintah CLI) dan GAGAL bila ada
+// rute publik tanpa pemetaan atau pemetaan yang menunjuk nama yang
+// tidak ada. Matriks cakupan lengkap (termasuk permukaan
 // dashboard-only yang disengaja) hidup di docs/COVERAGE-MATRIX.md.
 //
 // Seksi ini sengaja di AKHIR file: skema query broadcast/flow merujuk
@@ -4958,6 +4959,11 @@ export type PublicSurfaceMcpTier = "read" | "write";
  *   bila disengaja dan `exclusionReason` terisi.
  * - `mcpTool`/`mcpTier`: nama tool MCP + tiernya; null hanya bila
  *   disengaja dan `exclusionReason` terisi.
+ * - `cliCommand`: nama perintah CLI `sk` (Fase 14D) — mis.
+ *   "contacts list". TIDAK PERNAH null: permukaan klien keempat ini
+ *   menjangkau setiap rute publik; perintahnya hidup di tabel perintah
+ *   apps/cli dan dicocokkan check:drift dua arah, persis seperti
+ *   metode SDK dan tool MCP.
  */
 export interface PublicV1RouteMapping {
   method: "GET" | "POST" | "PATCH" | "DELETE";
@@ -4967,6 +4973,7 @@ export interface PublicV1RouteMapping {
   sdkMethod: string | null;
   mcpTool: string | null;
   mcpTier: PublicSurfaceMcpTier | null;
+  cliCommand: string;
   exclusionReason?: string;
 }
 
@@ -4984,6 +4991,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "me",
     mcpTool: "whoami",
     mcpTier: "read",
+    cliCommand: "whoami",
   },
   {
     method: "GET",
@@ -4993,6 +5001,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listContacts",
     mcpTool: "list_contacts",
     mcpTier: "read",
+    cliCommand: "contacts list",
   },
   {
     method: "POST",
@@ -5002,6 +5011,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "createContact",
     mcpTool: "create_contact",
     mcpTier: "write",
+    cliCommand: "contacts create",
   },
   {
     method: "PATCH",
@@ -5011,6 +5021,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "updateContact",
     mcpTool: "update_contact",
     mcpTier: "write",
+    cliCommand: "contacts update",
   },
   {
     method: "GET",
@@ -5023,6 +5034,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listConversations",
     mcpTool: "list_conversations",
     mcpTier: "read",
+    cliCommand: "conversations list",
   },
   {
     method: "GET",
@@ -5032,6 +5044,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listMessages",
     mcpTool: "list_messages",
     mcpTier: "read",
+    cliCommand: "messages list",
   },
   {
     method: "POST",
@@ -5041,6 +5054,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "sendMessage",
     mcpTool: "send_message",
     mcpTier: "write",
+    cliCommand: "messages send",
   },
   {
     method: "GET",
@@ -5050,6 +5064,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listProducts",
     mcpTool: "list_products",
     mcpTier: "read",
+    cliCommand: "products list",
   },
   {
     method: "GET",
@@ -5059,6 +5074,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listComments",
     mcpTool: "list_comments",
     mcpTier: "read",
+    cliCommand: "comments list",
   },
   {
     method: "POST",
@@ -5068,6 +5084,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "hideComment",
     mcpTool: "hide_comment",
     mcpTier: "write",
+    cliCommand: "comments hide",
   },
   {
     method: "POST",
@@ -5077,6 +5094,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "unhideComment",
     mcpTool: "unhide_comment",
     mcpTier: "write",
+    cliCommand: "comments unhide",
   },
   // --- Fase 15A: permukaan BACA baru (sebelumnya dashboard-only) -------
   {
@@ -5087,6 +5105,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listBroadcasts",
     mcpTool: "list_broadcasts",
     mcpTier: "read",
+    cliCommand: "broadcasts list",
   },
   {
     method: "GET",
@@ -5096,6 +5115,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getBroadcast",
     mcpTool: "get_broadcast",
     mcpTier: "read",
+    cliCommand: "broadcasts get",
   },
   {
     method: "GET",
@@ -5105,6 +5125,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listFlows",
     mcpTool: "list_flows",
     mcpTier: "read",
+    cliCommand: "flows list",
   },
   {
     method: "GET",
@@ -5114,6 +5135,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getFlow",
     mcpTool: "get_flow",
     mcpTier: "read",
+    cliCommand: "flows get",
   },
   {
     method: "GET",
@@ -5123,6 +5145,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listFlowTemplates",
     mcpTool: "list_flow_templates",
     mcpTier: "read",
+    cliCommand: "flow-templates list",
   },
   {
     method: "GET",
@@ -5132,6 +5155,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listAutomations",
     mcpTool: "list_automations",
     mcpTier: "read",
+    cliCommand: "automations list",
   },
   {
     method: "GET",
@@ -5141,6 +5165,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getAutomation",
     mcpTool: "get_automation",
     mcpTier: "read",
+    cliCommand: "automations get",
   },
   {
     method: "GET",
@@ -5150,6 +5175,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listAgents",
     mcpTool: "list_agents",
     mcpTier: "read",
+    cliCommand: "agents list",
   },
   {
     method: "GET",
@@ -5159,6 +5185,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getAgent",
     mcpTool: "get_agent",
     mcpTier: "read",
+    cliCommand: "agents get",
   },
   {
     method: "GET",
@@ -5168,6 +5195,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listChannels",
     mcpTool: "list_channels",
     mcpTier: "read",
+    cliCommand: "channels list",
   },
   {
     method: "GET",
@@ -5177,6 +5205,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getChannel",
     mcpTool: "get_channel",
     mcpTier: "read",
+    cliCommand: "channels get",
   },
   {
     method: "GET",
@@ -5189,6 +5218,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listWhatsAppTemplates",
     mcpTool: "list_whatsapp_templates",
     mcpTier: "read",
+    cliCommand: "whatsapp-templates list",
   },
   {
     method: "GET",
@@ -5198,6 +5228,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listKnowledgeDocuments",
     mcpTool: "list_knowledge_documents",
     mcpTier: "read",
+    cliCommand: "kb list",
   },
   {
     method: "GET",
@@ -5207,6 +5238,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getKnowledgeDocument",
     mcpTool: "get_knowledge_document",
     mcpTier: "read",
+    cliCommand: "kb get",
   },
   {
     method: "GET",
@@ -5216,6 +5248,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getKnowledgeStats",
     mcpTool: "get_knowledge_stats",
     mcpTier: "read",
+    cliCommand: "kb stats",
   },
   // --- Fase 13B: growth links — permukaan BACA (tulis dashboard-only) --
   {
@@ -5226,6 +5259,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listGrowthLinks",
     mcpTool: "list_growth_links",
     mcpTier: "read",
+    cliCommand: "growth-links list",
   },
   {
     method: "GET",
@@ -5235,6 +5269,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getGrowthLink",
     mcpTool: "get_growth_link",
     mcpTier: "read",
+    cliCommand: "growth-links get",
   },
   // --- Fase 13C: segmen — permukaan BACA (tulis dashboard-only) --
   {
@@ -5245,6 +5280,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listSegments",
     mcpTool: "list_segments",
     mcpTier: "read",
+    cliCommand: "segments list",
   },
   {
     method: "GET",
@@ -5254,6 +5290,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getSegment",
     mcpTool: "get_segment",
     mcpTier: "read",
+    cliCommand: "segments get",
   },
   // --- Fase 13F: order — permukaan BACA (keranjang internal) --------
   {
@@ -5264,6 +5301,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listOrders",
     mcpTool: "list_orders",
     mcpTier: "read",
+    cliCommand: "orders list",
   },
   {
     method: "GET",
@@ -5273,6 +5311,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "getOrder",
     mcpTool: "get_order",
     mcpTier: "read",
+    cliCommand: "orders get",
   },
   {
     method: "GET",
@@ -5282,6 +5321,7 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listAppointments",
     mcpTool: "list_appointments",
     mcpTier: "read",
+    cliCommand: "appointments list",
   },
   {
     method: "GET",
@@ -5291,5 +5331,6 @@ export const PUBLIC_V1_SURFACE: readonly PublicV1RouteMapping[] = [
     sdkMethod: "listAppointmentServices",
     mcpTool: "list_appointment_services",
     mcpTier: "read",
+    cliCommand: "appointments services",
   },
 ];

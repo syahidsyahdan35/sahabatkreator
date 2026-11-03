@@ -13,7 +13,8 @@ Aturan sinkronisasi kontrak (keputusan user 2026-11-02 22:10):
 > yang menambah/mengubah kemampuan WAJIB memperbarui — dalam fase yang
 > sama — kontrak, permukaan API publik v1 tempat kemampuan itu berada,
 > SDK, dan tool MCP (terklasifikasi baca/tulis per tiering Fase 9B).
-> CLI bergabung begitu Fase 14D lahir. Pengecualian yang disengaja
+> CLI bergabung begitu Fase 14D lahir (SUDAH — lihat Pembaruan
+> Fase 14D di akhir dokumen). Pengecualian yang disengaja
 > WAJIB dinyatakan eksplisit — diam bukan keputusan.
 
 Konsekuensi praktis untuk setiap fase berikutnya:
@@ -21,11 +22,13 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 1. Tambah/ubah skema di `packages/contracts` lebih dulu.
 2. Bila kemampuan masuk permukaan publik: tambah rute di
    `apps/api/src/modules/public-v1`, metode di `packages/sdk`, tool
-   di `apps/mcp-server`, DAN entri di registry `PUBLIC_V1_SURFACE`
-   (di `packages/contracts/src/index.ts`) — semuanya satu fase.
+   di `apps/mcp-server`, perintah di `apps/cli`, DAN entri di
+   registry `PUBLIC_V1_SURFACE` (di
+   `packages/contracts/src/index.ts`, kini termasuk `cliCommand`)
+   — semuanya satu fase.
 3. Jalankan `pnpm check:drift` — ia gagal bila ada rute publik tanpa
-   pemetaan SDK/MCP, pemetaan yang menunjuk nama yang tidak ada, atau
-   tier MCP yang tidak cocok dengan gerbang `MCP_ALLOW_WRITES`.
+   pemetaan SDK/MCP/CLI, pemetaan yang menunjuk nama yang tidak ada,
+   atau tier MCP yang tidak cocok dengan gerbang `MCP_ALLOW_WRITES`.
    Langkah ini bagian dari gerbang smoke test (lihat
    `docs/DEPLOY-STAGING.md`).
 4. Bila suatu permukaan disengaja dikecualikan, tulis keputusannya di
@@ -39,11 +42,13 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 - Scope disebut untuk API v1; tier disebut untuk MCP
   (baca = selalu jalan; tulis = butuh `MCP_ALLOW_WRITES=1` di atas
   scope kunci).
-- Kolom CLI adalah SPESIFIKASI nama perintah (implementasi Fase 14D).
+- Kolom CLI memuat perintah `sk` NYATA sejak Fase 14D (sebelumnya
+  spesifikasi nama); nama yang ditandai "(kandidat)"/"ditahan" memang
+  SENGAJA tidak diimplementasikan — alasannya di kolom Catatan.
 
 ## Matriks
 
-| Kemampuan | Kontrak | API dashboard | API v1 (scope) | SDK | MCP (tier) | CLI (rencana) | Catatan / keputusan |
+| Kemampuan | Kontrak | API dashboard | API v1 (scope) | SDK | MCP (tier) | CLI | Catatan / keputusan |
 |---|---|---|---|---|---|---|---|
 | Identitas tenant (`me`) | Ada | — (sesi) | Ada — `GET /v1/me` (kunci sah apa pun) | `me()` | `whoami` (baca) | `sk whoami` | Jangkar autentikasi semua permukaan mesin. |
 | Kontak — daftar & cari | Ada | Ada | Ada — `GET /v1/contacts` (`contacts:read`) | `listContacts()` | `list_contacts` (baca) | `sk contacts list` | |
@@ -62,14 +67,14 @@ Konsekuensi praktis untuk setiap fase berikutnya:
 | Order — daftar & detail (Fase 13F) | Ada | Ada | **Ada (baru 13F)** — `GET /v1/orders`, `GET /v1/orders/:id` (`orders:read`) | `listOrders()` / `getOrder()` | `list_orders` / `get_order` (baca) | `sk orders list` / `sk orders get` | Order lahir dari checkout flow (node `cart_checkout`): baris item adalah SNAPSHOT nama+harga saat checkout, total dihitung server dari snapshot keranjang, dan status order MENGIKUTI tautan bayarnya (pending → paid/expired/cancelled; hook sinkron idempoten di titik penyelesaian pembayaran yang sama dengan tautan produk tunggal). Serializer bersama dashboard + v1 persis sama. Sejak Fase 14A tautan order bisa ber-provider Midtrans/Xendit (sesi disiapkan sebelum transaksi checkout) dan penyelesaian webhook membalik order lewat hook yang sama. |
 | Keranjang belanja (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) — tanpa rute v1/SDK/MCP | — | — | — | Keranjang adalah KEADAAN SESI efemeral per kontak di dalam percakapan: diisi node flow `show_catalog` (parkir pilihan, pola mesin parkir yang sama dengan questionnaire), dikonsumsi `cart_checkout`, dan tidak punya siklus hidup integrasi sendiri — mengeksposnya akan membekukan bentuk sesi internal menjadi kontrak publik. Yang terekspos adalah HASILNYA yang stabil: order (baris di atas) + tautan bayarnya. Inspeksi keranjang dari detail kontak disengaja tidak dibuat fase ini (bukan permukaan operator yang diminta; isi keranjang terlihat dari ringkasan chat itu sendiri). |
 | Flow — node show_catalog & cart_checkout (Fase 13F) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Kedua node adalah bagian dari GRAF flow (pola yang sama dengan questionnaire 13E): config-nya (`introText?`, `showDescription`, tenggat per parkir, `maxInvalidAttempts`, `invalidPrompt?`, `addedMessage?` untuk katalog; `emptyMessage?` untuk checkout) hidup di dalam graf yang sudah terbaca v1 lewat baris "Flow — daftar & detail" — BUKAN permukaan baru. Balasan pilihan katalog memakai mesin parkir `wait_reply` yang sama dan TIDAK bocor ke agent (gerbang worker menghitung `flowCatalogResumed`). Agent mendapat akses BACA katalog lewat konteks prompt (daftar produk aktif di prompt sistem — runtime agent berjalan satu completion tanpa putaran hasil-tool, jadi tool baca tidak akan pernah dilihat model); tulis keranjang/checkout tetap eksklusif flow. |
-| Booking janji temu — daftar (Fase 13G) | Ada | Ada | **Ada (baru 13G)** — `GET /v1/appointments` (filter from/to/status), `GET /v1/appointment-services` (`appointments:read`) | `listAppointments()` / `listAppointmentServices()` | `list_appointments` / `list_appointment_services` (baca) | `sk appointments list` | Booking lahir dari DUA jalur tulis saja (node flow `book_appointment` + pembuatan manual dashboard) dan keduanya memakai fungsi inti yang sama (`createBooking`) — permukaan publik SENGAJA baca-saja: janji temu adalah hasil percakapan/keputusan operator, bukan artefak yang dibuat integrasi eksternal; yang dibutuhkan integrasi adalah MEMBACA jadwal (sinkron kalender eksternal, pengingat, laporan). Serializer bersama dashboard + v1 persis sama. Anti-double-booking ditegakkan DI DATA: constraint eksklusi GiST atas rentang tstzrange booking `confirmed` per tenant (batal membebaskan rentang). |
+| Booking janji temu — daftar (Fase 13G) | Ada | Ada | **Ada (baru 13G)** — `GET /v1/appointments` (filter from/to/status), `GET /v1/appointment-services` (`appointments:read`) | `listAppointments()` / `listAppointmentServices()` | `list_appointments` / `list_appointment_services` (baca) | `sk appointments list` / `sk appointments services` | Booking lahir dari DUA jalur tulis saja (node flow `book_appointment` + pembuatan manual dashboard) dan keduanya memakai fungsi inti yang sama (`createBooking`) — permukaan publik SENGAJA baca-saja: janji temu adalah hasil percakapan/keputusan operator, bukan artefak yang dibuat integrasi eksternal; yang dibutuhkan integrasi adalah MEMBACA jadwal (sinkron kalender eksternal, pengingat, laporan). Serializer bersama dashboard + v1 persis sama. Anti-double-booking ditegakkan DI DATA: constraint eksklusi GiST atas rentang tstzrange booking `confirmed` per tenant (batal membebaskan rentang). |
 | Layanan janji, ketersediaan mingguan, mutasi booking (Fase 13G) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Layanan (nama/durasi/deskripsi/aktif), jadwal ketersediaan mingguan + zona waktu janji + lead time minimum, pembuatan manual, dan pembatalan adalah konfigurasi & aksi operator di halaman Appointments — pola yang sama dengan segmen/broadcast tulis (13C): artefak kurasi UI, bukan permukaan mesin. Slot yang bisa dipesan dihitung SATU fungsi inti (`getBookableSlots`) untuk dashboard maupun chat: jendela mingguan ∩ masa depan+lead time − booking confirmed − busy Google (bila terhubung), semua matematika di zona waktu janji tenant. |
 | Flow — node book_appointment (Fase 13G) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Bagian dari GRAF flow (pola 13E/13F): config (`serviceId`, `daysAhead`, `slotsPerMessage`, tenggat, `maxInvalidAttempts`, `invalidPrompt?`, `bookedMessage?`) hidup di graf yang terbaca v1 lewat baris flow — BUKAN permukaan baru. Daftar slot bernomor (tanggal+jam dwibahasa di zona tenant) diparkir di mesin `wait_reply`; pilihan sah → booking (transaksi sendiri, pola dashboard) → branch `booked`; pilihan atas slot yang keburu diambil → pemberitahuan + daftar SEGAR ditawarkan ulang (parkir lagi, attempts tidak bertambah), dan branch `slot_taken` hanya bila daftar segar kosong; branch `invalid`/`timeout` seperti node parkir lain. Balasan parkir TIDAK bocor ke agent (gerbang `flowAppointmentResumed`). Pembatalan lewat CHAT sengaja TIDAK dibangun v1: pembatalan adalah aksi dashboard — mendesain jalur chat (pilih booking mana dari daftar, konfirmasi) adalah mesin percakapan baru yang tidak diminta; kontak yang membatalkan lewat chat ditangani operator/agent seperti percakapan biasa. |
 | Koneksi Google Calendar tenant (Fase 13G) | Ada | Ada | Dashboard-only (sengaja) | — | — | — | OAuth per tenant dari halaman Appointments memakai klien OAuth PLATFORM (Panel Admin: `google_oauth_client_id` publik + `google_oauth_client_secret` rahasia; pola resolver & kejujuran 11B — tanpa klien platform, connect menjawab 422 `GOOGLE_NOT_CONFIGURED`, bukan tombol mati). Token tenant terenkripsi envelope yang sama dengan kredensial channel. Sinkronisasi adalah PENINGKATAN, bukan syarat: booking selalu berhasil internal; buat/hapus event Google berjalan via outbox (`appointment.google_sync`) dan kegagalannya tercatat di booking (`googleSyncStatus`/`googleSyncError`) TANPA pernah menggagalkan booking. Freebusy Google memotong slot di mesin slot yang sama. Bukti live menunggu klien OAuth Google Cloud milik user (project + Calendar API + consent screen + redirect URI `https://botara.my.id/api/google/oauth/callback`). |
 | Komentar IG/Messenger — daftar | Ada | Ada | Ada — `GET /v1/comments` (`comments:read`) | `listComments()` | `list_comments` (baca) | `sk comments list` | Sejak Fase 10B. |
 | Komentar — sembunyikan/tampilkan | Ada | Ada | Ada — `POST /v1/comments/:id/hide\|unhide` (`comments:write`) | `hideComment()` / `unhideComment()` | `hide_comment` / `unhide_comment` (tulis) | `sk comments hide` / `sk comments unhide` | Helper moderasi yang sama dengan dashboard: Graph dulu, lokal sesudahnya. |
 | Broadcast — daftar & detail + statistik | Ada | Ada | **Ada (baru 15A)** — `GET /v1/broadcasts`, `GET /v1/broadcasts/:id` (`broadcasts:read`) | `listBroadcasts()` / `getBroadcast()` | `list_broadcasts` / `get_broadcast` (baca) | `sk broadcasts list` / `sk broadcasts get` | Paginasi kursor sama seperti dashboard. |
-| Broadcast — buat/edit/jadwal/kirim/batal | Ada | Ada | Dashboard-only (sengaja) | — | — | `sk broadcasts send` ditahan | Radius ledak: pengiriman massal tetap tidak boleh terpicu API key. Mesin opt-in + segmentasi Fase 13C SUDAH ada dan ditegakkan di alur dashboard (gerbang `require_opt_in`, template, 24 jam); keputusan dashboard-only dipertahankan karena pengiriman massal adalah aksi operator bervolume. |
+| Broadcast — buat/edit/jadwal/kirim/batal | Ada | Ada | Dashboard-only (sengaja) | — | — | `sk broadcasts send` TIDAK dibuat (sengaja) | Radius ledak: pengiriman massal tetap tidak boleh terpicu API key. Mesin opt-in + segmentasi Fase 13C SUDAH ada dan ditegakkan di alur dashboard (gerbang `require_opt_in`, template, 24 jam); keputusan dashboard-only dipertahankan karena pengiriman massal adalah aksi operator bervolume. |
 | Broadcast — gerbang opt-in & pratinjau audiens | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Fase 13C: kolom `require_opt_in` (bawaan true untuk WhatsApp, selain itu false; dapat diubah selama draft) + endpoint pratinjau `GET /broadcasts/audience-preview` yang memakai fungsi klasifikasi inti yang SAMA dengan materialisasi penerima saat dispatch — satu logika, tanpa duplikasi. Alasan skip baru: `not_opted_in`. |
 | Segmen kontak — daftar & detail | Ada | Ada | **Ada (baru 13C)** — `GET /v1/segments`, `GET /v1/segments/:id` (`segments:read`) | `listSegments()` / `getSegment()` | `list_segments` / `get_segment` (baca) | `sk segments list` / `sk segments get` | Evaluator SATU di core dipakai daftar kontak, pratinjau broadcast, dan materialisasi dispatch. Hitungan anggota tidak disimpan di respons — permukaan hitungan adalah pratinjau (dashboard). |
 | Segmen kontak — buat/edit/hapus | Ada | Ada | Dashboard-only (sengaja) | — | — | — | Segmen adalah artefak kurasi UI (pembuat kondisi visual + definisi kompleks); tulis dibatasi sesi dashboard owner/admin (keputusan Fase 13C). |
@@ -243,4 +248,48 @@ Konsekuensi praktis untuk setiap fase berikutnya:
   didaftarkan di dashboard provider); seluruh rantai fase ini
   dibuktikan terhadap server mock provider.
 - `pnpm check:drift` lulus (34 rute, tanpa perubahan permukaan).
+
+## Pembaruan Fase 14D (2026-11-03) — CLI `sk` di atas API Publik
+
+- **34 rute** API publik v1 — TIDAK berubah: tidak ada rute, scope,
+  metode SDK, atau tool MCP baru. Yang lahir adalah permukaan klien
+  KEEMPAT: **34 perintah CLI** di `apps/cli` (bin `sk`), satu perintah
+  per rute, masing-masing memanggil tepat satu metode
+  `@sahabat-kreator/sdk` — adapter tipis sesuai janji arsitektur v3,
+  bukan klien HTTP kedua.
+- **Aturan sinkronisasi kontrak DITUNTASKAN**: registry
+  `PUBLIC_V1_SURFACE` kini membawa `cliCommand` per rute (tidak
+  pernah null), dan `pnpm check:drift` diperluas (seksi 6):
+  perintah registry harus ada di tabel perintah `apps/cli` dengan
+  metode SDK yang sama, dan setiap perintah CLI harus terpetakan —
+  dua arah, terbukti GAGAL saat pemetaan sengaja dirusak dua arah.
+  Penjaga kini mencakup kontrak × API v1 × SDK × MCP × CLI.
+- **Konfigurasi**: kunci hanya dari env `SK_API_KEY` (menang) atau
+  berkas `~/.config/sahabat-kreator/config.json` — TIDAK PERNAH lewat
+  flag dan tidak pernah dicetak utuh (`sk whoami` menampilkan sidik
+  jari tersamar + tenant + scope kunci dari `GET /v1/me`). Base URL:
+  `--base-url` > `SK_BASE_URL` > berkas > bawaan
+  `https://botara.my.id` (bawaan yang sama dengan server MCP; SDK
+  sendiri mewajibkan baseUrl eksplisit).
+- **Parser argumen ditulis tangan** (kecil & ketat): satu-satunya
+  kandidat di pohon dependensi adalah commander@4/yargs@15 sebagai
+  dependensi transitif tua milik perangkat build — bukan pilihan
+  runtime yang sehat untuk artefak klien ramping. Flag asing, nilai
+  hilang, dan posisi berlebih DITOLAK (exit 2).
+- **Tulis & pengaman**: lima perintah tulis publik (kontak
+  buat/ubah, kirim pesan, sembunyikan/tampilkan komentar) memanggil
+  rute tulis yang sama dengan SDK/MCP. API v1 tidak punya rute
+  destruktif (tanpa DELETE), jadi TIDAK ada gerbang `--yes` — tidak
+  ada yang bisa dihapus lewat permukaan ini.
+- **Yang SENGAJA tidak dibuat** (keputusan lama dipertahankan, kini
+  eksplisit sebagai non-implementasi): `sk broadcasts send`
+  (pengiriman massal tetap tidak boleh terpicu API key — baris
+  matriks di atas), dan kandidat tanpa rute v1: `sk contacts get`,
+  `sk flows runs`, `sk automations runs`, `sk kb files`,
+  `sk usage report` — CLI tidak bisa jujur tanpa rute di belakangnya.
+- **Batas turunan SDK**: `messages send` tidak membawa
+  `--reply-to` karena metode SDK `sendMessage` memang hanya menerima
+  teks (kontrak mengizinkan `replyToMessageId`, SDK belum
+  mengeksposnya) — CLI tidak melampaui permukaan SDK yang disahkan.
+
 

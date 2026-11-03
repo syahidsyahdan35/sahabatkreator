@@ -26,13 +26,17 @@
  *      mcpTool yang null WAJIB membawa exclusionReason; keduanya tidak
  *      boleh null bersamaan (rute publik harus terjangkau dari suatu
  *      permukaan klien).
+ *   6. Setiap perintah CLI yang disebut registry benar-benar ada di
+ *      tabel perintah apps/cli — dan setiap perintah di tabel itu
+ *      punya entri registry, dengan metode SDK yang sama (Fase 14D:
+ *      penjaga kini mencakup EMPAT permukaan klien).
  *
  * Pemeriksaan bersifat statis (baca sumber) agar bisa jalan di mana
  * saja tanpa database/server — ia bagian dari gerbang smoke tiap fase
  * (docs/DEPLOY-STAGING.md). Jalankan: `pnpm check:drift` dari root,
  * atau `pnpm --filter @sahabat-kreator/sdk check:drift`.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -64,6 +68,14 @@ const contractsSrc = read("packages/contracts/src/index.ts");
 const apiSrc = read("apps/api/src/modules/public-v1/routes.ts");
 const sdkSrc = read("packages/sdk/src/index.ts");
 const mcpSrc = read("apps/mcp-server/src/index.ts");
+// CLI: tabel perintah hidup di apps/cli/src (commands.ts); semua berkas
+// sumber digabung agar regex pasangan cli/sdkMethod menemukannya di
+// mana pun entri ditulis.
+const cliSrc = readdirSync(path.join(repoRoot, "apps/cli/src"))
+  .filter((f) => f.endsWith(".ts"))
+  .sort()
+  .map((f) => read(`apps/cli/src/${f}`))
+  .join("\n");
 
 // --- 1. Disiplin registry ---------------------------------------------------
 const seenRoutes = new Set<string>();
@@ -95,6 +107,11 @@ for (const entry of PUBLIC_V1_SURFACE) {
   }
   if (entry.mcpTool === null && entry.mcpTier !== null) {
     fail(`registry: ${key} menyatakan tier MCP tanpa tool MCP`);
+  }
+  if (typeof entry.cliCommand !== "string" || entry.cliCommand.trim() === "") {
+    fail(
+      `registry: ${key} tanpa cliCommand — sejak Fase 14D setiap rute publik WAJIB punya perintah CLI`,
+    );
   }
 }
 
@@ -209,10 +226,51 @@ for (const name of mcpTools.keys()) {
   }
 }
 
+// --- 6. Perintah CLI <-> registry (dua arah) + pasangan metode SDK ---------
+// Tabel perintah CLI (apps/cli/src/commands.ts) menulis setiap entri
+// dengan dua field berurutan: `cli: "<perintah>"` lalu
+// `sdkMethod: "<metode>"` — pasangan itulah yang dicocokkan di sini.
+const cliTable = new Map<string, string>();
+for (const match of cliSrc.matchAll(
+  /cli:\s*"([^"]+)",\s*\n\s*sdkMethod:\s*"(\w+)"/g,
+)) {
+  if (cliTable.has(match[1])) {
+    fail(`cli: perintah "${match[1]}" didefinisikan lebih dari sekali di apps/cli`);
+  }
+  cliTable.set(match[1], match[2]);
+}
+const registryCliCommands = new Set<string>();
+for (const entry of PUBLIC_V1_SURFACE) {
+  const key = routeKey(entry.method, entry.path);
+  if (registryCliCommands.has(entry.cliCommand)) {
+    fail(`registry: cliCommand "${entry.cliCommand}" dipakai lebih dari satu rute`);
+  }
+  registryCliCommands.add(entry.cliCommand);
+  const cliSdkMethod = cliTable.get(entry.cliCommand);
+  if (cliSdkMethod === undefined) {
+    fail(
+      `cli: perintah "${entry.cliCommand}" (untuk ${key}) TIDAK ada di tabel perintah apps/cli`,
+    );
+    continue;
+  }
+  if (cliSdkMethod !== entry.sdkMethod) {
+    fail(
+      `cli: perintah "${entry.cliCommand}" memanggil metode SDK "${cliSdkMethod}" tetapi registry memetakan ${key} ke "${entry.sdkMethod}"`,
+    );
+  }
+}
+for (const name of cliTable.keys()) {
+  if (!registryCliCommands.has(name)) {
+    fail(
+      `cli: perintah "${name}" ada di apps/cli tetapi tidak dipetakan rute publik mana pun di registry`,
+    );
+  }
+}
+
 // --- Ringkasan ---------------------------------------------------------------
 if (failures === 0) {
   ok(
-    `permukaan publik selaras: ${PUBLIC_V1_SURFACE.length} rute v1 × kontrak/SDK/MCP tanpa drift`,
+    `permukaan publik selaras: ${PUBLIC_V1_SURFACE.length} rute v1 × kontrak/SDK/MCP/CLI tanpa drift`,
   );
   console.log("\nTIDAK ADA DRIFT");
 } else {
