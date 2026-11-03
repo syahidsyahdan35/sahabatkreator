@@ -7,7 +7,8 @@
     "@sahabat-kreator/db": "workspace:*",
     "@sahabat-kreator/queue": "workspace:*",
     "bullmq": "^5.34.0",
-    "drizzle-orm": "^0.44.6"
+    "drizzle-orm": "^0.44.6",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.14",
