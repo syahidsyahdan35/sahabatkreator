@@ -6635,3 +6635,75 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   terhadap server mock provider. Bukti UI Settings → Payments +
   halaman /pay provider sungguhan menunggu uji klik user (tanpa
   Playwright).
+
+## Update Fase 14B — Paket App Review Meta (2026-11-03)
+
+- **Isi**: fase dokumentasi + verifikasi — deliverable utamanya
+  `docs/APP-REVIEW.md` (paket pengajuan Advanced Access aplikasi
+  "Botara Dev" `2356364001779420`, BELUM pernah diajukan; klik submit
+  tetap milik user): urutan go-live per peran (verifikasi bisnis →
+  pra-terbang konsol → screencast → submit), ringkasan aplikasi,
+  **inventaris izin yang diturunkan dari kode** (seluruh panggilan
+  Graph di channel-messenger/channel-whatsapp/core meta/meta-oauth/
+  channels/poller/worker/whatsapp-templates dipetakan ke izinnya),
+  justifikasi per izin siap tempel (EN), instruksi uji reviewer
+  langkah-demi-langkah + checklist penyiapan akun demo, jawaban
+  data-handling, checklist konsol dengan nilai persis (URL legal,
+  redirect URI `https://botara.my.id/api/meta/oauth/callback`,
+  webhook `https://botara.my.id/api/meta/webhook`, daftar izin
+  konfigurasi FLB), dan naskah screencast per alur (Messenger /
+  Instagram / WhatsApp).
+- **Daftar izin final (13)**: Messenger — `pages_show_list`,
+  `pages_messaging`, `pages_manage_metadata`, `pages_read_engagement`,
+  `pages_read_user_content`, `pages_manage_engagement`,
+  `business_management`; Instagram (konfigurasi FLB) —
+  `instagram_basic`, `instagram_manage_messages`,
+  `instagram_manage_comments`, `business_management`; WhatsApp
+  (konfigurasi FLB) — `whatsapp_business_messaging`,
+  `whatsapp_business_management`, `business_management`. Eksplisit
+  TIDAK diminta (tidak ada panggilannya di kode):
+  `instagram_content_publish`, `pages_manage_posts`, insights, ads;
+  komentar tidak pernah dihapus (hanya sembunyikan/tampilkan).
+- **Perbaikan kode (celah jalur reviewer)**: trio engagement Page di
+  atas TIDAK PERNAH diminta dialog Messenger — fitur komentar Page
+  Fase 10B (event `feed`, balas publik `POST /{comment-id}/comments`,
+  sembunyikan `POST /{comment-id}?is_hidden=`) akan ditolak Graph
+  untuk bisnis lain walau review lolos. Ketiganya ditambahkan ke
+  `MESSENGER_OAUTH_SCOPES` (pola Hotfix R1) + komentar prasyarat
+  konsol. Tanpa perubahan skema/kontrak/API v1/SDK/MCP/CLI.
+- **Verifikasi**: typecheck seluruh paket hijau; `pnpm check:drift`
+  PASS (34 rute v1); PGlite verify 41 seksi SEMUA LULUS (DB tidak
+  disentuh — dijalankan sebagai gerbang regresi). Jalur reviewer
+  dibuktikan live: `/privacy` `/terms` `/data-deletion` `/register`
+  200 DAN string isi legal terbukti ada di bundle web terdeploy
+  (client-rendered); health ok; handshake webhook dengan verify
+  token yang sengaja salah → 403 (fail-closed; cabang sukses
+  diverifikasi dari kode — token asli tidak dipakai dari luar);
+  callback OAuth tanpa parameter → 302 ke
+  `/channels?meta_oauth_error=META_OAUTH_STATE_INVALID`; endpoint
+  start/info OAuth terpasang & tergating sesi (401 tanpa sesi). URL
+  dialog diverifikasi dari kode (client_id = App ID, config_id
+  IG/WA, scope Messenger) — tidak dijalankan karena fase ini
+  dilarang membuat akun staging; alur register → workspace →
+  Channels diverifikasi lewat telaah jalur kode, dinyatakan apa
+  adanya di APP-REVIEW.md §8.
+- **Deploy**: build api di VM → commit `2fa37f5` → rsync repo
+  (**`--exclude '.env.staging'`**, tanpa `--delete`) → restart api
+  via kill MainPID eksplisit (3659655 → 3670690; 4 service active).
+  Pasca-deploy: health publik ok, grep bundle api server memuat
+  ketiga scope baru, dist bersih dari pg inline (`ConnectionParameters`
+  0 — `pg` tetap eksternal), sha256 `.env.staging`
+  `9c1ded2a5a69f09e…` byte-identik sebelum–sesudah, hitungan live
+  utuh 1 tenant / 4 channel connected / 1 kontak. Auth user TIDAK
+  disentuh (insiden 13G: user mendaftar ulang sendiri).
+- **Batas jujur / sisa sisi user** (dirinci di APP-REVIEW.md §0):
+  verifikasi bisnis SHD Store; menambahkan trio engagement ke daftar
+  izin aplikasi di konsol SEBELUM connect Messenger berikutnya
+  (dialog kini memintanya — tanpa itu Meta menjawab "Invalid
+  Scopes"); melengkapi konfigurasi IG `30196668823256383` dengan
+  `business_management` (bukti log: tepi businesses masih
+  `ERR:graph_100`) + membuang `instagram_content_publish` bila ada;
+  membuat akun demo reviewer + merekam 3 screencast + klik submit.
+  Celah tercatat: endpoint callback penghapusan data Meta
+  (signed_request) belum ada — aplikasi memakai URL instruksi
+  penghapusan; diimplementasikan hanya bila konsol mewajibkannya.
