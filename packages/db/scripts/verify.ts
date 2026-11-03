@@ -65,7 +65,8 @@ console.log(`    jumlah tabel public: ${tablesRes.rows[0].count}`);
 // + 1 tabel Fase 12C (kb_source_documents)
 // + 2 tabel Fase 13B (growth_links, growth_link_events)
 // + 2 tabel Fase 13C (segments, tenant_opt_in_settings)
-assert.equal(Number(tablesRes.rows[0].count), 48);
+// + 1 tabel Fase 13D (flow_experiment_assignments)
+assert.equal(Number(tablesRes.rows[0].count), 49);
 
 // ---------- 2. Seed 2 tenant ----------
 await db.query(
@@ -162,7 +163,9 @@ const policies = await db.query<{ count: string }>(
 //   (Fase 13B, migrasi 0002 lineage baseline) = 60.
 // + tenant_isolation pada segments & tenant_opt_in_settings
 //   (Fase 13C, migrasi 0003) = 62.
-assert.equal(Number(policies.rows[0].count), 62);
+// + tenant_isolation pada flow_experiment_assignments
+//   (Fase 13D, migrasi 0004) = 63.
+assert.equal(Number(policies.rows[0].count), 63);
 console.log(`[4] policy RLS terpasang: ${policies.rows[0].count} (termasuk system_relay outbox)`);
 
 await db.exec(`
@@ -185,7 +188,8 @@ await db.exec(`
     comments,
     kb_source_documents,
     growth_links, growth_link_events,
-    segments, tenant_opt_in_settings
+    segments, tenant_opt_in_settings,
+    flow_experiment_assignments
   TO app_user;
 `);
 
@@ -2265,7 +2269,8 @@ function oneHotVector(index: number): string {
   // (44 / 57 pada titik 11A.1); Fase 13B menambah 2 tabel growth +
   // 3 policy (2 tenant_isolation + 1 lengan lookup publik) → 46 / 60;
   // Fase 13C menambah 2 tabel (segments, tenant_opt_in_settings) +
-  // 2 policy tenant_isolation → 48 / 62.
+  // 2 policy tenant_isolation → 48 / 62; Fase 13D menambah 1 tabel
+  // (flow_experiment_assignments) + 1 policy → 49 / 63.
   const counts = await db.query<{ tables: string; policies: string }>(
     `SELECT
        (SELECT count(*)::text FROM information_schema.tables
@@ -2273,8 +2278,8 @@ function oneHotVector(index: number): string {
        (SELECT count(*)::text FROM pg_policies
          WHERE schemaname = 'public') AS policies`,
   );
-  assert.equal(counts.rows[0].tables, "48");
-  assert.equal(counts.rows[0].policies, "62");
+  assert.equal(counts.rows[0].tables, "49");
+  assert.equal(counts.rows[0].policies, "63");
   console.log(
     "[34] Fase 11A+11A.1: baseline squash — contacts.avatar_url & messages.provider_cost tidak ada (dijatuhkan 0040), 12 index FK terpasang, tabel & policy global sesuai hitungan berjalan: OK",
   );
@@ -2561,6 +2566,119 @@ function oneHotVector(index: number): string {
   assert.equal(views.crossBlocked, true);
   console.log(
     "[37] Fase 13C: segments & tenant_opt_in_settings terisolasi tenant (insert silang ditolak); contacts.opt_in_source/opt_in_at ada; broadcasts.require_opt_in NOT NULL default false: OK",
+  );
+}
+
+// ---------- 38. Fase 13D: flow_experiment_assignments + kolom A/B broadcast ----------
+{
+  // Kolom baru: broadcasts.ab_split_percent_b (nullable — kondisional),
+  // variant_b_message_text (nullable), variant_b_whatsapp_template_id
+  // (nullable), variant_b_template_variable_sources (NOT NULL default
+  // '[]'), broadcast_recipients.variant (NOT NULL default 'a').
+  const cols = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND ((table_name = 'broadcasts' AND column_name IN
+               ('ab_split_percent_b', 'variant_b_message_text',
+                'variant_b_whatsapp_template_id')
+              AND is_nullable = 'YES')
+          OR (table_name = 'broadcasts' AND column_name = 'variant_b_template_variable_sources'
+              AND is_nullable = 'NO')
+          OR (table_name = 'broadcast_recipients' AND column_name = 'variant'
+              AND is_nullable = 'NO' AND column_default LIKE '%''a''%'))`,
+  );
+  assert.equal(cols.rows[0].n, "5");
+
+  // Seed mandiri tenant A: channel + kontak + percakapan + flow + run.
+  const CH_13D = "13d00000-0000-4000-8000-0000000000a0";
+  const CONTACT_13D = "13d00000-0000-4000-8000-0000000000c1";
+  const CONV_13D = "13d00000-0000-4000-8000-0000000000d1";
+  const FLOW_13D = "13d00000-0000-4000-8000-0000000000f1";
+  const RUN_13D = "13d00000-0000-4000-8000-0000000000e1";
+  await db.query(
+    `INSERT INTO channel_accounts (id, tenant_id, provider, external_id, status)
+     VALUES ($1, $2, 'telegram', 'bot13d', 'connected')`,
+    [CH_13D, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO contacts (id, tenant_id, name) VALUES ($1, $2, 'Kontak 13D')`,
+    [CONTACT_13D, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO conversations (id, tenant_id, channel_account_id, contact_id, provider, provider_chat_id, kind, status)
+     VALUES ($1, $2, $3, $4, 'telegram', 'chat-13d', 'private', 'open')`,
+    [CONV_13D, TENANT_A, CH_13D, CONTACT_13D],
+  );
+  await db.query(
+    `INSERT INTO flows (id, tenant_id, name, status, graph)
+     VALUES ($1, $2, 'Flow Eksperimen 13D', 'active',
+       '{"nodes":[{"id":"t","type":"trigger","config":{"kind":"any_message"}},{"id":"split1","type":"ab_split","config":{"percentA":50,"experiment":true}}],"edges":[]}')`,
+    [FLOW_13D, TENANT_A],
+  );
+  await db.query(
+    `INSERT INTO flow_runs (id, tenant_id, flow_id, conversation_id, contact_id, status)
+     VALUES ($1, $2, $3, $4, $5, 'running')`,
+    [RUN_13D, TENANT_A, FLOW_13D, CONV_13D, CONTACT_13D],
+  );
+  await db.query(
+    `INSERT INTO flow_experiment_assignments (tenant_id, flow_id, node_id, contact_id, run_id, branch, label, percent_a)
+     VALUES ($1, $2, 'split1', $3, $4, 'a', 'Judul A/B', 50)`,
+    [TENANT_A, FLOW_13D, CONTACT_13D, RUN_13D],
+  );
+  // Unik lengket: penugasan kedua untuk (flow, node, kontak) yang sama
+  // ditolak — penugasan pertama menang selamanya.
+  await assert.rejects(
+    db.query(
+      `INSERT INTO flow_experiment_assignments (tenant_id, flow_id, node_id, contact_id, run_id, branch, percent_a)
+       VALUES ($1, $2, 'split1', $3, $4, 'b', 50)`,
+      [TENANT_A, FLOW_13D, CONTACT_13D, RUN_13D],
+    ),
+    /duplicate key|flow_experiment_assignments_sticky_unique/i,
+  );
+
+  // broadcast_recipients.variant: bawaan 'a' tanpa dinyatakan.
+  const BC_13D = "13d00000-0000-4000-8000-0000000000b1";
+  await db.query(
+    `INSERT INTO broadcasts (id, tenant_id, channel_account_id, name, message_text, ab_split_percent_b, variant_b_message_text)
+     VALUES ($1, $2, $3, 'Broadcast A/B 13D', 'Isi A', 50, 'Isi B')`,
+    [BC_13D, TENANT_A, CH_13D],
+  );
+  const recIns = await db.query<{ variant: string }>(
+    `INSERT INTO broadcast_recipients (tenant_id, broadcast_id, contact_id, status)
+     VALUES ($1, $2, $3, 'queued') RETURNING variant`,
+    [TENANT_A, BC_13D, CONTACT_13D],
+  );
+  assert.equal(recIns.rows[0].variant, "a");
+
+  // Isolasi RLS penugasan: A melihat barisnya; B 0 baris; insert
+  // lintas tenant ditolak WITH CHECK.
+  const views = await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL ROLE app_user`);
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const own = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_experiment_assignments`,
+    );
+    await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
+    const other = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM flow_experiment_assignments`,
+    );
+    let crossBlocked = false;
+    try {
+      await tx.query(
+        `INSERT INTO flow_experiment_assignments (tenant_id, flow_id, node_id, contact_id, run_id, branch, percent_a)
+         VALUES ($1, $2, 'split1', $3, $4, 'a', 50)`,
+        [TENANT_A, FLOW_13D, CONTACT_13D, RUN_13D],
+      );
+    } catch {
+      crossBlocked = true;
+    }
+    return { own, other, crossBlocked };
+  });
+  assert.equal(views.own.rows[0].n, "1");
+  assert.equal(views.other.rows[0].n, "0");
+  assert.equal(views.crossBlocked, true);
+  console.log(
+    "[38] Fase 13D: flow_experiment_assignments terisolasi tenant + unik lengket (flow,node,kontak); kolom A/B broadcasts ada (nullable kondisional); broadcast_recipients.variant NOT NULL default 'a': OK",
   );
 }
 

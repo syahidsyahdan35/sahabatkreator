@@ -1,6 +1,7 @@
 import {
   boolean,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -113,6 +114,40 @@ export const broadcasts = pgTable(
      * broadcast selalu punya keputusan gerbang yang eksplisit.
      */
     requireOptIn: boolean("require_opt_in").notNull().default(false),
+    /**
+     * Uji A/B broadcast (Fase 13D): persen penerima yang masuk varian
+     * B (1..99); varian A menerima sisanya. NULL = TANPA uji A/B
+     * (semua penerima varian "a") — nullable karena memang keadaan
+     * kondisional: hanya broadcast yang mengaktifkan A/B yang punya
+     * angka ini. Penugasan varian per penerima DETERMINISTIK
+     * (hash stabil broadcast+kontak) dan disimpan di baris penerima,
+     * jadi materialisasi ulang tidak pernah membalik varian.
+     */
+    abSplitPercentB: integer("ab_split_percent_b"),
+    /**
+     * Isi varian B untuk broadcast TEKS (Fase 13D). Untuk WhatsApp
+     * kolom ini menampung snapshot teks BODY template B (persis
+     * perlakuan message_text terhadap template A). NULL bila A/B
+     * tidak aktif.
+     */
+    variantBMessageText: varchar("variant_b_message_text", { length: 4096 }),
+    /**
+     * Template WhatsApp varian B (Fase 13D): wajib terisi (dan
+     * APPROVED, gerbang yang sama seperti template A) untuk broadcast
+     * WhatsApp ber-A/B; NULL selain itu. SET NULL selaras template A.
+     */
+    variantBWhatsappTemplateId: uuid("variant_b_whatsapp_template_id").references(
+      () => whatsappTemplates.id,
+      { onDelete: "set null" },
+    ),
+    /**
+     * Sumber variabel BODY template B per posisi (Fase 13D) —
+     * semantik identik template_variable_sources untuk varian A.
+     */
+    variantBTemplateVariableSources: jsonb("variant_b_template_variable_sources")
+      .notNull()
+      .default([])
+      .$type<string[]>(),
     status: broadcastStatusEnum("status").notNull().default("draft"),
     /** Waktu kirim yang diminta; NULL selama draft. */
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
@@ -169,6 +204,15 @@ export const broadcastRecipients = pgTable(
       onDelete: "set null",
     }),
     status: broadcastRecipientStatusEnum("status").notNull().default("queued"),
+    /**
+     * Varian uji A/B penerima ini (Fase 13D): "a" | "b". NOT NULL
+     * dengan bawaan "a" — broadcast tanpa A/B menugaskan semua
+     * penerima ke "a", jadi kolom ini selalu punya jawaban. Ditulis
+     * sekali saat materialisasi dari hash deterministik
+     * (broadcast+kontak); baris yang sudah ada tidak pernah ditulis
+     * ulang, jadi varian tidak bisa berbalik pada retry dispatch.
+     */
+    variant: varchar("variant", { length: 8 }).notNull().default("a"),
     /** Alasan skipped: 'opted_out' | 'outside_24h_window' | 'message_deleted'. */
     skipReason: varchar("skip_reason", { length: 64 }),
     /** Kode error provider untuk penerima failed (disalin dari pesan). */
@@ -191,6 +235,10 @@ export const broadcastRecipients = pgTable(
     index("broadcast_recipients_broadcast_status_idx").on(
       t.broadcastId,
       t.status,
+    ),
+    index("broadcast_recipients_broadcast_variant_idx").on(
+      t.broadcastId,
+      t.variant,
     ),
     index("broadcast_recipients_message_id_idx").on(t.messageId),
   ],

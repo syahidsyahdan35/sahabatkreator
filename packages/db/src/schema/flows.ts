@@ -195,3 +195,67 @@ export type FlowRun = typeof flowRuns.$inferSelect;
 export type NewFlowRun = typeof flowRuns.$inferInsert;
 export type FlowRunStep = typeof flowRunSteps.$inferSelect;
 export type NewFlowRunStep = typeof flowRunSteps.$inferInsert;
+
+/**
+ * Penugasan eksperimen A/B flow (Fase 13D): SATU baris per
+ * (tenant, flow, node ab_split, kontak) — penugasan PERTAMA menang dan
+ * tidak pernah berubah (unik parsial ditegakkan index unik), sehingga
+ * kontak yang sama selalu masuk varian yang sama di semua run walau
+ * operator mengubah percentA di tengah eksperimen. Baris ditulis
+ * eksekutor saat node ab_split mode eksperimen pertama kali dicapai
+ * kontak itu; `branch` + `percent_a` adalah snapshot keputusan saat
+ * itu, `run_id` = run penugasan pertama. Laporan per varian (kontak
+ * unik) membaca tabel ini; hitungan run/konversi diturunkan dari
+ * flow_run_steps + flow_runs. Tenant-scoped + RLS seperti tabel flow
+ * lain (migrasi 0004).
+ */
+export const flowExperimentAssignments = pgTable(
+  "flow_experiment_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    flowId: uuid("flow_id")
+      .notNull()
+      .references(() => flows.id, { onDelete: "cascade" }),
+    /** Id node ab_split di graf flow (bukan FK — id graf, bukan baris). */
+    nodeId: varchar("node_id", { length: 128 }).notNull(),
+    contactId: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    /** Run yang pertama kali menugaskan kontak ini ke variannya. */
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => flowRuns.id, { onDelete: "cascade" }),
+    /** Varian hasil penugasan: "a" | "b" (branch edge ab_split). */
+    branch: varchar("branch", { length: 8 }).notNull(),
+    /** Label eksperimen dari config node saat penugasan (opsional). */
+    label: varchar("label", { length: 255 }),
+    /** Snapshot percentA yang berlaku saat penugasan dibuat. */
+    percentA: integer("percent_a").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("flow_experiment_assignments_sticky_unique").on(
+      t.tenantId,
+      t.flowId,
+      t.nodeId,
+      t.contactId,
+    ),
+    index("flow_experiment_assignments_tenant_id_idx").on(t.tenantId),
+    index("flow_experiment_assignments_split_idx").on(
+      t.tenantId,
+      t.flowId,
+      t.nodeId,
+      t.branch,
+    ),
+  ],
+);
+
+export type FlowExperimentAssignment =
+  typeof flowExperimentAssignments.$inferSelect;
+export type NewFlowExperimentAssignment =
+  typeof flowExperimentAssignments.$inferInsert;
