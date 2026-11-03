@@ -7155,3 +7155,91 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   kosong di `969e726`.
 - Server tertinggal satu commit dokumen ini sampai deploy berikutnya
   (pola yang sama seperti entri sebelumnya).
+
+## Fase Penemuan SU — Tepi IG Bisnis-Jangkar + Target Hibah debug_token — 2026-11-04
+
+- **Latar**: diagnosis atas kegagalan connect IG live pada app baru
+  (konfigurasi `2095977074369434`, token pengguna sistem) — vonis
+  campuran dengan dominan keterbatasan BISU satu portofolio: app dan
+  akun IG tinggal di portofolio yang sama (SHD Store), sehingga BISU
+  hasil dialog tidak memegang penugasan aset apa pun — tepi
+  `assigned_*` kosong secara desain, `/me/businesses` menjawab
+  graph_100 (error bentuk identitas, BUKAN izin), dan penemuan
+  berakhir TOTAL=0 dengan picker yang benar menampilkan
+  `no_accounts_shared`. Kesenjangan kode yang nyata (sekunder):
+  penemuan tidak pernah membaca dua sumber yang memang tersedia —
+  hibah konfigurasi di token itu sendiri dan tepi IG berjangkar
+  bisnis.
+- **Perubahan** (commit `2831648` di atas `6334c76` — commit
+  kontributor `6334c76` feat(dev) tunnel lokal mendarat di tengah
+  fase ini; rebase bersih, nol tumpang tindih berkas):
+  `MetaGraphClient` mendapat `getTokenGrantTargets` (GET
+  /debug_token dengan TOKEN APLIKASI `{appId}|{appSecret}` lewat
+  klien pendamping; union `target_ids` granular_scopes untuk
+  instagram_basic/manage_messages/manage_comments +
+  business_management sebagai cek silang; best-effort total — tidak
+  pernah melempar) dan `getBusinessInstagramAccounts` (GET
+  `/{business-id}/instagram_accounts`; graph_100 → union
+  `owned_instagram_accounts` + `client_instagram_accounts`; error
+  non-100 diteruskan). `discoverInstagramAccounts` menambah tepi
+  (e) `business_instagram_accounts` dan (f)
+  `grant_target_instagram_accounts` SETELAH (c), SEBELUM (d),
+  HANYA bila konteks SU membawa `clientBusinessId` (parameter
+  opsional baru dari callback, yang memang sudah memegangnya dari
+  `getTokenProfile`); (f) menyelesaikan username per target lewat
+  profil objek (maks 25, lewati yang sudah ditemukan). Callback
+  mencatat `grants=<n>` di baris log penemuan instagram (JUMLAH
+  target saja — id target dan token tidak pernah masuk log).
+  Kandidat tanpa Page token tetap memakai fallback kredensial SUAT
+  sesi di complete (perilaku lama, terverifikasi di kode — tidak
+  dibangun ulang). Jalur token user identik byte-per-byte: tepi
+  baru inert tanpa panggilan/tanpa entri jejak. Logika petunjuk
+  kosong picker SENGAJA tidak diubah (kasus grants>0 & total=0
+  belum punya semantik petunjuk yang pasti; tebakan bisa mengubah
+  hasil kasus yang sudah dikenal).
+- **Uji baru** `apps/api/scripts/verify-meta-discovery.ts`
+  (`verify:meta-discovery`, masuk `verify:ci`): fixture mock Graph
+  di jahitan `fetchImpl` — **26 PASS / 0 FAIL**: persona SU penuh
+  (total=1 dari tepi (e), username benar, pageAccessToken=null,
+  urutan label persis, grants=1, debug_token terbukti bertoken
+  aplikasi), regresi SU kosong (total=0, grants=0), grants-only
+  (total=1 lewat (f) + profil objek), fallback graph_100 →
+  owned_/client_ + propagasi error non-100, dan paritas token user
+  (jejak urutan lama persis, tanpa konteks maupun konteks
+  clientBusinessId=null; debug_token tidak pernah dipanggil).
+- **Baterai**: typecheck monorepo 20/20 paket bersih;
+  `pnpm check:drift` PASS (34 rute v1 tanpa drift — label jejak
+  hanya log, permukaan publik tidak berubah); `verify:ci` penuh
+  hijau (PGlite db verify semua seksi, core verify, rantai worker
+  SEMUA LULUS, `verify:http` 22 PASS, `verify:oauth-kv` 34 PASS,
+  `verify:meta-discovery` 26 PASS); build penuh sukses; aturan
+  bundle lulus (api/worker/realtime masing-masing tepat 1 impor
+  eksternal `from "pg"`; label baru ter-grep di dist api & worker,
+  realtime tidak membundel penemuan).
+- **Urutan deploy** (kanonik mode pull): server `git fetch origin &&
+  git reset --hard origin/main` → `2831648`, status KOSONG; build di
+  VM; rsync `apps/api/dist` + `apps/worker/dist` (`--exclude
+  '.env.staging'`) — hash server byte-identik dengan build lokal
+  (api `929303d6f69116d3…`, worker `12ea6552990eabe1…`; realtime
+  tidak berubah, tidak disentuh). Restart HANYA unit API via kill
+  MainPID eksplisit (4048832 → **4059625**) agar ujicoba ulang user
+  yang sedang berjalan tidak terganggu selain satu restart API
+  ini; dist worker yang baru (perubahan pustaka aditif, perilaku
+  jalur worker tidak berubah) berlaku pada restart worker
+  berikutnya. Catatan perkakas: rsync `-e ssh` inline berulang
+  gagal di VM ini (pemecahan string + reset koneksi proxy egress
+  saat rentetan koneksi rapat) — yang berhasil adalah skrip
+  pembungkus ssh untuk `-e` + jeda antar-koneksi.
+- **Verifikasi pasca-deploy**: health lokal (`:3101`) dan publik
+  (`https://botara.my.id/api/health`) `ok`; jurnal API sejak
+  restart 0 baris error; dist API live memuat label
+  `business_instagram_accounts` ×3 + `grant_target_instagram_accounts`
+  ×2; `.env.staging` byte-identik (sha256 `9c1ded2a5a69f09e…`);
+  `git status` server kosong di `2831648`.
+- **Makna untuk ujicoba**: connect IG dengan konfigurasi SU pada
+  app baru kini punya dua jaring tambahan — akun yang dihibahkan
+  konfigurasi akan ditemukan walau BISU tanpa penugasan. Bukti
+  live tetap langkah user berikutnya (reconnect IG); log penemuan
+  akan menampilkan `grants=<n>` dan label tepi baru.
+- Server tertinggal satu commit dokumen ini sampai deploy berikutnya
+  (pola yang sama seperti entri sebelumnya).
