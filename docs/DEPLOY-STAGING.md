@@ -6337,3 +6337,129 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   (4) Satu pesan masuk memproses SEMUA run questionnaire parkir
   di percakapan itu (sama seperti wait_reply) — dua kuesioner
   bersamaan di satu percakapan akan sama-sama mengonsumsi jawaban.
+
+## Fase 13F — Katalog + Keranjang Commerce (2026-11-03)
+
+- **Migrasi `0005_carts_orders` (drizzle-kit generate) — jurnal 6
+  entri; staging 53 tabel / 67 policy.** Empat tabel baru: `carts` +
+  `cart_items` (keranjang per kontak; tepat satu keranjang `open`
+  per (tenant, kontak) via indeks unik parsial; keranjang tidak
+  dihapus saat checkout — ditandai `checked_out`) dan `orders` +
+  `order_items` (riwayat checkout permanen). `payment_links`
+  menjadi dual-varian: `product_id` menjadi nullable + kolom
+  `order_id` + CHECK `payment_links_exactly_one_target` (tepat satu
+  target terisi — kasus varian kondisional yang memang ditegakkan
+  CHECK) sehingga halaman publik `/pay/:code` melayani tautan order
+  tanpa permukaan baru (lengan RLS `public_code_lookup` yang sama).
+  Data live utuh: 1 tenant / 4 channel connected / 1 kontak sebelum
+  dan sesudah; `.env.staging` byte-identik.
+- **Keputusan penyimpanan keranjang = BARIS** (`carts` +
+  `cart_items`), bukan jsonb: rujukan per produk dengan FK,
+  lipatan merge kontak per baris, unik per produk per keranjang, dan
+  kueri isolasi per kontak — semua alami sebagai baris; jsonb akan
+  memaksa validasi bentuk manual di setiap tulis.
+- **Aturan snapshot harga**: baris keranjang menyimpan harga produk
+  saat item PERTAMA ditambahkan; menambah produk yang sama sesudah
+  harga berubah hanya menaikkan qty (snapshot pertama menang);
+  checkout menghitung total SERVER-side dari snapshot baris
+  keranjang; `order_items` menyalin nama + harga snapshot
+  (`product_id` SET NULL saat produk dihapus agar riwayat utuh).
+  Terbukti di rantai: harga diubah 150000→200000 di tengah sesi,
+  checkout tetap 2 × 150000 = 300000.
+- **Node flow `show_catalog`**: mengirim produk AKTIF tenant sebagai
+  daftar bernomor (nama + harga Rupiah terformat Intl id-ID;
+  deskripsi opsional per config) lalu PARKIR memakai mesin
+  `wait_reply`/`questionnaire` yang sama (`context.wait` + keadaan
+  `context.catalog` berisi urutan id produk SAAT daftar terkirim).
+  Sintaks balasan: `"N"` = nomor produk qty 1; `"NxM"` (x
+  case-insensitive, spasi ditoleransi) = nomor × qty 1..999. Cabang:
+  `added` / `invalid` / `timeout`. Pilihan tidak sah (tidak
+  terparse / di luar jangkauan / produk terhapus / produk
+  DINONAKTIFKAN sesudah daftar terkirim — alasan tercatat
+  `product_inactive` di detail langkah) → prompt ulang (daftar
+  dirender ulang dari keadaan parkir, penomoran stabil) sampai
+  `maxInvalidAttempts` → branch `invalid`. Sesudah tambah: ringkasan
+  keranjang terkirim (+ `addedMessage` opsional) dan graf
+  berkomposisi (katalog → katalog → checkout terbukti).
+- **Node flow `cart_checkout`** (dieksuksi khusus seperti
+  `send_payment_link` karena butuh URL publik): menampilkan
+  ringkasan keranjang dan — dalam SATU transaksi tenant — membuat
+  order + SATU tautan bayar varian order untuk totalnya + menandai
+  keranjang `checked_out`; cabang `checked_out` / `empty_cart`
+  (keranjang kosong BUKAN kegagalan: branch sah, `emptyMessage`
+  opsional terkirim, tidak ada order/tautan yang dibuat).
+  `view_cart` SENGAJA dilipat ke langkah tampil checkout ini —
+  bukan node ketiga.
+- **Hook fulfilment order**: status order MENGIKUTI tautan bayarnya
+  (`pending|paid|expired|cancelled`) lewat `syncOrderStatusFromLink`
+  terpagar `status='pending'` (idempoten; `paid_at` hanya pada
+  transisi pertama) yang dipasang di titik penyelesaian yang sama
+  dengan tautan produk tunggal (`simulatePayByCode`,
+  `markExpiredIfDue`, kedaluwarsa massal `listPaymentLinks`).
+  Terbukti: simulate-pay ganda → `paid_at` tidak berubah + tepat 1
+  baris audit `payment.paid`. Jalur `cancelled` belum punya pemicu
+  hidup fase ini (tidak ada kode yang membatalkan tautan) — nilai
+  enum ada untuk simetri, statusnya mengikuti bila pemicu itu lahir.
+- **Agent — batas eksplisit**: TIDAK ada tool agent baru. Runtime
+  agent berjalan SATU completion tanpa putaran hasil-tool (hasil
+  tool tidak pernah dikembalikan ke model), jadi tool baca
+  katalog/keranjang akan menjadi pajangan — model tidak akan pernah
+  melihat hasilnya di balasan yang sama. Yang diberikan adalah
+  akses BACA nyata lewat konteks prompt: daftar produk aktif
+  (nama + harga terformat, maks 20) dilampirkan ke prompt sistem
+  `generateAgentDraft` (kegagalan baca ditelan — tidak pernah
+  menggagalkan balasan). Keranjang SENGAJA tidak dilampirkan
+  (keadaan sesi yang berubah di tengah percakapan, dikelola flow).
+  Tulis (tambah/checkout) tetap eksklusif flow; `send_payment_link`
+  tetap tool penutup produk tunggal agent. Balasan pilihan katalog
+  TIDAK bocor ke agent: gerbang worker menghitung
+  `flowCatalogResumed` (rantai membuktikan usage_ledger diam +
+  0 pesan agent ke kontak katalog, dengan garis dasar agent yang
+  memang membalas pesan biasa).
+- **Permukaan (aturan sinkronisasi kontrak)**: scope baru
+  `orders:read` (17 scope: 14 baca + 3 tulis; ikut bawaan kunci
+  baru) + `GET /v1/orders` + `GET /v1/orders/:id` + SDK
+  `listOrders`/`getOrder` + MCP `list_orders`/`get_order` (baca) +
+  rute dashboard `GET /tenants/:id/orders(+:id)` di modul products
+  (serializer bersama persis) + seksi Orders (daftar + modal detail)
+  di halaman Products. `pnpm check:drift` lulus pada **32 rute**.
+  **Keranjang SENGAJA tanpa permukaan publik** (matriks): keadaan
+  sesi efemeral per kontak di dalam percakapan — mengeksposnya
+  membekukan bentuk sesi internal menjadi kontrak publik; yang
+  terekspos adalah hasilnya yang stabil (order + tautan bayar).
+  Inspeksi keranjang dari detail kontak tidak dibuat (bukan
+  permukaan yang diminta; isi keranjang terlihat dari ringkasan
+  chat). Merge kontak (9B) diperluas: order pindah ke survivor,
+  item keranjang terbuka sumber dilipat ke keranjang survivor.
+- **Perbaikan yang ditemukan rantai** (commit `99b5f16`):
+  `serializeOrder` awalnya membaca `orders.provider` — kolom yang
+  tidak pernah ada di skema (lolos typecheck karena
+  `Schema.parse()` menerima `unknown`) → 500 di daftar order.
+  Keputusan: provider TIDAK diduplikasi ke orders — serializer
+  mewarisinya dari tautan bayar order (sumber kebenaran tunggal).
+  Ditambah: pemanggilan `listOrders`/`getOrder` di v1 diselaraskan
+  ke tanda tangan ctx core, dan union `ApiKeyScope` salinan-tangan
+  di core ditambah `orders:read`.
+- **Verifikasi**: typecheck monorepo penuh exit 0 (tanpa filter);
+  PGlite verify **39 seksi SEMUA LULUS** (seksi 39 baru: CHECK
+  dual-varian menolak tautan kedua-target & tanpa-target, unik
+  parsial satu keranjang terbuka, isolasi RLS carts/orders);
+  `pnpm check:drift` 32 rute; rantai terisolasi server (DB buangan
+  `sk_chain13f`, API :3217, Redis DB 14, mock :8417) **64 PASS /
+  0 FAIL** — jalur bahagia 2 item (total Rp750.000 tepat, satu
+  order, satu tautan, keranjang terkosongkan), snapshot harga,
+  isolasi antar kontak + antar tenant (daftar kosong + 404 silang),
+  checkout kosong, produk dinonaktifkan di tengah parkir, percobaan
+  habis → invalid, timeout 2 detik, anti-bocor agent, regresi
+  `send_payment_link` + questionnaire + ab_split lengket, v1
+  orders + 403 scope + verify-sdk/verify-mcp hijau; pasca-deploy:
+  health publik ok, 4 service aktif, grep bundle (api: `/v1/orders`;
+  worker: `show_catalog`, `product_inactive`, `flowCatalogResumed`;
+  web: string orders/katalog), hitungan live + sha `.env.staging`
+  utuh.
+- **Batas jujur**: pembayaran MASIH SIMULASI (`provider
+  'simulation'`, halaman `/pay/:code` berlabel simulasi) — gerbang
+  merchant nyata (Midtrans/Xendit) adalah Fase 14A dan membutuhkan
+  akun merchant user. Bukti UI dashboard Orders + builder node
+  katalog/checkout menunggu uji klik user sendiri (aturan fase:
+  tanpa Playwright; verifikasi = rantai server + typecheck + DB).
