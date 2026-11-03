@@ -28,6 +28,11 @@ import {
 import type { SegmentDefinition } from "@sahabat-kreator/contracts";
 import { withTenantDb, type DbTx } from "./tx";
 import { renderMessageText } from "./render-text";
+import {
+  broadcastExperimentKey,
+  broadcastVariantForBucket,
+  experimentBucket,
+} from "./experiments";
 import { effectiveOptInStatus } from "./contacts";
 import {
   evaluateSegmentDefinition,
@@ -928,6 +933,128 @@ function normalizeTemplateVariableSources(
   return sources.map((s) => s.trim()).slice(0, 25);
 }
 
+/**
+ * Keadaan akhir konfigurasi uji A/B broadcast (Fase 13D) — diselesaikan
+ * SATU KALI oleh helper ini untuk buat & edit agar kedua jalur tidak
+ * pernah berbeda aturan:
+ * - percentB kosong → A/B mati: semua kolom varian B dibersihkan.
+ * - WhatsApp → template B wajib lolos gerbang yang sama seperti
+ *   template A (cermin lokal, akun sama, APPROVED); teks varian B
+ *   adalah snapshot BODY template B (selaras perlakuan varian A).
+ * - Provider teks → isi teks B wajib non-kosong (`ab_incomplete`);
+ *   penunjukan template B dibersihkan.
+ */
+export type BroadcastAbConfigResolution =
+  | {
+      kind: "ok";
+      abSplitPercentB: number | null;
+      variantBMessageText: string | null;
+      variantBWhatsappTemplateId: string | null;
+      variantBTemplateVariableSources: string[];
+      /** Template B tergerbang (WhatsApp) untuk dipakai dispatch awal. */
+      variantBTemplate: WhatsAppTemplate | null;
+    }
+  | { kind: "ab_incomplete" }
+  | { kind: "template_required" }
+  | { kind: "template_not_found" }
+  | { kind: "template_not_approved"; status: string };
+
+async function resolveBroadcastAbConfig(
+  tx: DbTx,
+  input: {
+    tenantId: string;
+    channelAccountId: string;
+    provider: string;
+    abSplitPercentB: number | null | undefined;
+    variantBMessageText: string | null | undefined;
+    variantBWhatsappTemplateId: string | null | undefined;
+    variantBTemplateVariableSources: string[] | undefined;
+  },
+): Promise<BroadcastAbConfigResolution> {
+  const cleared = {
+    kind: "ok" as const,
+    abSplitPercentB: null,
+    variantBMessageText: null,
+    variantBWhatsappTemplateId: null,
+    variantBTemplateVariableSources: [] as string[],
+    variantBTemplate: null,
+  };
+  if (
+    input.abSplitPercentB === null ||
+    input.abSplitPercentB === undefined
+  ) {
+    return cleared;
+  }
+  const percentB = input.abSplitPercentB;
+  if (
+    !Number.isInteger(percentB) ||
+    percentB < 1 ||
+    percentB > 99
+  ) {
+    return { kind: "ab_incomplete" };
+  }
+  if (input.provider === "whatsapp") {
+    const bGate = await gateWhatsAppTemplate(
+      tx,
+      input.tenantId,
+      input.channelAccountId,
+      input.variantBWhatsappTemplateId,
+    );
+    if (bGate.kind !== "ok") return bGate;
+    return {
+      kind: "ok",
+      abSplitPercentB: percentB,
+      variantBMessageText:
+        bGate.template.bodyText ?? bGate.template.name,
+      variantBWhatsappTemplateId: bGate.template.id,
+      variantBTemplateVariableSources: normalizeTemplateVariableSources(
+        input.variantBTemplateVariableSources,
+      ),
+      variantBTemplate: bGate.template,
+    };
+  }
+  if (
+    !input.variantBMessageText ||
+    input.variantBMessageText.trim() === ""
+  ) {
+    return { kind: "ab_incomplete" };
+  }
+  return {
+    kind: "ok",
+    abSplitPercentB: percentB,
+    variantBMessageText: input.variantBMessageText,
+    variantBWhatsappTemplateId: null,
+    variantBTemplateVariableSources: [],
+    variantBTemplate: null,
+  };
+}
+
+/**
+ * Varian deterministik satu penerima (Fase 13D): hash stabil atas
+ * (broadcast, kontak) dibucket terhadap percentB. Fungsi murni —
+ * materialisasi ulang menghasilkan varian yang sama; dan baris
+ * penerima yang sudah ada tidak pernah ditulis ulang saat resume.
+ */
+export function broadcastVariantFor(
+  broadcastId: string,
+  contactId: string,
+  abSplitPercentB: number | null | undefined,
+): "a" | "b" {
+  if (
+    abSplitPercentB === null ||
+    abSplitPercentB === undefined ||
+    !Number.isInteger(abSplitPercentB) ||
+    abSplitPercentB < 1 ||
+    abSplitPercentB > 99
+  ) {
+    return "a";
+  }
+  return broadcastVariantForBucket(
+    experimentBucket(broadcastExperimentKey(broadcastId, contactId)),
+    abSplitPercentB,
+  );
+}
+
 const TEMPLATE_PLACEHOLDER_RE = /\{\{(\d+)\}\}/g;
 
 /**
@@ -993,6 +1120,7 @@ export type CreateBroadcastResult =
   | { kind: "template_not_found" }
   | { kind: "template_not_approved"; status: string }
   | { kind: "segment_not_found" }
+  | { kind: "ab_incomplete" }
   | { kind: "message_required" };
 
 export async function createBroadcast(
@@ -1014,6 +1142,15 @@ export async function createBroadcast(
      * selain itu false).
      */
     requireOptIn?: boolean;
+    /**
+     * Fase 13D: uji A/B. abSplitPercentB terisi = A/B menyala dan isi
+     * varian B wajib sah untuk provider (teks B / template B);
+     * kosong/null = tanpa A/B (kolom varian dibersihkan server).
+     */
+    abSplitPercentB?: number | null;
+    variantBMessageText?: string | null;
+    variantBWhatsappTemplateId?: string | null;
+    variantBTemplateVariableSources?: string[];
   },
 ): Promise<CreateBroadcastResult> {
   return withTenantDb(db, input.tenantId, async (tx) => {
@@ -1051,6 +1188,18 @@ export async function createBroadcast(
     } else if (!messageText || messageText.trim() === "") {
       return { kind: "message_required" as const };
     }
+    // Fase 13D: selesaikan konfigurasi A/B terhadap provider final
+    // (gerbang template B untuk WhatsApp; teks B wajib untuk teks).
+    const ab = await resolveBroadcastAbConfig(tx, {
+      tenantId: input.tenantId,
+      channelAccountId: input.channelAccountId,
+      provider: gate.provider,
+      abSplitPercentB: input.abSplitPercentB,
+      variantBMessageText: input.variantBMessageText,
+      variantBWhatsappTemplateId: input.variantBWhatsappTemplateId,
+      variantBTemplateVariableSources: input.variantBTemplateVariableSources,
+    });
+    if (ab.kind !== "ok") return ab;
     const [row] = await tx
       .insert(broadcasts)
       .values({
@@ -1062,6 +1211,10 @@ export async function createBroadcast(
         templateVariableSources,
         audienceFilter: normalizedFilter,
         requireOptIn: input.requireOptIn ?? gate.provider === "whatsapp",
+        abSplitPercentB: ab.abSplitPercentB,
+        variantBMessageText: ab.variantBMessageText,
+        variantBWhatsappTemplateId: ab.variantBWhatsappTemplateId,
+        variantBTemplateVariableSources: ab.variantBTemplateVariableSources,
         status: "draft",
         createdByUserId: input.userId,
       })
@@ -1076,6 +1229,9 @@ export async function createBroadcast(
         channelAccountId: input.channelAccountId,
         provider: gate.provider,
         ...(whatsappTemplateId ? { whatsappTemplateId } : {}),
+        ...(ab.abSplitPercentB !== null
+          ? { abSplitPercentB: ab.abSplitPercentB }
+          : {}),
       },
     });
     const broadcast = await selectBroadcastWithChannel(
@@ -1096,6 +1252,7 @@ export type UpdateBroadcastResult =
   | { kind: "template_required" }
   | { kind: "template_not_found" }
   | { kind: "template_not_approved"; status: string }
+  | { kind: "ab_incomplete" }
   | { kind: "segment_not_found" };
 
 export async function updateBroadcast(
@@ -1103,6 +1260,8 @@ export async function updateBroadcast(
   input: {
     tenantId: string;
     broadcastId: string;
+    /** Fase 13D: untuk audit perubahan konfigurasi A/B (opsional). */
+    userId?: string;
     patch: {
       name?: string;
       channelAccountId?: string;
@@ -1113,6 +1272,15 @@ export async function updateBroadcast(
       filter?: BroadcastAudienceFilter;
       /** Fase 13C: ubah gerbang opt-in (hanya selama draft). */
       requireOptIn?: boolean;
+      /**
+       * Fase 13D: konfigurasi uji A/B. abSplitPercentB null eksplisit
+       * = matikan A/B; undefined = pertahankan keadaan tersimpan
+       * (divalidasi ulang terhadap provider/channel akhir).
+       */
+      abSplitPercentB?: number | null;
+      variantBMessageText?: string | null;
+      variantBWhatsappTemplateId?: string | null;
+      variantBTemplateVariableSources?: string[];
     };
   },
 ): Promise<UpdateBroadcastResult> {
@@ -1187,10 +1355,63 @@ export async function updateBroadcast(
       patch.whatsappTemplateId = null;
       patch.templateVariableSources = [];
     }
+    // Fase 13D: keadaan akhir A/B diselesaikan terhadap provider +
+    // channel AKHIR (template B milik channel lama tidak ikut pindah
+    // — kandidatnya hanya dari patch; gerbang menolak bila tak sah).
+    const channelChanged = finalChannelId !== existing.channelAccountId;
+    const ab = await resolveBroadcastAbConfig(tx, {
+      tenantId: input.tenantId,
+      channelAccountId: finalChannelId,
+      provider: finalProvider,
+      abSplitPercentB:
+        input.patch.abSplitPercentB !== undefined
+          ? input.patch.abSplitPercentB
+          : existing.abSplitPercentB,
+      variantBMessageText:
+        input.patch.variantBMessageText !== undefined
+          ? input.patch.variantBMessageText
+          : existing.variantBMessageText,
+      variantBWhatsappTemplateId:
+        input.patch.variantBWhatsappTemplateId !== undefined
+          ? input.patch.variantBWhatsappTemplateId
+          : channelChanged
+            ? null
+            : existing.variantBWhatsappTemplateId,
+      variantBTemplateVariableSources:
+        input.patch.variantBTemplateVariableSources !== undefined
+          ? input.patch.variantBTemplateVariableSources
+          : ((existing.variantBTemplateVariableSources as
+              | string[]
+              | null) ?? []),
+    });
+    if (ab.kind !== "ok") return ab;
+    patch.abSplitPercentB = ab.abSplitPercentB;
+    patch.variantBMessageText = ab.variantBMessageText;
+    patch.variantBWhatsappTemplateId = ab.variantBWhatsappTemplateId;
+    patch.variantBTemplateVariableSources =
+      ab.variantBTemplateVariableSources;
+    const abChanged =
+      (existing.abSplitPercentB ?? null) !== ab.abSplitPercentB;
     await tx
       .update(broadcasts)
       .set(patch)
       .where(eq(broadcasts.id, input.broadcastId));
+    // Fase 13D: perubahan konfigurasi A/B (nyala/mati/persen) diaudit
+    // mengikuti pola audit broadcast.created/scheduled — edit biasa
+    // tanpa perubahan A/B tidak menambah baris audit (perilaku lama).
+    if (abChanged && input.userId) {
+      await tx.insert(auditLogs).values({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.userId,
+        action: "broadcast.ab_config_changed",
+        meta: {
+          broadcastId: input.broadcastId,
+          enabled: ab.abSplitPercentB !== null,
+          splitPercentB: ab.abSplitPercentB,
+        },
+      });
+    }
     const broadcast = await selectBroadcastWithChannel(
       tx,
       input.tenantId,
@@ -1301,6 +1522,24 @@ export async function scheduleBroadcast(
       }
       if (tGate.kind !== "ok") {
         return { kind: "template_required" as const };
+      }
+      // Fase 13D: template B ber-A/B digerbang dengan aturan yang sama.
+      if (existing.abSplitPercentB !== null) {
+        const bGate = await gateWhatsAppTemplate(
+          tx,
+          input.tenantId,
+          existing.channelAccountId,
+          existing.variantBWhatsappTemplateId,
+        );
+        if (bGate.kind === "template_not_approved") {
+          return {
+            kind: "template_not_approved" as const,
+            status: bGate.status,
+          };
+        }
+        if (bGate.kind !== "ok") {
+          return { kind: "template_required" as const };
+        }
       }
     }
     const now = new Date();
@@ -1589,6 +1828,7 @@ export async function dispatchBroadcast(
     // menutup broadcast `failed` berkode kontrak yang sama, bukan
     // mengirim diam-diam.
     let waTemplate: WhatsAppTemplate | null = null;
+    let waTemplateB: WhatsAppTemplate | null = null;
     if (account.provider === "whatsapp") {
       const tGate = await gateWhatsAppTemplate(
         tx,
@@ -1605,6 +1845,26 @@ export async function dispatchBroadcast(
         return { kind: "template_required" as const };
       }
       waTemplate = tGate.template;
+      // Fase 13D: gerbang dispatch yang sama untuk template B —
+      // template B yang dicabut persetujuannya menutup broadcast
+      // dengan kode yang sama, bukan mengirim varian A ke semua.
+      if (broadcast.abSplitPercentB !== null) {
+        const bGate = await gateWhatsAppTemplate(
+          tx,
+          tenantId,
+          broadcast.channelAccountId,
+          broadcast.variantBWhatsappTemplateId,
+        );
+        if (bGate.kind === "template_not_approved") {
+          await failBroadcast("BROADCAST_TEMPLATE_NOT_APPROVED");
+          return { kind: "template_not_approved" as const };
+        }
+        if (bGate.kind !== "ok") {
+          await failBroadcast("BROADCAST_TEMPLATE_REQUIRED");
+          return { kind: "template_required" as const };
+        }
+        waTemplateB = bGate.template;
+      }
     }
     if (broadcast.status === "scheduled") {
       const now = new Date();
@@ -1625,12 +1885,13 @@ export async function dispatchBroadcast(
       broadcast,
       provider: account.provider as BroadcastProvider,
       waTemplate,
+      waTemplateB,
     };
   });
   if (claim.kind !== "claimed") {
     return { dispatched: false, reason: claim.kind };
   }
-  const { broadcast, provider, waTemplate } = claim;
+  const { broadcast, provider, waTemplate, waTemplateB } = claim;
   const filter = normalizeFilter(
     broadcast.audienceFilter as BroadcastAudienceFilter,
   );
@@ -1673,6 +1934,7 @@ export async function dispatchBroadcast(
   let materialized = 0;
   let queuedCount = 0;
   let skippedCount = 0;
+  let variantBCount = 0;
   for (let offset = 0; offset < candidates.length; offset += BROADCAST_DISPATCH_CHUNK) {
     const chunk = candidates.slice(offset, offset + BROADCAST_DISPATCH_CHUNK);
     const outcome = await withTenantDb(db, tenantId, async (tx) => {
@@ -1682,7 +1944,13 @@ export async function dispatchBroadcast(
         .where(eq(broadcasts.id, broadcastId))
         .limit(1);
       if (!current || current.status !== "sending") {
-        return { stopped: true as const, materialized: 0, queued: 0, skipped: 0 };
+        return {
+          stopped: true as const,
+          materialized: 0,
+          queued: 0,
+          skipped: 0,
+          variantB: 0,
+        };
       }
       // Lewati kontak yang sudah punya baris (resume sesudah retry).
       const existing = await tx
@@ -1702,18 +1970,42 @@ export async function dispatchBroadcast(
       let m = 0;
       let q = 0;
       let s = 0;
+      let vb = 0;
       for (const candidate of chunk) {
         if (existingIds.has(candidate.contactId)) continue;
+        // Fase 13D: varian penerima ditentukan DETERMINISTIK dari
+        // (broadcast, kontak) SEBELUM klasifikasi — penerima yang
+        // di-skip pun membawa variannya, agar rincian per varian
+        // utuh; penerima lama tidak pernah dihitung ulang (barisnya
+        // sudah ada → dilewati di atas), jadi varian tak berbalik.
+        const variant = broadcastVariantFor(
+          broadcastId,
+          candidate.contactId,
+          broadcast.abSplitPercentB,
+        );
+        const candidateTemplate =
+          provider === "whatsapp"
+            ? variant === "b"
+              ? waTemplateB
+              : waTemplate
+            : null;
+        const candidateSources =
+          variant === "b"
+            ? ((broadcast.variantBTemplateVariableSources as
+                | string[]
+                | null) ?? [])
+            : ((broadcast.templateVariableSources as string[] | null) ?? []);
         // Fase 13C: klasifikasi TUNGGAL (fungsi yang sama dengan
         // pratinjau audiens) — opt-out → gerbang opt-in → jendela
         // 24 jam Meta → pemeriksaan alamat/variabel WhatsApp.
+        // Fase 13D: klasifikasi berjalan atas template VARIAN
+        // penerima (aturan identik untuk kedua varian).
         const classified = classifyBroadcastCandidate({
           candidate,
           provider,
           requireOptIn: broadcast.requireOptIn,
-          waTemplate,
-          templateVariableSources:
-            (broadcast.templateVariableSources as string[] | null) ?? [],
+          waTemplate: candidateTemplate,
+          templateVariableSources: candidateSources,
           now,
         });
         if (classified.kind === "skip") {
@@ -1724,9 +2016,11 @@ export async function dispatchBroadcast(
             conversationId: candidate.conversationId,
             status: "skipped",
             skipReason: classified.reason,
+            variant,
           });
           m += 1;
           s += 1;
+          if (variant === "b") vb += 1;
           continue;
         }
         const templateBodyParams = classified.templateBodyParams;
@@ -1756,12 +2050,19 @@ export async function dispatchBroadcast(
         // seluruh audiens, bukan satu varian untuk semua. Untuk
         // WhatsApp isi pesan adalah pratinjau template berparameter
         // (templatePayload membawa muatan kirim sesungguhnya).
+        // Fase 13D: teks/template yang dirender adalah milik VARIAN
+        // penerima (B memakai teks B / template B + sumber variabel B).
         const rendered =
           provider === "whatsapp"
             ? templatePreview!
-            : renderMessageText(broadcast.messageText, {
-                name: candidate.contactName,
-              });
+            : renderMessageText(
+                variant === "b" && broadcast.variantBMessageText
+                  ? broadcast.variantBMessageText
+                  : broadcast.messageText,
+                {
+                  name: candidate.contactName,
+                },
+              );
         const [message] = await tx
           .insert(messages)
           .values({
@@ -1774,8 +2075,8 @@ export async function dispatchBroadcast(
             templatePayload:
               provider === "whatsapp"
                 ? {
-                    name: waTemplate!.name,
-                    languageCode: waTemplate!.language,
+                    name: candidateTemplate!.name,
+                    languageCode: candidateTemplate!.language,
                     bodyParams: templateBodyParams!,
                   }
                 : undefined,
@@ -1789,6 +2090,7 @@ export async function dispatchBroadcast(
           conversationId,
           messageId: message.id,
           status: "queued",
+          variant,
         });
         await tx
           .update(conversations)
@@ -1804,12 +2106,20 @@ export async function dispatchBroadcast(
         });
         m += 1;
         q += 1;
+        if (variant === "b") vb += 1;
       }
-      return { stopped: false as const, materialized: m, queued: q, skipped: s };
+      return {
+        stopped: false as const,
+        materialized: m,
+        queued: q,
+        skipped: s,
+        variantB: vb,
+      };
     });
     materialized += outcome.materialized;
     queuedCount += outcome.queued;
     skippedCount += outcome.skipped;
+    variantBCount += outcome.variantB;
     if (outcome.stopped) {
       return {
         dispatched: true,
@@ -1834,6 +2144,12 @@ export async function dispatchBroadcast(
         recipients: materialized,
         queued: queuedCount,
         skipped: skippedCount,
+        ...(broadcast.abSplitPercentB !== null
+          ? {
+              abSplitPercentB: broadcast.abSplitPercentB,
+              variantBRecipients: variantBCount,
+            }
+          : {}),
       },
     });
   });

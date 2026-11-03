@@ -52,6 +52,11 @@ export const ErrorCodeSchema = z.enum([
   "BROADCAST_INVALID_STATE",
   "BROADCAST_TEMPLATE_REQUIRED",
   "BROADCAST_TEMPLATE_NOT_APPROVED",
+  // Fase 13D: uji A/B broadcast menyala (abSplitPercentB terisi)
+  // tetapi isi varian B tidak sah untuk provider-nya (teks B kosong
+  // untuk provider teks) → 422. Template B WhatsApp yang hilang /
+  // belum APPROVED memakai kode template yang sama seperti varian A.
+  "BROADCAST_AB_INCOMPLETE",
   // Fase 10A: Meta menolak operasi template (buat/sinkron/hapus —
   // nama ganda, bentuk tidak sah, contoh variabel kurang) → 422;
   // akun WhatsApp tanpa WABA induk tercatat → 422.
@@ -2607,6 +2612,23 @@ export const CreateBroadcastRequestSchema = z.object({
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
   /** Gerbang opt-in (Fase 13C); kosong = bawaan server per provider. */
   requireOptIn: z.boolean().optional(),
+  /**
+   * Uji A/B (Fase 13D): persen penerima yang masuk varian B (1..99).
+   * Mengisinya MENYALAKAN A/B dan mewajibkan isi varian B: teks
+   * `variantBMessageText` untuk provider teks, atau
+   * `variantBWhatsappTemplateId` untuk WhatsApp (gerbang template
+   * yang sama seperti varian A). Tidak diisi = tanpa A/B.
+   */
+  abSplitPercentB: z.number().int().min(1).max(99).optional(),
+  /** Isi varian B untuk provider teks (Fase 13D). */
+  variantBMessageText: z.string().min(1).max(4096).optional(),
+  /** Template WhatsApp varian B (Fase 13D) — wajib & APPROVED untuk channel whatsapp ber-A/B. */
+  variantBWhatsappTemplateId: z.string().uuid().optional(),
+  /** Sumber variabel template B per posisi (Fase 13D). */
+  variantBTemplateVariableSources: z
+    .array(z.string().min(1).max(64))
+    .max(25)
+    .optional(),
 });
 export type CreateBroadcastRequest = z.infer<
   typeof CreateBroadcastRequestSchema
@@ -2625,6 +2647,19 @@ export const UpdateBroadcastRequestSchema = z.object({
   audienceFilter: BroadcastAudienceFilterSchema.optional(),
   /** Gerbang opt-in (Fase 13C) — hanya bisa diubah selama draft. */
   requireOptIn: z.boolean().optional(),
+  /**
+   * Uji A/B (Fase 13D) — hanya selama draft. `null` eksplisit =
+   * MATIKAN A/B (semua kolom varian B dibersihkan); tidak diisi =
+   * biarkan seperti tersimpan. Keadaan akhir selalu divalidasi utuh:
+   * A/B menyala wajib punya isi varian B yang sah untuk provider-nya.
+   */
+  abSplitPercentB: z.number().int().min(1).max(99).nullable().optional(),
+  variantBMessageText: z.string().min(1).max(4096).nullable().optional(),
+  variantBWhatsappTemplateId: z.string().uuid().nullable().optional(),
+  variantBTemplateVariableSources: z
+    .array(z.string().min(1).max(64))
+    .max(25)
+    .optional(),
 });
 export type UpdateBroadcastRequest = z.infer<
   typeof UpdateBroadcastRequestSchema
@@ -2691,6 +2726,12 @@ export const BroadcastRecipientResponseSchema = z.object({
   conversationId: z.string().uuid().nullable(),
   messageId: z.string().uuid().nullable(),
   status: BroadcastRecipientStatusSchema,
+  /**
+   * Varian uji A/B penerima (Fase 13D): "a" untuk semua penerima
+   * broadcast tanpa A/B; penugasan deterministik per
+   * (broadcast, kontak) dan tidak berubah pada materialisasi ulang.
+   */
+  variant: z.enum(["a", "b"]),
   skipReason: BroadcastSkipReasonSchema.nullable(),
   errorCode: z.string().nullable(),
   createdAt: z.string().datetime(),
@@ -2715,6 +2756,65 @@ export const BroadcastRecipientListQuerySchema = z.object({
 });
 export type BroadcastRecipientListQuery = z.infer<
   typeof BroadcastRecipientListQuerySchema
+>;
+
+/**
+ * Konfigurasi uji A/B broadcast sebagaimana tersimpan (gema untuk
+ * formulir edit + panel hasil). `null` pada respons hasil = broadcast
+ * tanpa A/B. Untuk WhatsApp `variantBMessageText` adalah snapshot
+ * BODY template B; untuk provider teks ia isi pesan B itu sendiri.
+ */
+export const BroadcastAbConfigSchema = z.object({
+  splitPercentB: z.number().int().min(1).max(99),
+  variantBMessageText: z.string().nullable(),
+  variantBWhatsappTemplateId: z.string().uuid().nullable(),
+  variantBTemplateVariableSources: z.array(z.string()),
+});
+export type BroadcastAbConfig = z.infer<typeof BroadcastAbConfigSchema>;
+
+/** Rincian alasan skip per varian — alasan 13C dipertahankan utuh. */
+export const BroadcastVariantSkipReasonsSchema = z.object({
+  opted_out: z.number().int().nonnegative(),
+  not_opted_in: z.number().int().nonnegative(),
+  outside_24h_window: z.number().int().nonnegative(),
+  template_variable_missing: z.number().int().nonnegative(),
+  missing_phone_number: z.number().int().nonnegative(),
+  message_deleted: z.number().int().nonnegative(),
+});
+export type BroadcastVariantSkipReasons = z.infer<
+  typeof BroadcastVariantSkipReasonsSchema
+>;
+
+/**
+ * Statistik satu varian broadcast — SELALU dihitung server dari
+ * broadcast_recipients (sumber kebenaran yang sama seperti statistik
+ * broadcast keseluruhan). `assigned` = semua baris penerima varian
+ * ini (termasuk yang skipped). TANPA putusan pemenang: broadcast
+ * tidak punya metrik hasil per penerima yang sebanding antar varian
+ * (atribusi balasan sengaja tidak ditebak — lihat matriks cakupan).
+ */
+export const BroadcastVariantStatsSchema = z.object({
+  variant: z.enum(["a", "b"]),
+  assigned: z.number().int().nonnegative(),
+  queued: z.number().int().nonnegative(),
+  sent: z.number().int().nonnegative(),
+  delivered: z.number().int().nonnegative(),
+  read: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  cancelled: z.number().int().nonnegative(),
+  skippedByReason: BroadcastVariantSkipReasonsSchema,
+});
+export type BroadcastVariantStats = z.infer<typeof BroadcastVariantStatsSchema>;
+
+/** Respons GET /tenants/:tenantId/broadcasts/:id/ab-results (dashboard). */
+export const BroadcastAbResultsResponseSchema = z.object({
+  broadcastId: z.string().uuid(),
+  abTest: BroadcastAbConfigSchema.nullable(),
+  variants: z.array(BroadcastVariantStatsSchema),
+});
+export type BroadcastAbResultsResponse = z.infer<
+  typeof BroadcastAbResultsResponseSchema
 >;
 
 // ---------------------------------------------------------------------------
@@ -2926,7 +3026,22 @@ export type CreateWhatsAppTemplateRequest = z.infer<
  *                   membutuhkannya, mis. ai_response).
  * - ab_split      { percentA: int 1..99 } — cabang edge "a"/"b";
  *                   pilihan acak per run dicatat di detail langkah.
- *                   (Lapisan eksperimen A/B penuh = Fase 13D.)
+ *                   Mode EKSPERIMEN (Fase 13D): config tambahan
+ *                   opsional { experiment: true, experimentLabel?,
+ *                   conversionNodeId? } — penugasan menjadi
+ *                   DETERMINISTIK per (flow, node, kontak) dari hash
+ *                   stabil yang dibucket oleh percentA dan dicatat
+ *                   SATU KALI di flow_experiment_assignments
+ *                   (penugasan pertama menang selamanya, jadi kontak
+ *                   selalu masuk varian yang sama di semua run).
+ *                   conversionNodeId menamai SATU node lain di graf
+ *                   yang sama sebagai titik konversi: run yang
+ *                   langkahnya melewati node itu (langkah sukses
+ *                   SESUDAH langkah split) terhitung terkonversi
+ *                   untuk variannya. Tanpa experiment:true perilaku
+ *                   tetap persis acak per run (12A). Hasil eksperimen
+ *                   (per varian + uji dua-proporsi) hanya permukaan
+ *                   dashboard — tidak ada rute v1/SDK/MCP.
  * - send_payment_link { productId } — memakai layanan payment link
  *                   yang sama dengan tool agent (link SIMULASI
  *                   berlabel) lalu mengirimkannya sebagai pesan keluar
@@ -3045,7 +3160,16 @@ export const FlowNodeConfigSchema = z.union([
     saveToField: z.string().min(1).max(128).optional(),
   }),
   z.object({ flowId: z.string().uuid() }),
-  z.object({ percentA: z.number().int().min(1).max(99) }),
+  z.object({
+    percentA: z.number().int().min(1).max(99),
+    // Fase 13D — mode eksperimen (semua opsional; tanpa
+    // experiment:true node berperilaku persis 12A). Keabsahan rinci
+    // (conversionNodeId harus menunjuk node yang ada di graf yang
+    // sama) ditegakkan validasi aktivasi di core.
+    experiment: z.boolean().optional(),
+    experimentLabel: z.string().min(1).max(128).optional(),
+    conversionNodeId: z.string().min(1).max(128).optional(),
+  }),
   z.object({ productId: z.string().uuid() }),
   z.object({
     amount: z.number().int().min(0).max(100_000),
@@ -3216,6 +3340,83 @@ export const FlowRunStepListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 export type FlowRunStepListQuery = z.infer<typeof FlowRunStepListQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Fase 13D — Eksperimen A/B (hasil). PERMUKAAN DASHBOARD SAJA:
+// skema-skema di bawah dipakai endpoint dashboard
+// GET /tenants/:tenantId/flows/:id/experiments dan
+// GET /tenants/:tenantId/broadcasts/:id/ab-results. SENGAJA tidak ada
+// rute v1 / scope / SDK / MCP untuk hasil eksperimen (artefak
+// kurasi builder & pelaporan operator — preseden yang sama seperti
+// flow & broadcast itu sendiri di matriks cakupan 15A).
+// ---------------------------------------------------------------------------
+
+/** Statistik satu varian eksperimen flow (per node ab_split). */
+export const FlowExperimentVariantStatsSchema = z.object({
+  branch: z.enum(["a", "b"]),
+  /** Kontak unik yang pernah ditugaskan ke varian ini. */
+  assignedContacts: z.number().int().nonnegative(),
+  /** Run yang melewati node split dan masuk varian ini. */
+  runs: z.number().int().nonnegative(),
+  /** Run di atas yang berakhir `completed`. */
+  completedRuns: z.number().int().nonnegative(),
+  /**
+   * Run yang langkah suksesnya melewati node konversi SESUDAH
+   * langkah split (hanya bermakna bila conversionNodeId diisi;
+   * tanpa titik konversi selalu 0 dan conversionRate null).
+   */
+  conversions: z.number().int().nonnegative(),
+  /** conversions / runs; null bila runs = 0 atau tanpa titik konversi. */
+  conversionRate: z.number().min(0).max(1).nullable(),
+});
+export type FlowExperimentVariantStats = z.infer<
+  typeof FlowExperimentVariantStatsSchema
+>;
+
+/**
+ * Putusan statistik hasil eksperimen — KEJUJURAN STATISTIK (pola
+ * kejujuran biaya 9B): petunjuk pemenang HANYA muncul bila uji
+ * dua-proporsi (z-test pooled, dua sisi) atas tingkat konversi
+ * menghasilkan p < 0.05 DAN kedua varian mencapai sampel minimum;
+ * nilai z dan p selalu dikirim agar bisa ditampilkan apa adanya.
+ */
+export const FlowExperimentVerdictSchema = z.object({
+  status: z.enum([
+    "not_enough_data",
+    "no_significant_difference",
+    "winner",
+  ]),
+  /** Cabang pemenang; hanya terisi saat status = "winner". */
+  winnerBranch: z.enum(["a", "b"]).nullable(),
+  /** Statistik z uji dua-proporsi; null bila belum dihitung. */
+  z: z.number().nullable(),
+  /** Nilai p dua sisi; null bila belum dihitung. */
+  pValue: z.number().min(0).max(1).nullable(),
+  /** Sampel minimum (run per varian) sebelum putusan dihitung. */
+  minSamplePerVariant: z.number().int().positive(),
+});
+export type FlowExperimentVerdict = z.infer<typeof FlowExperimentVerdictSchema>;
+
+/** Hasil satu node ab_split mode eksperimen pada satu flow. */
+export const FlowExperimentResultSchema = z.object({
+  nodeId: z.string(),
+  /** Label eksperimen dari config node; null bila tidak diisi. */
+  label: z.string().nullable(),
+  percentA: z.number().int().min(1).max(99),
+  /** Node titik konversi dari config; null bila tidak diisi. */
+  conversionNodeId: z.string().nullable(),
+  variants: z.array(FlowExperimentVariantStatsSchema),
+  verdict: FlowExperimentVerdictSchema,
+});
+export type FlowExperimentResult = z.infer<typeof FlowExperimentResultSchema>;
+
+export const FlowExperimentsResponseSchema = z.object({
+  flowId: z.string().uuid(),
+  experiments: z.array(FlowExperimentResultSchema),
+});
+export type FlowExperimentsResponse = z.infer<
+  typeof FlowExperimentsResponseSchema
+>;
 
 // ---------------------------------------------------------------------------
 // Fase 12B — Galeri Template Flow

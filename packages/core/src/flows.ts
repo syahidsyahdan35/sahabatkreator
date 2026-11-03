@@ -8,6 +8,7 @@ import {
   automations,
   contacts,
   conversations,
+  flowExperimentAssignments,
   flowRunSteps,
   flowRuns,
   flows,
@@ -24,6 +25,11 @@ import {
 } from "@sahabat-kreator/db";
 import type { EmbeddingProvider, LlmProvider } from "@sahabat-kreator/ai";
 import { withTenantDb, type DbTx } from "./tx";
+import {
+  experimentBucket,
+  flowBranchForBucket,
+  flowExperimentKey,
+} from "./experiments";
 import { renderMessageText } from "./render-text";
 import { respondToInboundMessage } from "./agent-runtime";
 import { buildPaymentUrl, createPaymentLink } from "./products";
@@ -533,6 +539,35 @@ export function validateFlowNodeConfig(node: FlowGraphNode): FlowGraphIssue[] {
           "Node ab_split membutuhkan config.percentA bilangan bulat 1..99",
         );
       }
+      // Fase 13D — mode eksperimen: flag harus boolean bila diisi;
+      // label string pendek; conversionNodeId string id node (rujukan
+      // ke node yang ADA di graf yang sama diperiksa validateFlowGraph
+      // yang punya konteks graf utuh).
+      if (c.experiment !== undefined && typeof c.experiment !== "boolean") {
+        err(
+          "AB_EXPERIMENT_INVALID",
+          "Node ab_split membutuhkan config.experiment boolean bila diisi",
+        );
+      }
+      if (
+        c.experimentLabel !== undefined &&
+        (typeof c.experimentLabel !== "string" ||
+          c.experimentLabel.length > 128)
+      ) {
+        err(
+          "AB_EXPERIMENT_LABEL_INVALID",
+          "Label eksperimen ab_split harus string ≤ 128 karakter",
+        );
+      }
+      if (
+        c.conversionNodeId !== undefined &&
+        !isNonEmptyString(c.conversionNodeId)
+      ) {
+        err(
+          "AB_CONVERSION_NODE_INVALID",
+          "Node ab_split membutuhkan config.conversionNodeId id node non-kosong bila diisi",
+        );
+      }
       break;
     }
     case "send_payment_link":
@@ -685,6 +720,28 @@ export async function validateFlowGraph(
     }
     if (node.type === "trigger" && out.length === 0) {
       warn("TRIGGER_NO_NEXT", node.id, "Trigger tidak punya node lanjutan — run akan langsung selesai");
+    }
+  }
+
+  // Fase 13D: titik konversi eksperimen ab_split harus menunjuk node
+  // LAIN yang ada di graf yang sama (menunjuk diri sendiri = konversi
+  // selalu/ tak pernah bermakna — ditolak di sini, bukan ditebak).
+  for (const node of graph.nodes) {
+    if (node.type !== "ab_split" || node.config.experiment !== true) {
+      continue;
+    }
+    const conv = node.config.conversionNodeId;
+    if (conv === undefined) continue;
+    if (
+      typeof conv !== "string" ||
+      conv === node.id ||
+      !ids.has(conv)
+    ) {
+      err(
+        "AB_CONVERSION_NODE_INVALID",
+        node.id,
+        "Titik konversi eksperimen ab_split harus menunjuk node lain yang ada di graf ini",
+      );
     }
   }
 
@@ -878,6 +935,53 @@ async function flowAudit(
   });
 }
 
+/**
+ * Fase 13D: audit nyala/mati mode eksperimen per node ab_split —
+ * bandingkan flag `experiment` per id node antara graf lama (null =
+ * belum ada) dan graf baru; setiap perubahan arah menulis satu baris
+ * `flow.experiment_enabled` / `flow.experiment_disabled`. Perubahan
+ * persen/label saja tidak diaudit di sini (tercakup flow.updated).
+ */
+async function auditExperimentToggles(
+  tx: DbTx,
+  tenantId: string,
+  input: {
+    userId: string;
+    flowId: string;
+    oldGraph: FlowGraphData | null;
+    newGraph: FlowGraphData;
+  },
+): Promise<void> {
+  const oldSplits = new Map(
+    (input.oldGraph?.nodes ?? [])
+      .filter((n) => n.type === "ab_split")
+      .map((n) => [n.id, n.config.experiment === true] as const),
+  );
+  for (const node of input.newGraph.nodes) {
+    if (node.type !== "ab_split") continue;
+    const was = oldSplits.get(node.id) ?? false;
+    const is = node.config.experiment === true;
+    if (was === is) continue;
+    await flowAudit(tx, tenantId, {
+      actorType: "user",
+      actorId: input.userId,
+      action: is ? "flow.experiment_enabled" : "flow.experiment_disabled",
+      flowId: input.flowId,
+      meta: {
+        nodeId: node.id,
+        label:
+          typeof node.config.experimentLabel === "string"
+            ? node.config.experimentLabel
+            : null,
+        percentA:
+          typeof node.config.percentA === "number"
+            ? node.config.percentA
+            : null,
+      },
+    });
+  }
+}
+
 export async function createFlow(
   db: Database,
   input: {
@@ -905,6 +1009,14 @@ export async function createFlow(
       flowId: row.id,
       meta: { name: row.name },
     });
+    if (input.graph) {
+      await auditExperimentToggles(tx, input.tenantId, {
+        userId: input.userId,
+        flowId: row.id,
+        oldGraph: null,
+        newGraph: input.graph,
+      });
+    }
     return { kind: "created" as const, flow: { ...row, runCount: 0 } };
   });
 }
@@ -1087,6 +1199,17 @@ export async function updateFlow(
         graph: input.patch.graph !== undefined,
       },
     });
+    // Fase 13D: nyala/mati mode eksperimen per node ab_split diaudit
+    // tersendiri (mengubah cara kontak ditugaskan) — lihat
+    // auditExperimentToggles.
+    if (input.patch.graph !== undefined) {
+      await auditExperimentToggles(tx, input.tenantId, {
+        userId: input.userId,
+        flowId: row.id,
+        oldGraph: normalizeFlowGraph(existing.graph),
+        newGraph: input.patch.graph,
+      });
+    }
     return { kind: "updated" as const, flow: row };
   });
 }
@@ -2404,8 +2527,106 @@ async function executeNodeInTx(
       ) {
         throw new FlowNodeError("ab_split dengan config.percentA tidak sah");
       }
-      // Acak per run; hasil undian DICATAT agar distribusi bisa diaudit
-      // dari log langkah (dan Fase 13D bisa menempel di sini).
+      // Fase 13D — mode eksperimen: penugasan DETERMINISTIK dan
+      // LENGKET per (flow, node, kontak). Penugasan pertama
+      // dipersistenkan (unik flow+node+kontak) dan selalu menang —
+      // kontak tidak berpindah varian walau percentA diubah di
+      // tengah eksperimen atau run diulang berapa pun kali.
+      if (c.experiment === true && ctx.contact) {
+        const contactId = ctx.contact.id;
+        const [existing] = await tx
+          .select({
+            branch: flowExperimentAssignments.branch,
+            percentA: flowExperimentAssignments.percentA,
+          })
+          .from(flowExperimentAssignments)
+          .where(
+            and(
+              eq(flowExperimentAssignments.tenantId, tenantId),
+              eq(flowExperimentAssignments.flowId, run.flowId),
+              eq(flowExperimentAssignments.nodeId, node.id),
+              eq(flowExperimentAssignments.contactId, contactId),
+            ),
+          )
+          .limit(1);
+        if (existing) {
+          const branch = existing.branch === "b" ? "b" : "a";
+          return {
+            detail: {
+              outcome: "split",
+              experiment: true,
+              percentA: existing.percentA,
+              branch,
+              sticky: true,
+            },
+            branch,
+          };
+        }
+        const bucket = experimentBucket(
+          flowExperimentKey(run.flowId, node.id, contactId),
+        );
+        const branch = flowBranchForBucket(bucket, percentA);
+        const label =
+          typeof c.experimentLabel === "string" && c.experimentLabel
+            ? c.experimentLabel.slice(0, 255)
+            : null;
+        const [inserted] = await tx
+          .insert(flowExperimentAssignments)
+          .values({
+            tenantId,
+            flowId: run.flowId,
+            nodeId: node.id,
+            contactId,
+            runId: run.id,
+            branch,
+            label,
+            percentA,
+          })
+          .onConflictDoNothing()
+          .returning({ branch: flowExperimentAssignments.branch });
+        if (!inserted) {
+          // Balapan resume ganda: penugasan serentak dari run lain
+          // menang — baca ulang dan pakai branch-nya (kelengketan
+          // tidak boleh kalah oleh balapan).
+          const [raced] = await tx
+            .select({ branch: flowExperimentAssignments.branch })
+            .from(flowExperimentAssignments)
+            .where(
+              and(
+                eq(flowExperimentAssignments.tenantId, tenantId),
+                eq(flowExperimentAssignments.flowId, run.flowId),
+                eq(flowExperimentAssignments.nodeId, node.id),
+                eq(flowExperimentAssignments.contactId, contactId),
+              ),
+            )
+            .limit(1);
+          const racedBranch = raced?.branch === "b" ? "b" : branch;
+          return {
+            detail: {
+              outcome: "split",
+              experiment: true,
+              percentA,
+              bucket,
+              branch: racedBranch,
+              sticky: true,
+            },
+            branch: racedBranch,
+          };
+        }
+        return {
+          detail: {
+            outcome: "split",
+            experiment: true,
+            percentA,
+            bucket,
+            branch,
+            sticky: false,
+          },
+          branch,
+        };
+      }
+      // Acak per run (12A, tanpa mode eksperimen); hasil undian
+      // DICATAT agar distribusi bisa diaudit dari log langkah.
       const roll = Math.floor(Math.random() * 100);
       const branch = roll < percentA ? ("a" as const) : ("b" as const);
       return {
