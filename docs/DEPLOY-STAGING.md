@@ -6116,3 +6116,102 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   kandidat optimasi SQL berikutnya. (3) Hitungan anggota segmen
   tidak disimpan di respons segmen; permukaan hitungan adalah
   pratinjau (dipakai juga UI pengelola segmen).
+
+## Fase 13D — A/B Testing Flow & Broadcast (2026-11-03)
+
+- **Migrasi 0004_experiments_ab** via `pnpm db:generate` (+ blok RLS
+  [K-13D]): jurnal kini **5 entri**; staging **49 tabel / 63 policy**.
+  Isi: tabel baru `flow_experiment_assignments` (tenant/flow/contact/
+  run FK cascade NOT NULL, node id, branch, snapshot percentA +
+  label; UNIQUE (tenant, flow, node, contact) — baris pertama menang
+  selamanya); `broadcasts` + `ab_split_percent_b` int NULL
+  (kondisional: NULL = A/B mati), `variant_b_message_text` NULL,
+  `variant_b_whatsapp_template_id` NULL (FK template, SET NULL),
+  `variant_b_template_variable_sources` jsonb NOT NULL default [];
+  `broadcast_recipients.variant` varchar(8) NOT NULL default 'a' +
+  index (broadcast, variant).
+- **Flow A/B — penugasan lengket**: node `ab_split` dengan config
+  `experiment: true` (+ `experimentLabel?`, `conversionNodeId?`)
+  menugaskan cabang DETERMINISTIK per (flow, node, kontak): bucket
+  hash FNV-1a 32-bit % 10.000 atas kunci
+  `flow-ab:<flowId>:<nodeId>:<contactId>` dibobotkan `percentA`;
+  penugasan pertama disimpan dan dipakai ulang semua run berikutnya
+  (detail langkah membawa `experiment: true` + bucket). Mode mati =
+  perilaku 12A persis (acak per run, detail `roll`, tanpa baris
+  penugasan). Konversi = run memiliki langkah SUKSES di node konversi
+  dengan seq LEBIH BESAR dari seq langkah split-nya dalam run yang
+  sama. Hasil per split: `GET /tenants/:tid/flows/:id/experiments` —
+  kontak unik tertugaskan, run, run selesai, konversi + rate per
+  varian. **Statistik jujur**: putusan pemenang HANYA dari uji z
+  dua-proporsi nyata (pooled, dua sisi, p via CDF normal) DAN kedua
+  varian ≥ 30 run (`EXPERIMENT_MIN_RUNS_PER_VARIANT`); di bawah itu
+  verdict `not_enough_data` dengan z/p NULL — z/p selalu ditampilkan
+  saat putusan diberikan. Nyala/mati mode diaudit
+  `flow.experiment_enabled` / `flow.experiment_disabled`.
+- **Broadcast A/B**: draft membawa varian B — teks kedua (provider
+  teks) atau template kedua + sumber variabelnya (WhatsApp, gerbang
+  template yang SAMA seperti A di buat/edit/jadwal/dispatch);
+  `abSplitPercentB` 1..99. Penugasan per penerima deterministik
+  (kunci `broadcast-ab:<broadcastId>:<contactId>`, ambang percentB),
+  dihitung SEBELUM klasifikasi 13C sehingga penerima skipped pun
+  membawa varian; tersimpan di baris penerima dan tidak berbalik
+  pada materialisasi ulang (kandidat yang sudah punya baris memang
+  dikecualikan dispatch). Isi yang terkirim = isi varian penerima
+  (teks B / payload template B). Rincian per varian:
+  `GET /tenants/:tid/broadcasts/:id/ab-results` (assigned/queued/
+  sent/delivered/read/failed/skipped/cancelled + rincian alasan
+  skip 13C per varian) sekaligus gema konfigurasi A/B untuk prefill
+  formulir edit. Error baru `BROADCAST_AB_INCOMPLETE` (422).
+  Perubahan konfigurasi A/B diaudit `broadcast.ab_config_changed`.
+  **Atribusi balasan SENGAJA tidak dihitung**: tidak ada tautan
+  tersimpan dari pesan masuk ke (broadcast, varian) — percakapan
+  dipakai bersama flow/agen — jadi angka balasan per varian akan
+  menjadi tebakan, bukan pengukuran.
+- **Permukaan publik**: A/B tetap **dashboard-only** (baris matriks
+  baru di `docs/COVERAGE-MATRIX.md` dengan alasan tertulis; config
+  eksperimen flow hidup di dalam graf yang memang sudah terbaca v1
+  sejak 15A seperti `percentA`; kolom varian broadcast SENGAJA tidak
+  ditambahkan ke `BroadcastResponse` agar permukaan v1 tidak
+  berubah). **30 rute v1 tetap**; `pnpm check:drift` lulus.
+- **Verifikasi**: typecheck monorepo hijau; PGlite verify SEMUA
+  LULUS (**38 seksi**, termasuk [38] baru: nulabilitas/default kolom
+  A/B, unique lengket menolak duplikat, isolasi RLS tabel
+  penugasan); build semua dist + grep bundle server (api:
+  `ab-results`, worker: `flow_experiment_assignments` + kunci
+  `broadcast-ab:`, web: `abResultsTitle`). **Rantai terisolasi di
+  server** (DB buangan `sk_chain13d` + role app sendiri + API :3215
+  + worker rantai + Redis DB 14 + mock gabungan Telegram/Meta
+  :8414): **40 PASS / 0 FAIL** — 130 kontak: distribusi 50/50 dalam
+  toleransi 25–75% (a=72/b=58 pada lari tercatat; lari debug skala
+  sama a=65/b=65), kontak sama 5 run → varian sama & cocok penugasan
+  (mismatch langkah vs penugasan = 0 pada reproduksi terkontrol),
+  konversi hanya via node tertanda (A 100% / B 0%), putusan winner
+  nyata dari z-test, sampel kecil → not_enough_data, regresi split
+  non-eksperimen, broadcast teks A/B (split ±toleransi, isi per
+  penerima cocok varian, statistik endpoint = DB, dispatch ulang
+  via re-entry core tidak membalik varian), skip opt-in 13C di
+  dalam varian (not_opted_in 14 / opted_out 2 / lolos 8), broadcast
+  polos semua varian 'a', A/B WhatsApp dua template (template
+  terkirim cocok varian per penerima), validasi 422
+  (BROADCAST_AB_INCOMPLETE, BROADCAST_TEMPLATE_REQUIRED,
+  AB_CONVERSION_NODE_INVALID), isolasi tenant 404 di kedua endpoint
+  hasil, audit kedua aksi baru. Deploy: rsync (`.env.staging`
+  dikecualikan; sha256 tetap `9c1ded2a…`), migrasi teraplikasi,
+  4 service restart via MainPID, health ok. Data live user UTUH:
+  **1 tenant / 4 channel connected / 1 kontak** sebelum & sesudah.
+  Rantai dibersihkan total (DB + role di-drop, Redis DB 14
+  di-flush, proses rantai dimatikan).
+- **Batas jujur**: (1) Bukti terhadap provider asli menunggu ujicoba
+  user — rantai membuktikan perilaku terhadap mock Telegram/Meta
+  (pengiriman WA sempat teramati gagal `meta_graph_190` saat env
+  mock salah nama di sesi debug; setelah `META_API_BASE` benar,
+  semua terkirim via mock). (2) Uji z memakai proporsi tingkat RUN —
+  run berulang dari kontak lengket yang sama bukan percobaan
+  independen; putusan adalah petunjuk berkekuatan sampel, bukan
+  bukti kausal. (3) Penugasan broadcast untuk penerima yang di-skip
+  tetap dihitung sebagai "assigned" per varian — disengaja agar
+  rincian skip per varian menjumlah ke total audiens. (4) Job
+  dispatch BullMQ memakai jobId deterministik per broadcast
+  (perilaku sejak 7C): enqueue ganda ter-dedupe; jalur pengulangan
+  yang didukung adalah retry job — rantai membuktikan no-flip lewat
+  re-entry fungsi dispatch yang sama.
