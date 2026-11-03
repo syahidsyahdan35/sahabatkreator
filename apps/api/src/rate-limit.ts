@@ -78,12 +78,27 @@ export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
   let redisFailureLogged = false;
 
   if (options.redisUrl) {
-    const client = createEphemeralRedisConnection(options.redisUrl) as unknown as RedisLike;
+    redis = spawnClient(options.redisUrl);
+  }
+
+  function spawnClient(url: string): RedisLike {
+    const client = createEphemeralRedisConnection(url) as unknown as RedisLike;
     // Tanpa listener, event "error" ioredis akan menjadi unhandled error.
     client.on("error", () => {
       /* kegagalan ditangani fail-open di jalur request; jangan crash proses */
     });
-    redis = client;
+    return client;
+  }
+
+  /** Buang klien basi dan buat koneksi segar (socket bisa mati diam-diam). */
+  function resetClient(): void {
+    if (!options.redisUrl) return;
+    try {
+      redis?.disconnect();
+    } catch {
+      /* sudah tertutup */
+    }
+    redis = spawnClient(options.redisUrl);
   }
 
   function logRedisFailure(reason: unknown): void {
@@ -142,9 +157,20 @@ export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
         const result = await hitRedis(key, windowSeconds);
         redisFailureLogged = false;
         return { count: result.count, resetAt };
-      } catch (err) {
-        redisRetryAt = now() + REDIS_RETRY_AFTER_MS;
-        logRedisFailure(err);
+      } catch (firstErr) {
+        // Socket basi adalah penyebab tersering (server Redis sehat,
+        // klien ephemeral mati sesudah idle — pola insiden oauth-kv
+        // 2026-11-03): buang klien, ulang SATU kali pada koneksi
+        // segar sebelum menyerah ke memori + backoff 30 detik.
+        resetClient();
+        try {
+          const result = await hitRedis(key, windowSeconds);
+          redisFailureLogged = false;
+          return { count: result.count, resetAt };
+        } catch {
+          redisRetryAt = now() + REDIS_RETRY_AFTER_MS;
+          logRedisFailure(firstErr);
+        }
       }
     }
 

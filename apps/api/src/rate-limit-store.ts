@@ -54,6 +54,9 @@ interface RedisLike {
     value: string,
     ...args: Array<string | number>
   ): Promise<unknown>;
+  /** Lihat oauth-kv.ts: listener "error" mencegah unhandled error. */
+  on?(event: "error", listener: (err: unknown) => void): void;
+  disconnect?(): void;
 }
 
 /** Prefiks key agar tidak bertabrakan dengan pemakaian Redis lain. */
@@ -102,8 +105,38 @@ export function createRedisRateLimitStorage(
   const redis = (): RedisLike => {
     if (!client) {
       client = createEphemeralRedisConnection(redisUrl) as unknown as RedisLike;
+      client.on?.("error", () => {
+        /* kegagalan ditangani fail-open di get/set */
+      });
     }
     return client;
+  };
+
+  const dropClient = (): void => {
+    try {
+      client?.disconnect?.();
+    } catch {
+      /* klien sudah mati — itulah sebabnya dibuang */
+    }
+    client = null;
+  };
+
+  /**
+   * Jalankan perintah dengan SATU retry pada koneksi segar. Klien
+   * ephemeral bisa mati diam-diam (socket basi sesudah idle) sementara
+   * server Redis sehat — perintah pertama yang menyentuh mayatnya
+   * gagal, padahal koneksi baru langsung berhasil. Pola yang sama
+   * seperti hotfix oauth-kv (insiden 2026-11-03); di sini dampaknya
+   * hanya fail-open yang tidak perlu, jadi cukup retry sebelum
+   * menyerah. Kegagalan retry dilempar ke pemanggil (fail-open).
+   */
+  const run = async <T>(op: (c: RedisLike) => Promise<T>): Promise<T> => {
+    try {
+      return await op(redis());
+    } catch {
+      dropClient();
+      return await op(redis());
+    }
   };
 
   const warnOnce = (err: unknown): void => {
@@ -118,7 +151,7 @@ export function createRedisRateLimitStorage(
   return {
     async get(key) {
       try {
-        const raw = await redis().get(`${KEY_PREFIX}${key}`);
+        const raw = await run((c) => c.get(`${KEY_PREFIX}${key}`));
         return raw === null ? null : parseRecord(raw, key);
       } catch (err) {
         warnOnce(err);
@@ -127,11 +160,13 @@ export function createRedisRateLimitStorage(
     },
     async set(key, value) {
       try {
-        await redis().set(
-          `${KEY_PREFIX}${key}`,
-          JSON.stringify({ count: value.count, lastRequest: value.lastRequest }),
-          "EX",
-          KEY_TTL_SECONDS,
+        await run((c) =>
+          c.set(
+            `${KEY_PREFIX}${key}`,
+            JSON.stringify({ count: value.count, lastRequest: value.lastRequest }),
+            "EX",
+            KEY_TTL_SECONDS,
+          ),
         );
       } catch (err) {
         warnOnce(err);

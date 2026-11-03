@@ -9,6 +9,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "verify:http": "tsx scripts/verify-http.ts",
+    "verify:oauth-kv": "tsx scripts/verify-oauth-kv.ts",
     "backfill:reply-snapshots": "tsx scripts/backfill-reply-snapshots.ts",
     "backfill:usage-meta": "tsx scripts/backfill-usage-meta.ts",
     "backfill:kb-embeddings": "tsx scripts/backfill-kb-embeddings.ts"
