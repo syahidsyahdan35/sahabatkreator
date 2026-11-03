@@ -16,6 +16,7 @@ import {
   KbDocumentListResponseSchema,
   KbStatsResponseSchema,
   GrowthLinkListResponseSchema,
+  SegmentListResponseSchema,
   MessageListResponseSchema,
   ProductListResponseSchema,
   PublicMeResponseSchema,
@@ -50,6 +51,8 @@ import {
   getFlow,
   getGrowthLink,
   listGrowthLinks,
+  getSegment,
+  listSegments,
   listKbDocuments,
   listMessages,
   listProducts,
@@ -79,6 +82,7 @@ import {
 import { serializeContact } from "../contacts/routes";
 import { serializeFlow } from "../flows/routes";
 import { serializeGrowthLink } from "../growth/routes";
+import { serializeSegment } from "../segments/routes";
 import { serializeConversation } from "../inbox/routes";
 import { serializeDocument } from "../knowledge/routes";
 import { serializeMessage } from "../messages-serialize";
@@ -155,6 +159,9 @@ function extractPresentedKey(headers: Headers): string | null {
  *   --- Fase 13B: growth links — permukaan BACA ---
  *   GET  /v1/growth-links        (growth_links:read) daftar + statistik
  *   GET  /v1/growth-links/:id    (growth_links:read) detail
+ *   --- Fase 13C: segmen — permukaan BACA ---
+ *   GET  /v1/segments            (segments:read)    daftar definisi
+ *   GET  /v1/segments/:id        (segments:read)    detail
  * Penolakan: tanpa/bukan kunci → 401 API_KEY_INVALID; kunci dicabut → 401
  * API_KEY_REVOKED; scope kurang → 403 API_KEY_SCOPE_DENIED.
  * Registry kanonis permukaan ini: PUBLIC_V1_SURFACE di
@@ -804,6 +811,33 @@ export function createPublicV1Routes(
     const link = await getGrowthLink(bundle.db, { tenantId: auth.tenantId }, id);
     if (!link) return apiError(c, 404, "NOT_FOUND", "Growth link not found");
     return c.json(serializeGrowthLink(link));
+  });
+
+  // --- Fase 13C: segmen — permukaan BACA (segments:read). Tulis tetap
+  // dashboard-only: segmen adalah artefak kurasi UI dengan definisi
+  // kondisi kompleks (lihat docs/COVERAGE-MATRIX.md). Serializer yang
+  // sama persis dengan modul segments dashboard.
+  app.get("/v1/segments", async (c) => {
+    const denied = requireScope(c, "segments:read");
+    if (denied) return denied;
+    const auth = c.get("apiKeyAuth");
+    const rows = await listSegments(bundle.db, auth.tenantId);
+    return c.json(
+      SegmentListResponseSchema.parse({
+        segments: rows.map(serializeSegment),
+      }),
+    );
+  });
+
+  app.get("/v1/segments/:id", async (c) => {
+    const denied = requireScope(c, "segments:read");
+    if (denied) return denied;
+    const id = parseUuidParam(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Segment not found");
+    const auth = c.get("apiKeyAuth");
+    const row = await getSegment(bundle.db, auth.tenantId, id);
+    if (!row) return apiError(c, 404, "NOT_FOUND", "Segment not found");
+    return c.json(serializeSegment(row));
   });
 
   return app;

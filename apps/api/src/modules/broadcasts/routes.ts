@@ -1,28 +1,33 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
-  BroadcastAudienceEstimateQuerySchema,
-  BroadcastAudienceEstimateResponseSchema,
+  BroadcastAudiencePreviewQuerySchema,
+  BroadcastAudiencePreviewResponseSchema,
   BroadcastListQuerySchema,
   BroadcastListResponseSchema,
   BroadcastRecipientListQuerySchema,
   BroadcastRecipientListResponseSchema,
   BroadcastResponseSchema,
   CreateBroadcastRequestSchema,
+  OptInSettingsResponseSchema,
   ScheduleBroadcastRequestSchema,
   UpdateBroadcastRequestSchema,
+  UpdateOptInSettingsRequestSchema,
   type BroadcastResponse,
 } from "@sahabat-kreator/contracts";
 import {
+  DEFAULT_OPT_OUT_KEYWORDS,
   cancelBroadcast,
   createBroadcast,
   deleteBroadcast,
-  estimateBroadcastAudience,
   getBroadcast,
+  getOptInSettings,
   listBroadcastRecipients,
   listBroadcasts,
+  previewBroadcastAudience,
   scheduleBroadcast,
   updateBroadcast,
+  updateOptInSettings,
   type BroadcastStats,
   type BroadcastWithChannel,
 } from "@sahabat-kreator/core";
@@ -35,7 +40,9 @@ import { resolveTenantForUser } from "../tenants/guard";
  * Modul broadcasts (Fase 7C) — kampanye siaran teks per channel:
  *   GET    /tenants/:tenantId/broadcasts                 daftar + statistik
  *   POST   /tenants/:tenantId/broadcasts                 buat draft
- *   GET    /tenants/:tenantId/broadcasts/audience-estimate  estimasi audiens
+ *   GET    /tenants/:tenantId/broadcasts/audience-preview  pratinjau audiens (13C)
+ *   GET    /tenants/:tenantId/opt-in-settings            pengaturan opt-in (13C)
+ *   PATCH  /tenants/:tenantId/opt-in-settings            ubah (owner/admin)
  *   GET    /tenants/:tenantId/broadcasts/:id             detail + statistik
  *   PATCH  /tenants/:tenantId/broadcasts/:id             edit (draft saja)
  *   DELETE /tenants/:tenantId/broadcasts/:id             hapus (draft saja)
@@ -78,6 +85,7 @@ export function serializeBroadcast(
     whatsappTemplateId: broadcast.whatsappTemplateId ?? null,
     templateVariableSources: broadcast.templateVariableSources ?? [],
     audienceFilter: broadcast.audienceFilter ?? {},
+    requireOptIn: broadcast.requireOptIn ?? false,
     status: broadcast.status,
     scheduledAt: broadcast.scheduledAt?.toISOString() ?? null,
     startedAt: broadcast.startedAt?.toISOString() ?? null,
@@ -110,7 +118,9 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
       apiError(c, 503, "INTERNAL_ERROR", "Database is not configured");
     app.get(base, unavailable);
     app.post(base, unavailable);
-    app.get(`${base}/audience-estimate`, unavailable);
+    app.get(`${base}/audience-preview`, unavailable);
+    app.get("/tenants/:tenantId/opt-in-settings", unavailable);
+    app.patch("/tenants/:tenantId/opt-in-settings", unavailable);
     app.get(`${base}/:id`, unavailable);
     app.patch(`${base}/:id`, unavailable);
     app.delete(`${base}/:id`, unavailable);
@@ -192,36 +202,104 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
     return c.json(body);
   });
 
-  // ---- Estimasi audiens (sebelum route :id agar tidak tertangkap) --------
-  app.get(`${base}/audience-estimate`, async (c) => {
+  // ---- Pratinjau audiens (sebelum route :id agar tidak tertangkap) -----
+  // Fase 13C: menggantikan estimasi 7C — rincian kirim/skip dihitung
+  // klasifikasi yang sama seperti dispatch di core.
+  app.get(`${base}/audience-preview`, async (c) => {
     const g = await guard(c, { ownerAdmin: false });
     if ("error" in g) return g.error;
-    const parsed = BroadcastAudienceEstimateQuerySchema.safeParse(c.req.query());
+    const parsed = BroadcastAudiencePreviewQuerySchema.safeParse(c.req.query());
     if (!parsed.success) {
-      return apiError(c, 400, "VALIDATION_ERROR", "Invalid audience estimate query");
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid audience preview query");
     }
     const splitList = (raw: string | undefined): string[] | undefined => {
       if (!raw) return undefined;
       const items = raw.split(",").map((s) => s.trim()).filter(Boolean);
       return items.length > 0 ? items : undefined;
     };
-    const result = await estimateBroadcastAudience(bundle.db, {
+    const result = await previewBroadcastAudience(bundle.db, {
       tenantId: g.tenant.id,
       channelAccountId: parsed.data.channelAccountId,
       filter: {
         tags: splitList(parsed.data.tags),
         stages: splitList(parsed.data.stages),
+        segmentId: parsed.data.segmentId,
       },
+      requireOptIn:
+        parsed.data.requireOptIn === undefined
+          ? undefined
+          : parsed.data.requireOptIn === "true",
+      whatsappTemplateId: parsed.data.whatsappTemplateId,
+      templateVariableSources: splitList(parsed.data.templateVariableSources),
     });
-    if (result.kind === "channel_not_found") {
-      return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+    switch (result.kind) {
+      case "ok":
+        return c.json(
+          BroadcastAudiencePreviewResponseSchema.parse(result.preview),
+        );
+      case "channel_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Channel account not found");
+      case "segment_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Segment not found");
+      case "template_required":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_REQUIRED",
+          "WhatsApp broadcasts require an approved message template",
+        );
+      case "template_not_approved":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_TEMPLATE_NOT_APPROVED",
+          `WhatsApp template is not approved (status '${result.status}')`,
+        );
+      case "template_not_found":
+        return apiError(c, 404, "NOT_FOUND", "WhatsApp template not found");
     }
-    const body = BroadcastAudienceEstimateResponseSchema.parse({
-      matched: result.matched,
-      optedOut: result.optedOut,
-      totalWithIdentity: result.totalWithIdentity,
+  });
+
+  // ---- Pengaturan opt-in tenant (Fase 13C) --------------------------------
+  // Kartu "Opt-in Broadcast" di halaman Broadcasts. Baca = semua
+  // member; ubah = owner/admin (konfigurasi yang memengaruhi siapa
+  // boleh dikirimi pesan pemasaran).
+  app.get("/tenants/:tenantId/opt-in-settings", async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const settings = await getOptInSettings(bundle.db, g.tenant.id);
+    return c.json(
+      OptInSettingsResponseSchema.parse({
+        ...settings,
+        defaultOptOutKeywords: [...DEFAULT_OPT_OUT_KEYWORDS],
+      }),
+    );
+  });
+
+  app.patch("/tenants/:tenantId/opt-in-settings", async (c) => {
+    const g = await guard(c, { ownerAdmin: true });
+    if ("error" in g) return g.error;
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      return apiError(c, 400, "VALIDATION_ERROR", "Request body must be valid JSON");
+    }
+    const parsed = UpdateOptInSettingsRequestSchema.safeParse(json);
+    if (!parsed.success) {
+      return apiError(c, 400, "VALIDATION_ERROR", "Invalid opt-in settings payload");
+    }
+    const settings = await updateOptInSettings(bundle.db, {
+      tenantId: g.tenant.id,
+      userId: g.appUser.id,
+      patch: parsed.data,
     });
-    return c.json(body);
+    return c.json(
+      OptInSettingsResponseSchema.parse({
+        ...settings,
+        defaultOptOutKeywords: [...DEFAULT_OPT_OUT_KEYWORDS],
+      }),
+    );
   });
 
   // ---- Buat draft -----------------------------------------------------------
@@ -247,10 +325,13 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
       whatsappTemplateId: parsed.data.whatsappTemplateId,
       templateVariableSources: parsed.data.templateVariableSources,
       filter: parsed.data.audienceFilter,
+      requireOptIn: parsed.data.requireOptIn,
     });
     switch (result.kind) {
       case "created":
         return c.json(serializeBroadcast(result.broadcast, EMPTY_STATS), 201);
+      case "segment_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Segment not found");
       case "channel_not_found":
         return apiError(c, 404, "NOT_FOUND", "Channel account not found");
       case "channel_unsupported":
@@ -326,9 +407,12 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
         whatsappTemplateId: parsed.data.whatsappTemplateId,
         templateVariableSources: parsed.data.templateVariableSources,
         filter: parsed.data.audienceFilter,
+        requireOptIn: parsed.data.requireOptIn,
       },
     });
     switch (result.kind) {
+      case "segment_not_found":
+        return apiError(c, 404, "NOT_FOUND", "Segment not found");
       case "updated": {
         const detail = await getBroadcast(bundle.db, {
           tenantId: g.tenant.id,

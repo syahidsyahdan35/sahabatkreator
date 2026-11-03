@@ -20,6 +20,8 @@ import type {
   FlowTemplateListResponse,
   GrowthLinkListResponse,
   GrowthLinkResponse,
+  SegmentListResponse,
+  SegmentResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -79,6 +81,8 @@ export type {
   FlowTemplateListResponse,
   GrowthLinkListResponse,
   GrowthLinkResponse,
+  SegmentListResponse,
+  SegmentResponse,
   KbDocumentListResponse,
   KbDocumentResponse,
   KbStatsResponse,
@@ -448,6 +452,19 @@ export class SahabatKreatorClient {
     return this.request<GrowthLinkResponse>(
       "GET",
       `/growth-links/${encodeURIComponent(linkId)}`,
+    );
+  }
+
+  /** GET /v1/segments (scope `segments:read`) — definisi segmen audiens workspace (Fase 13C). */
+  async listSegments(): Promise<SegmentListResponse> {
+    return this.request<SegmentListResponse>("GET", "/segments");
+  }
+
+  /** GET /v1/segments/:id (scope `segments:read`). */
+  async getSegment(segmentId: string): Promise<SegmentResponse> {
+    return this.request<SegmentResponse>(
+      "GET",
+      `/segments/${encodeURIComponent(segmentId)}`,
     );
   }
 }

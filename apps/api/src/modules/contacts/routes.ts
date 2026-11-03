@@ -11,10 +11,12 @@ import {
 } from "@sahabat-kreator/contracts";
 import {
   createContact,
+  effectiveOptInStatus,
   findDuplicateContacts,
   getContact,
   listContacts,
   listProfilePhotoOwnerIds,
+  listSegmentMemberIds,
   mergeContacts,
   updateContact,
 } from "@sahabat-kreator/core";
@@ -47,6 +49,11 @@ export function serializeContact(
     customFields: row.customFields,
     pipelineStage: row.pipelineStage,
     optInStatus: row.optInStatus,
+    // Fase 13C: status efektif + jejak opt-in (aditif; optInStatus
+    // tersimpan tetap apa adanya untuk permukaan PATCH yang ada).
+    optInEffectiveStatus: effectiveOptInStatus(row),
+    optInSource: row.optInSource ?? null,
+    optInAt: row.optInAt?.toISOString() ?? null,
     consentAt: row.consentAt?.toISOString() ?? null,
     lastContactedAt: row.lastContactedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -73,6 +80,8 @@ const ListContactsQuerySchema = z.object({
   search: z.string().max(255).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
+  /** Fase 13C: saring ke anggota segmen ini (evaluator tunggal core). */
+  segmentId: z.string().uuid().optional(),
 });
 
 /**
@@ -125,7 +134,26 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     if (!query.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid query parameters");
     }
-    const result = await listContacts(bundle.db, { tenantId: tenant.id }, query.data);
+    // Fase 13C: filter segmen — keanggotaan diselesaikan evaluator
+    // core lebih dulu; segmen tak dikenal → 404 (bukan daftar kosong,
+    // agar UI bisa membedakan segmen terhapus dari segmen kosong).
+    let onlyIds: string[] | undefined;
+    if (query.data.segmentId) {
+      const memberIds = await listSegmentMemberIds(
+        bundle.db,
+        tenant.id,
+        query.data.segmentId,
+      );
+      if (!memberIds) {
+        return apiError(c, 404, "NOT_FOUND", "Segment not found");
+      }
+      onlyIds = memberIds;
+    }
+    const result = await listContacts(
+      bundle.db,
+      { tenantId: tenant.id },
+      { ...query.data, onlyIds },
+    );
     const withPhoto = await listProfilePhotoOwnerIds(
       bundle.db,
       { tenantId: tenant.id },
@@ -248,7 +276,14 @@ export function createContactsRoutes(bundle: AuthBundle | null) {
     if (!parsed.success) {
       return apiError(c, 400, "VALIDATION_ERROR", "Invalid contact payload");
     }
-    const contact = await updateContact(bundle.db, { tenantId: tenant.id }, id, parsed.data);
+    const contact = await updateContact(
+      bundle.db,
+      { tenantId: tenant.id },
+      id,
+      // Fase 13C: pelaku sesi diteruskan agar audit toggle opt-in
+      // manual menyebut user-nya (source "manual" di core).
+      { ...parsed.data, actorUserId: c.get("appUser").id },
+    );
     if (!contact) return apiError(c, 404, "NOT_FOUND", "Contact not found");
     return c.json(
       serializeContact(contact, await singleContactAvatarUrl(bundle, tenant.id, id)),

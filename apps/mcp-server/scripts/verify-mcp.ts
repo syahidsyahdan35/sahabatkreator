@@ -150,6 +150,9 @@ const EXPECTED_TOOLS = [
   // Fase 13B: growth links — permukaan BACA.
   "list_growth_links",
   "get_growth_link",
+  // Fase 13C: segmen — permukaan BACA.
+  "list_segments",
+  "get_segment",
 ];
 
 const uniqueNameRef = { name: `MCP Uji ${Date.now()}` };
@@ -198,6 +201,9 @@ try {
       // Fase 13B: growth links adalah BACA.
       hintOf("list_growth_links") === true &&
       hintOf("get_growth_link") === true &&
+      // Fase 13C: segmen adalah BACA.
+      hintOf("list_segments") === true &&
+      hintOf("get_segment") === true &&
       hintOf("create_contact") === false &&
       hintOf("update_contact") === false &&
       hintOf("send_message") === false &&
@@ -408,6 +414,27 @@ try {
       "get_growth_link konsisten dengan daftar",
       !oneResult.isError && !!one && one.id === first.id && one.slug === first.slug,
       one ? `slug=${one.slug}` : resultText(oneResult),
+    );
+  }
+
+  // Fase 13C: segmen (BACA) — daftar + get pertama bila ada.
+  const segmentsResult = await call(client, "list_segments");
+  const segmentsList = resultJson<{
+    segments: Array<{ id: string; name: string }>;
+  }>(segmentsResult);
+  check(
+    "list_segments",
+    !segmentsResult.isError && !!segmentsList && Array.isArray(segmentsList.segments),
+    segmentsList ? `count=${segmentsList.segments.length}` : resultText(segmentsResult),
+  );
+  if (segmentsList && segmentsList.segments.length > 0) {
+    const first = segmentsList.segments[0]!;
+    const oneResult = await call(client, "get_segment", { segmentId: first.id });
+    const one = resultJson<{ id: string; name: string }>(oneResult);
+    check(
+      "get_segment konsisten dengan daftar",
+      !oneResult.isError && !!one && one.id === first.id && one.name === first.name,
+      one ? `name=${one.name}` : resultText(oneResult),
     );
   }
 } finally {

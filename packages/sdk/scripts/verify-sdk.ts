@@ -188,6 +188,33 @@ if (growthFirstId) {
   );
 }
 
+// Fase 13C: segmen — daftar + get pertama bila ada.
+let segmentFirstId: string | null = null;
+try {
+  const list = await client.listSegments();
+  check(
+    "listSegments() berhasil",
+    Array.isArray(list.segments),
+    `count=${list.segments.length}`,
+  );
+  segmentFirstId = list.segments[0]?.id ?? null;
+} catch (err) {
+  const isTyped = err instanceof SahabatKreatorApiError;
+  check(
+    "listSegments() (atau ditolak scope secara bertipe)",
+    isTyped && err.code === "API_KEY_SCOPE_DENIED",
+    isTyped ? `code=${err.code}` : `error tak bertipe: ${String(err)}`,
+  );
+}
+if (segmentFirstId) {
+  await checkRead(
+    "getSegment(id) konsisten dengan daftar",
+    () => client.getSegment(segmentFirstId!),
+    (v) => v.id === segmentFirstId && typeof v.definition.match === "string",
+    (v) => `name=${v.name}`,
+  );
+}
+
 // Jalur error: kunci acak → SahabatKreatorApiError dengan code API_KEY_INVALID.
 const badClient = new SahabatKreatorClient({
   baseUrl,

@@ -533,6 +533,29 @@ server.registerTool(
   async ({ linkId }) => run(() => client.getGrowthLink(linkId)),
 );
 
+server.registerTool(
+  "list_segments",
+  {
+    description:
+      "Daftar segmen audiens workspace (scope segments:read, Fase 13C): nama + definisi kondisi ({match, conditions}) yang dievaluasi server untuk daftar kontak & audiens broadcast. Hasil: { segments }.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => run(() => client.listSegments()),
+);
+
+server.registerTool(
+  "get_segment",
+  {
+    description: "Satu definisi segmen audiens (scope segments:read).",
+    inputSchema: {
+      segmentId: z.string().uuid().describe("Id segmen (dari list_segments)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ segmentId }) => run(() => client.getSegment(segmentId)),
+);
+
 await server.connect(new StdioServerTransport());
 console.error(
   `[mcp-server] sahabat-kreator MCP server (stdio) siap — API ${baseUrl} — tier: ${
