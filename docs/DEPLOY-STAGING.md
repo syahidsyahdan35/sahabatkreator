@@ -6559,3 +6559,79 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   menit) — penyederhanaan sadar dari pola redis meta-oauth.
   Bukti UI halaman Appointments + builder node menunggu uji klik
   user (tanpa Playwright).
+
+---
+
+## Update Fase 14A — Pembayaran Asli Midtrans + Xendit (2026-11-03)
+
+- **Isi**: konfigurasi gerbang pembayaran per TENANT (Settings →
+  Payments): provider `simulation|midtrans|xendit`, toggle
+  environment sandbox|production dengan pasangan kunci TERPISAH per
+  environment (server key + client key; Xendit + callback token),
+  semua envelope terenkripsi (CHANNEL_TOKEN_SECRET), respons hanya
+  penanda terkonfigurasi. Sesi checkout dibuat SAAT tautan dibuat
+  (Midtrans Snap `POST /snap/v1/transactions`, order_id = kode
+  tautan; Xendit `POST /v2/invoices`, external_id = kode tautan);
+  kegagalan provider membatalkan pembuatan tautan (502 kode
+  provider) — tanpa fallback diam-diam. Webhook publik
+  `POST /payments/webhook/midtrans|xendit`: Midtrans signature_key
+  SHA512(order_id+status_code+gross_amount+server_key tenant) —
+  settlement|capture(accept) → paid, expire → expired, deny|cancel
+  → cancelled, pending → no-op; Xendit x-callback-token timing-safe
+  — PAID|SETTLED → paid, EXPIRED → expired. Jumlah webhook wajib
+  sama dengan amount tautan; idempoten (transisi hanya dari
+  pending; audit `payment.paid` sekali); order 13F membalik lewat
+  hook yang sama; semua hasil ke log integrasi dengan payload
+  TEREDAKSI. `/pay/:code`: simulasi berlabel seperti semula;
+  provider sungguhan membawa `checkoutUrl` dan halaman SPA
+  mengarahkan pembeli ke sana (pengalihan sisi halaman karena
+  `/pay/:code` adalah rute SPA); simulate-pay menolak tautan
+  non-simulasi (409 `PAYMENT_NOT_SIMULATION`). Kedaluwarsa tetap
+  ditegakkan lokal (lazy/bulk) — untuk provider sungguhan itu
+  kebenaran tampilan; masa berlaku Snap/invoice di provider adalah
+  urusan provider dan webhook expirynya tetap didengar.
+- **Migrasi 0007_payments_providers** (hasil `pnpm db:generate` +
+  blok RLS kustom [K-14A]): tabel `payment_provider_configs` +
+  kolom `payment_links.provider_environment` (NOT NULL default
+  'sandbox'), `provider_ref`, `checkout_url`. Jurnal 8; staging
+  59 tabel / 73 policy. PGlite verify §41 baru (total 41 seksi).
+- **Permukaan**: TIDAK ada rute v1/scope/SDK/MCP baru (34 rute —
+  check:drift lulus); konfigurasi kredensial tenant dashboard-only
+  dengan alasan tertulis di `docs/COVERAGE-MATRIX.md`.
+- **Verifikasi**: typecheck 14 paket hijau; PGlite 41/41; rantai
+  terisolasi di server (DB buangan `sk_chain14a` + mock Midtrans/
+  Xendit + instan API :3199): **78 PASS / 0 FAIL** — setup 56
+  (konfigurasi + uji koneksi NOT_CONFIGURED/AUTH_FAILED/OK kedua
+  provider, pembuatan sesi dengan amount persis + kunci per
+  environment, webhook paid/duplikat/signature-salah/amount-salah/
+  pending/expire, isolasi kunci antar-tenant, kegagalan provider
+  tanpa baris baru, regresi simulasi), orders 4 (webhook & simulasi
+  membalik ORDER), spotcheck core checkout 10 (jalur persis node
+  `cart_checkout`: sesi terpisah di luar transaksi, penjaga
+  PAYMENT_AMOUNT_CHANGED + rollback), assert SQL 8 (audit tepat
+  sekali, order paid+paid_at, log integrasi tanpa bocor
+  signature/kunci/token). Pasca-deploy: health publik ok, 4
+  service aktif (restart via kill MainPID eksplisit), grep bundle
+  api/worker (`snap/v1/transactions`, `payment_provider_configs`)
+  + dist BERSIH dari salinan pg inline (`from "pg"` eksternal,
+  `ConnectionParameters` 0), hitungan live 1 tenant / 4 channel
+  connected / 1 kontak sebelum-sesudah, sha `.env.staging` utuh.
+- **Insiden deploy (transparan)**: rsync pertama fase ini memakai
+  `--delete` tanpa mengecualikan `.env.staging` (file khusus server,
+  tidak ada di clone lokal) sehingga file itu TERHAPUS dari disk
+  server. Pemulihan byte-identik berhasil di tempat: proses API
+  yang masih berjalan memegang seluruh nilai env di memorinya
+  (`/proc/<MainPID>/environ`), dan urutan kunci file terkonfirmasi
+  dari urutan environ systemd (EnvironmentFile dibaca berurutan);
+  kandidat rekonstruksi diverifikasi terhadap sha256 baseline
+  `9c1ded2a5a69f09e…` — cocok persis, file ditulis ulang mode 600
+  dan sha final sama dengan baseline. **Aturan tetap mulai fase
+  ini: rsync deploy WAJIB `--exclude '.env.staging'` (dan idealnya
+  tanpa `--delete` di root repo).**
+- **Batas jujur**: bukti LIVE menunggu akun merchant milik user —
+  langkah persisnya di laporan fase (sandbox Midtrans/Xendit →
+  kunci ditempel di Settings → Payments → URL webhook didaftarkan
+  di dashboard provider). Seluruh rantai fase ini dibuktikan
+  terhadap server mock provider. Bukti UI Settings → Payments +
+  halaman /pay provider sungguhan menunggu uji klik user (tanpa
+  Playwright).
