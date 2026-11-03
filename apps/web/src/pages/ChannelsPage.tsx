@@ -1029,6 +1029,10 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
 
   /** Selesaikan OAuth: hubungkan aset terpilih dari sesi (Fase 7D). */
   const handleOAuthComplete = async (asset: MetaOAuthAsset) => {
+    // Hotfix R1: aset nonaktif (Page tanpa token yang dapat dipakai)
+    // tidak pernah dikirim ke complete — tombolnya nonaktif, ini
+    // penjaga kedua di sisi klien (API juga menolaknya).
+    if (asset.connectable === false) return;
     if (!tenantId || !oauthSessionId || oauthCompletingId) return;
     setOauthCompletingId(asset.assetId);
     setOauthCompleteError(null);
@@ -2105,10 +2109,15 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                             : asset.name && asset.handle
                               ? `@${asset.handle}`
                               : null;
+                        // Hotfix R1: aset yang ditemukan tetapi tidak
+                        // punya kredensial yang dapat dipakai (Page
+                        // tanpa Page token) tetap ditampilkan —
+                        // diredupkan, beralasan, tombol nonaktif.
+                        const unavailable = asset.connectable === false;
                         return (
                           <div
                             key={asset.assetId}
-                            className="flex items-center gap-3 rounded-xl border border-line p-3"
+                            className={`flex items-center gap-3 rounded-xl border border-line p-3${unavailable ? " opacity-70" : ""}`}
                           >
                             <ChannelAvatar
                               provider={oauthSession.provider}
@@ -2130,10 +2139,19 @@ export function ChannelsPage({ t, locale }: ChannelsPageProps) {
                                   })}
                                 </div>
                               ) : null}
+                              {unavailable ? (
+                                <div className="mt-1 text-xs text-muted">
+                                  {t(
+                                    "channels.oauthPickerUnavailableMissingToken",
+                                  )}
+                                </div>
+                              ) : null}
                             </div>
                             <button
                               type="button"
-                              disabled={oauthCompletingId !== null}
+                              disabled={
+                                oauthCompletingId !== null || unavailable
+                              }
                               onClick={() => void handleOAuthComplete(asset)}
                               className="shrink-0 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
                             >
