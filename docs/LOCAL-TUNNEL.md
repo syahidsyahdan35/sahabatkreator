@@ -103,15 +103,17 @@ Butuh satu domain di Cloudflare. URL tetap, jadi redirect URI Meta cukup
 didaftarkan **sekali**.
 
 ```bash
-cloudflared tunnel login
+cloudflared tunnel login          # sekali saja, membuka browser
 cloudflared tunnel create sk-local
+cloudflared tunnel list           # catat ID tunnel (kolom pertama)
 cloudflared tunnel route dns sk-local dev.<domain-anda>
 ```
 
-`~/.cloudflared/config.yml`:
+`~/.cloudflared/config.yml` — **path kredensial harus path Windows**, karena
+`cloudflared` di Windows tidak memahami `/c/Users/...` gaya Git Bash:
 
 ```yaml
-tunnel: sk-local
+tunnel: <tunnel-id>
 credentials-file: C:\Users\<user>\.cloudflared\<tunnel-id>.json
 ingress:
   - hostname: dev.<domain-anda>
@@ -119,9 +121,13 @@ ingress:
   - service: http_status:404
 ```
 
+Konversi path kalau perlu: `cygpath -w ~/.cloudflared/<tunnel-id>.json`.
+
 ```bash
 cloudflared tunnel run sk-local
 ```
+
+Catatan: `tunnel route dns` gagal bila record sudah ada — aman, lanjutkan.
 
 ### Opsi B — quick tunnel (tanpa domain)
 
