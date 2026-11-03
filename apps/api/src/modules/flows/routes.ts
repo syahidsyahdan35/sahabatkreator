@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CreateFlowRequestSchema,
   FLOW_TEMPLATES,
+  FlowExperimentsResponseSchema,
   FlowGraphSchema,
   FlowListQuerySchema,
   FlowListResponseSchema,
@@ -24,6 +25,7 @@ import {
   deactivateFlow,
   deleteFlow,
   getFlow,
+  getFlowExperimentResults,
   instantiateFlowTemplate,
   listFlowRunSteps,
   listFlowRuns,
@@ -57,6 +59,7 @@ import { resolveTenantForUser } from "../tenants/guard";
  *   POST   /tenants/:tenantId/flows/:id/archive        arsipkan
  *   POST   /tenants/:tenantId/flows/:id/unarchive      keluar arsip → draft
  *   GET    /tenants/:tenantId/flows/:id/runs           run milik flow
+ *   GET    /tenants/:tenantId/flows/:id/experiments    hasil eksperimen A/B (13D)
  *   GET    /tenants/:tenantId/flows/runs/:runId/steps  langkah satu run
  *
  * Eksekusi BUKAN di sini: pesan masuk dievaluasi worker
@@ -122,6 +125,7 @@ export function createFlowsRoutes(bundle: AuthBundle | null) {
     app.post(`${base}/:id/archive`, unavailable);
     app.post(`${base}/:id/unarchive`, unavailable);
     app.get(`${base}/:id/runs`, unavailable);
+    app.get(`${base}/:id/experiments`, unavailable);
     return app;
   }
 
@@ -579,6 +583,24 @@ export function createFlowsRoutes(bundle: AuthBundle | null) {
       nextCursor: result.nextCursor,
     });
     return c.json(body);
+  });
+
+  // ---- Hasil eksperimen A/B (Fase 13D, dashboard saja) ---------------------------
+  // Per node ab_split mode eksperimen: penugasan unik, run, selesai,
+  // konversi + putusan statistik jujur (z-test dua-proporsi + pagar
+  // sampel minimum di core). Baca = semua member; flow tenant lain
+  // selalu 404 (isolasi tenant ditegakkan query core).
+  app.get(`${base}/:id/experiments`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const id = parseUuidParam(c, "id");
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Flow not found");
+    const result = await getFlowExperimentResults(bundle.db, {
+      tenantId: g.tenant.id,
+      flowId: id,
+    });
+    if (!result) return apiError(c, 404, "NOT_FOUND", "Flow not found");
+    return c.json(FlowExperimentsResponseSchema.parse(result));
   });
 
   return app;

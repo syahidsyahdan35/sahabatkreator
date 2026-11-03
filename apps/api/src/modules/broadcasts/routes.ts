@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import {
+  BroadcastAbResultsResponseSchema,
   BroadcastAudiencePreviewQuerySchema,
   BroadcastAudiencePreviewResponseSchema,
   BroadcastListQuerySchema,
@@ -21,6 +22,7 @@ import {
   createBroadcast,
   deleteBroadcast,
   getBroadcast,
+  getBroadcastAbResults,
   getOptInSettings,
   listBroadcastRecipients,
   listBroadcasts,
@@ -49,6 +51,7 @@ import { resolveTenantForUser } from "../tenants/guard";
  *   POST   /tenants/:tenantId/broadcasts/:id/schedule    jadwalkan / kirim sekarang
  *   POST   /tenants/:tenantId/broadcasts/:id/cancel      batalkan
  *   GET    /tenants/:tenantId/broadcasts/:id/recipients  penerima berpaginasi
+ *   GET    /tenants/:tenantId/broadcasts/:id/ab-results  rincian per varian A/B (13D)
  *
  * Eksekusi pengiriman BUKAN di sini: schedule menulis event outbox
  * `broadcast.dispatch_due`; worker yang men-dispatch (materialisasi
@@ -127,6 +130,7 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
     app.post(`${base}/:id/schedule`, unavailable);
     app.post(`${base}/:id/cancel`, unavailable);
     app.get(`${base}/:id/recipients`, unavailable);
+    app.get(`${base}/:id/ab-results`, unavailable);
     return app;
   }
 
@@ -326,10 +330,22 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
       templateVariableSources: parsed.data.templateVariableSources,
       filter: parsed.data.audienceFilter,
       requireOptIn: parsed.data.requireOptIn,
+      abSplitPercentB: parsed.data.abSplitPercentB,
+      variantBMessageText: parsed.data.variantBMessageText,
+      variantBWhatsappTemplateId: parsed.data.variantBWhatsappTemplateId,
+      variantBTemplateVariableSources:
+        parsed.data.variantBTemplateVariableSources,
     });
     switch (result.kind) {
       case "created":
         return c.json(serializeBroadcast(result.broadcast, EMPTY_STATS), 201);
+      case "ab_incomplete":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_AB_INCOMPLETE",
+          "A/B test is enabled but variant B content is missing or invalid for this channel",
+        );
       case "segment_not_found":
         return apiError(c, 404, "NOT_FOUND", "Segment not found");
       case "channel_not_found":
@@ -400,6 +416,7 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
     const result = await updateBroadcast(bundle.db, {
       tenantId: g.tenant.id,
       broadcastId: id,
+      userId: g.appUser.id,
       patch: {
         name: parsed.data.name,
         channelAccountId: parsed.data.channelAccountId,
@@ -408,9 +425,21 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
         templateVariableSources: parsed.data.templateVariableSources,
         filter: parsed.data.audienceFilter,
         requireOptIn: parsed.data.requireOptIn,
+        abSplitPercentB: parsed.data.abSplitPercentB,
+        variantBMessageText: parsed.data.variantBMessageText,
+        variantBWhatsappTemplateId: parsed.data.variantBWhatsappTemplateId,
+        variantBTemplateVariableSources:
+          parsed.data.variantBTemplateVariableSources,
       },
     });
     switch (result.kind) {
+      case "ab_incomplete":
+        return apiError(
+          c,
+          422,
+          "BROADCAST_AB_INCOMPLETE",
+          "A/B test is enabled but variant B content is missing or invalid for this channel",
+        );
       case "segment_not_found":
         return apiError(c, 404, "NOT_FOUND", "Segment not found");
       case "updated": {
@@ -601,6 +630,7 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
         conversationId: r.conversationId,
         messageId: r.messageId,
         status: r.status,
+        variant: r.variant === "b" ? "b" : "a",
         skipReason: r.skipReason,
         errorCode: r.errorCode,
         createdAt: r.createdAt.toISOString(),
@@ -609,6 +639,23 @@ export function createBroadcastsRoutes(bundle: AuthBundle | null) {
       nextCursor: result.nextCursor,
     });
     return c.json(body);
+  });
+
+  // ---- Rincian per varian A/B (Fase 13D, dashboard saja) --------------------
+  // Gema konfigurasi A/B (untuk panel hasil + prefill formulir edit)
+  // + statistik per varian dari broadcast_recipients. Broadcast tanpa
+  // A/B → abTest null dan hanya varian "a". Baca = semua member.
+  app.get(`${base}/:id/ab-results`, async (c) => {
+    const g = await guard(c, { ownerAdmin: false });
+    if ("error" in g) return g.error;
+    const id = parseBroadcastId(c);
+    if (!id) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    const result = await getBroadcastAbResults(bundle.db, {
+      tenantId: g.tenant.id,
+      broadcastId: id,
+    });
+    if (!result) return apiError(c, 404, "NOT_FOUND", "Broadcast not found");
+    return c.json(BroadcastAbResultsResponseSchema.parse(result));
   });
 
   return app;
