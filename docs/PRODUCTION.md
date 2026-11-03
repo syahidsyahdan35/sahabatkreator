@@ -201,11 +201,33 @@ Tidak ada langkah platform di sini selain dokumentasi untuk tenant.
   role migrasi wajib karena pembuatan ekstensi di dump memerlukan
   superuser container — rehearsal membuktikan restore sebagai role
   pemilik biasa gagal tepat di titik ini) → berikan ulang grant role
-  aplikasi (`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN
-  SCHEMA public TO sk_app; GRANT USAGE, SELECT ON ALL SEQUENCES IN
-  SCHEMA public TO sk_app;` — dump dibuat `--no-privileges` sehingga
-  grant tidak ikut terbawa) → arahkan `DATABASE_URL` aplikasi ke DB
-  itu → restart service.
+  aplikasi dengan **satu perintah** (dump dibuat `--no-privileges`
+  sehingga grant tidak ikut terbawa):
+  `MIGRATION_DATABASE_URL=… pnpm --filter @sahabat-kreator/db db:grant`
+  → arahkan `DATABASE_URL` aplikasi ke DB itu → restart service →
+  pastikan `pnpm db:doctor` hijau.
+- **Grant role aplikasi bukan lagi langkah manual yang harus diingat.**
+  `migrations/0009_app_role_grants.sql` memberi grant + `ALTER DEFAULT
+  PRIVILEGES` sebagai bagian rantai migrasi, sehingga `db:migrate`
+  (termasuk setelah skema direset) selalu menghasilkan DB yang bisa
+  dipakai. Nama role dapat diganti lewat `SET sk.app_role` atau env
+  `APP_DB_ROLE` tanpa menyunting migrasi. `db:grant` tetap disediakan
+  untuk kasus restore-dari-dump di atas.
+- **Gerbang wajib pasca-restore & pasca-reset: `pnpm db:doctor`**
+  (baca-saja, exit ≠ 0 bila ada masalah). Ia memeriksa jumlah migrasi
+  vs berkas di disk, jumlah tabel/policy/tabel ber-RLS, apakah role
+  aplikasi non-superuser & tidak bypass RLS, hak DML nyata pada tabel
+  inti (`tenants`, `contacts`, `messages`), dan keberadaan default
+  privileges. Inilah yang menangkap keadaan "DB hidup tetapi setiap
+  query gagal permission denied" sebelum pengguna menemukannya —
+  kegagalan yang dulu terjadi karena grant hanya hidup sebagai prosa
+  di dokumen ini.
+- **Reset total (menghapus SELURUH data):**
+  `MIGRATION_DATABASE_URL=… pnpm --filter @sahabat-kreator/db db:reset
+  -- --yes` — menjatuhkan skema `public` + `drizzle`, menjalankan
+  seluruh migrasi, memberi grant, lalu menjalankan `doctor`. Tanpa
+  `--yes` perintah menolak (exit 2). Database, role, dan container
+  tidak disentuh.
 - Bukti rehearsal Fase 14C (DB buangan `sk_chain14c` → `sk_restore14c`):
   sha256 manifest cocok dengan berkas; sesudah restore, hitungan tabel
   (59), policy (73), dan baris per tabel cocok persis dengan sumber.

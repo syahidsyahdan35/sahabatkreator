@@ -11,6 +11,11 @@ hijau pada tree finalnya:
 1. Typecheck semua paket (`pnpm -r --if-present typecheck`).
 2. PGlite verify skema DB (`pnpm --filter @sahabat-kreator/db verify`)
    — plus skrip verify khusus fase bila ada (mis. `verify:agent-tools`).
+   Untuk DB NYATA (staging/produksi, sesudah migrasi/reset/restore)
+   gerbangnya `pnpm db:doctor` — baca-saja, exit ≠ 0 bila jumlah
+   migrasi tidak cocok, RLS mati, atau role aplikasi kehilangan hak
+   DML. PGlite tidak bisa memeriksa grant role (satu pengguna), jadi
+   `doctor` adalah satu-satunya penjaga untuk kelas kegagalan itu.
 3. Rantai verifikasi dari server terhadap API (tenant uji + mock
    bila perlu) dengan hitungan PASS eksplisit — TANPA Playwright
    (aturan user 2026-11-02; UI diuji user sendiri).
@@ -24,7 +29,8 @@ hijau pada tree finalnya:
    (API/worker staging berjalan dari dist tsup, bukan src).
 6. Pasca-deploy: health publik `https://botara.my.id/api/health` ok,
    service systemd aktif, `.env.staging` pulih byte-identik
-   (sha256 baseline `9c1ded2a…`), channel asli user utuh.
+   (sha256 baseline `9c1ded2a…`), channel asli user utuh, dan
+   `pnpm db:doctor` hijau.
 7. `verify-sdk` + `verify-mcp` terhadap staging untuk fase yang
    menyentuh permukaan publik; sejak Fase 14D ditambah `verify:cli`
    (binary `sk` hasil build, pola yang sama) untuk fase yang
@@ -6908,11 +6914,23 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   `sk_app` ternyata dipasang sebagai GRANT eksplisit pada tabel yang
   ada, bukan lewat `ALTER DEFAULT PRIVILEGES` seperti yang tertulis di
   catatan Fase 1B. Setelah reset, `sk_app` kehilangan SEMUA hak
-  (0 baris grant, `has_table_privilege` false). Dipulihkan dengan
-  GRANT ulang + `ALTER DEFAULT PRIVILEGES` agar migrasi berikutnya
-  otomatis ter-grant. **Langkah ini wajib diulang setiap kali skema
-  direset** — tanpanya API hidup tetapi setiap query gagal
-  "permission denied".
+  (0 baris grant, `has_table_privilege` false), sehingga API hidup
+  tetapi setiap query gagal "permission denied".
+- **Perbaikan permanen (2026-11-03, setelah entri ini)**: langkah
+  manual itu dihapus. `migrations/0009_app_role_grants.sql` memberi
+  grant + `ALTER DEFAULT PRIVILEGES` sebagai bagian rantai migrasi,
+  jadi `db:migrate` selalu menghasilkan DB yang bisa dipakai — dari
+  kosong maupun sesudah reset. Ditambah tiga perintah di
+  `packages/db/scripts/provision.ts`: `db:doctor` (audit baca-saja,
+  exit ≠ 0 bila bermasalah), `db:grant` (perbaikan/restore-dari-dump),
+  dan `db:reset -- --yes` (jatuhkan skema + migrasi + grant + doctor
+  dalam satu langkah). Lihat `docs/PRODUCTION.md` §7.
+- **Bukti**: DB buangan `sk_reset_probe` di server — skema dijatuhkan
+  sampai `grant sk_app = 0` & `pg_default_acl = 0` (kondisi gagal
+  direproduksi), lalu HANYA `db:migrate` dijalankan → 236 grant + 2
+  default privilege, `db:doctor` SEMUA OK. Uji negatif: hak dicabut →
+  `db:doctor` keluar exit 1 dengan 4 baris GAGAL; `db:grant`
+  memulihkannya. DB buangan dihapus sesudahnya.
 - **Verifikasi**: typecheck 20/20 paket hijau; PGlite 42/42; drift
   PASS "34 rute v1"; build semua dist. Pasca-deploy di server: 59
   tabel / 9 migrasi / 73 policy / 52 tabel ber-RLS / grant `sk_app`

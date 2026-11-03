@@ -46,7 +46,26 @@ pnpm typecheck      # tsc seluruh paket
 pnpm check:drift    # registry kontrak ↔ rute v1 ↔ SDK ↔ MCP (dua arah)
 pnpm build          # bundel semua app
 pnpm --filter @sahabat-kreator/db verify   # migrasi + RLS di PGlite
+pnpm db:doctor      # audit DB NYATA: migrasi, RLS, hak role aplikasi
 ```
+
+### Database: reset, grant, audit
+
+`db:doctor` / `db:grant` / `db:reset` bekerja pada DB sungguhan lewat
+`MIGRATION_DATABASE_URL` (role pemilik skema). Lihat
+`docs/PRODUCTION.md` §7 untuk prosedur restore.
+
+```bash
+pnpm db:doctor                              # baca-saja; exit ≠ 0 bila bermasalah
+pnpm --filter @sahabat-kreator/db db:grant  # beri ulang hak role aplikasi (idempoten)
+pnpm --filter @sahabat-kreator/db db:reset -- --yes   # HAPUS semua data, migrasi dari nol
+```
+
+Grant role aplikasi **tidak lagi** langkah manual yang harus diingat:
+migrasi `0009_app_role_grants.sql` memberi grant + `ALTER DEFAULT
+PRIVILEGES` di rantai migrasi, jadi `db:migrate` selalu menghasilkan DB
+yang bisa dipakai. `db:grant` disediakan untuk restore-dari-dump
+(dump dibuat `--no-privileges`).
 
 ## Status
 

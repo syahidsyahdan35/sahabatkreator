@@ -64,6 +64,13 @@
       "when": 1793690050199,
       "tag": "0008_message_claim",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793694713394,
+      "tag": "0009_app_role_grants",
+      "breakpoints": true
     }
   ]
 }
