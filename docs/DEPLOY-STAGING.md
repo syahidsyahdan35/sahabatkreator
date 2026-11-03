@@ -6707,3 +6707,93 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   Celah tercatat: endpoint callback penghapusan data Meta
   (signed_request) belum ada — aplikasi memakai URL instruksi
   penghapusan; diimplementasikan hanya bila konsol mewajibkannya.
+
+## Update Fase 14C — Kesiapan produksi (2026-11-03)
+
+- **Isi**: (1) email reset kata sandi — sisa 11B ditutup; (2) skrip
+  backup + rehearsal restore terbukti; (3) verifikasi rate limit
+  aplikasi + spesifikasi ruleset edge Cloudflare; (4) inventaris
+  rahasia + runbook rotasi (`docs/SECRETS-RUNBOOK.md`); (5) runbook
+  produksi (`docs/PRODUCTION.md`) + `.env.production.example`.
+  TANPA migrasi (skema tidak berubah; jurnal tetap 8, 59 tabel /
+  73 policy) dan TANPA permukaan v1/SDK/MCP/CLI baru (34 rute —
+  check:drift lulus): reset kata sandi adalah urusan auth pihak
+  pertama lewat endpoint Better Auth, konsisten dengan preseden
+  change-password 13A yang juga tidak masuk v1.
+- **Reset kata sandi — keputusan jalur**: hook `sendResetPassword`
+  Better Auth → core `deliverPasswordResetEmail` → `sendEmail` Resend
+  yang sama dengan undangan (11B). BUKAN pola outbox + job: Better
+  Auth sendiri membuat token, menyimpannya di `auth_verification`,
+  dan menyerahkan URL jadi ke hook (tidak ada kustodi token untuk
+  dipecahkan), dan reset adalah urusan pengguna/platform sedangkan
+  outbox kita tenant-sentris. Email dwibahasa (subjek "Reset your
+  Sahabat Kreator password"), token berlaku 1 jam sekali pakai
+  (konstanta core yang sama untuk konfigurasi library & isi email).
+  Hook TIDAK PERNAH melempar: endpoint selalu 200 ke peminta
+  (anti-enumerasi), hasil kirim sebenarnya dicatat satu baris
+  terstruktur `[auth] password_reset_email user=<id>
+  status=sent|not_configured|failed` (tanpa email/token/URL di log).
+  Web: halaman `/forgot-password` + `/reset-password` baru (dwibahasa)
+  + tautan "Forgot password?" di /login; sebelumnya web tidak punya
+  halaman ini sama sekali, jadi tautan email kini benar-benar bisa
+  dituntaskan pengguna.
+- **Backup**: `scripts/backup-db.sh` ter-commit — pg_dump terkompresi
+  + manifest (sha256/tabel/policy/jurnal) dari dalam container,
+  retensi dapat diatur; aset non-DB (objek R2 sisi provider, berkas
+  env sisi server) didokumentasikan, tidak disalin. Dua perbaikan
+  dari rehearsal yang gagal dulu lalu lulus: (a) hitungan jurnal
+  drizzle harus ditanyakan terpisah — referensi langsung dalam query
+  yang sama dengan penjaga `to_regclass` gagal di tahap parse bila
+  skema `drizzle` belum ada; (b) restore WAJIB sebagai role migrasi
+  (superuser container) karena `CREATE EXTENSION` di dump
+  membutuhkannya, dan grant role aplikasi diberikan ulang sesudahnya
+  (dump `--no-privileges`) — keduanya kini tertulis di
+  PRODUCTION.md §7.
+- **Verifikasi**: typecheck semua paket hijau; PGlite 41/41 (gerbang
+  regresi); drift PASS 34 rute. Rantai terisolasi di server (DB
+  buangan `sk_chain14c`, mock Resend :3993, instan API :3199/:3200/
+  :3201): **33 PASS / 0 FAIL** seksi utama (setup + K1 200; reset —
+  email tak dikenal 200 & 0 email, user dikenal TEPAT 1 email,
+  tautan diikuti → 302 + token, token ngawur 400, tukar token 200,
+  pakai ulang 400, login sandi lama 401 / baru 200; rotasi API key —
+  cabut 204, kunci lama 401, pengganti 200; rate limit — 20× sign-in
+  salah 401 lalu ke-21 → 429, IP lain ember terpisah & login sah 200,
+  10× sign-up 200 lalu ke-11 → 429; pay publik — 30× GET
+  `/api/pay/<code>` semua 200, 0× 429) + **L1–L3** (log status=sent
+  tercatat; log bersih dari token/URL) + **N0–N3** (instance tanpa
+  Resend: permintaan tetap 200, 0 email, log `status=not_configured`)
+  + **B1–B7** (backup BACKUP_OK, sha manifest == berkas, manifest
+  59 tabel / 73 policy, restore rc=0, hitungan baris per tabel &
+  policy sumber == restore persis). Catatan proses: run pertama
+  driver terputus di tengah oleh koneksi SSH (broken pipe) sesudah
+  seksi utama + L lulus — seksi N & B diulang sebagai driver-B
+  terpisah sampai hijau penuh, dan assert driver diperkeras agar
+  perbandingan kosong-sama-kosong tidak bisa lolos sebagai PASS.
+- **Deploy**: build semua dist di VM → rsync (**`--exclude
+  '.env.staging'`**, tanpa `--delete`) → restart api/web/worker via
+  kill MainPID eksplisit (3670690/3659656/3659657 →
+  3692219/3692220/3692221; realtime tidak di-restart — dist-nya tidak
+  memuat kode yang berubah). Pasca-deploy: health publik ok; endpoint
+  live `POST /api/auth/request-password-reset` untuk email tak
+  dikenal → 200 (sebelum fase ini 400 "tidak diaktifkan" dari
+  library); bundle web publik `index-CQU5SkKM.js` (hash sama dengan
+  build lokal) memuat "Forgot password?" + "Periksa email Anda";
+  grep bundle api server `password_reset_email` ×5; dist api/worker
+  BERSIH dari pg inline (`from "pg"` eksternal, `ConnectionParameters`
+  0); hitungan live utuh 1 tenant / 4 channel connected / 1 kontak;
+  sha256 `.env.staging` `9c1ded2a5a69f09e…` byte-identik.
+- **Batas jujur / spec-only**: (1) Bukti email reset LIVE menunggu
+  akun Resend + domain terverifikasi milik user (sama seperti 11B) —
+  seluruh rantai fase ini terhadap mock Resend; di staging live saat
+  ini panel Resend belum tentu terisi, sehingga permintaan reset
+  nyata akan tercatat `not_configured` secara jujur, bukan terkirim.
+  (2) Ruleset edge Cloudflare adalah SPESIFIKASI siap tempel di
+  PRODUCTION.md §2 — belum diterapkan (tidak ada akses CF yang
+  dipegang). (3) TIDAK ada rahasia live yang dirotasi: semua kandidat
+  butuh konsol user atau mengunci pengguna / membutuhkan alat
+  re-enkripsi yang belum ada — prosedurnya lengkap di
+  SECRETS-RUNBOOK.md, dan rotasi API key dibuktikan pada tenant
+  buangan. (4) Cron backup TIDAK dipasang di server live (sesuai
+  brief: rekomendasi terdokumentasi saja). (5) verify-sdk/verify-mcp
+  tidak dijalankan — permukaan publik tidak berubah fase ini
+  (pengecualian eksplisit; drift PASS adalah gerbangnya).
