@@ -1,9 +1,14 @@
-import type {
-  ChannelAdapter,
-  SendMessageInput,
-  SendMessageResult,
-  StandardEvent,
-  VerifyWebhookInput,
+import {
+  DEFAULT_META_API_BASE,
+  DEFAULT_META_GRAPH_API_VERSION,
+  GraphApiError,
+  GraphHttpClient,
+  type ChannelAdapter,
+  type GraphClientOptions,
+  type SendMessageInput,
+  type SendMessageResult,
+  type StandardEvent,
+  type VerifyWebhookInput,
 } from "@sahabat-kreator/channel-core";
 
 /**
@@ -34,47 +39,24 @@ import type {
  * — dan pesan error hanya memuat status HTTP + kode/pesan resmi Graph.
  */
 
-export const DEFAULT_META_API_BASE = "https://graph.facebook.com";
-export const DEFAULT_META_GRAPH_API_VERSION = "v26.0";
+/**
+ * Konstanta base URL & versi Graph kini hidup di @sahabat-kreator/channel-core
+ * (Fase 13D) supaya adapter Meta lain memakai nilai yang sama persis.
+ * Diekspor ulang di sini agar impor lama tetap bekerja.
+ */
+export { DEFAULT_META_API_BASE, DEFAULT_META_GRAPH_API_VERSION };
 
 /** Error Graph API yang AMAN dicatat: status HTTP + kode Graph resmi. */
-export class WhatsAppGraphError extends Error {
-  readonly status: number;
-  /** Kode error numerik Graph (mis. 190 token tidak valid, 131047 di luar jendela 24 jam); null bila tak ada. */
-  readonly graphCode: number | null;
-  readonly description: string;
-
+export class WhatsAppGraphError extends GraphApiError {
   constructor(status: number, graphCode: number | null, description: string) {
-    super(
-      `WhatsApp Graph API error (HTTP ${status}${graphCode !== null ? `, code ${graphCode}` : ""}): ${description}`,
-    );
+    super("WhatsApp Graph API", status, graphCode, description);
     this.name = "WhatsAppGraphError";
-    this.status = status;
-    this.graphCode = graphCode;
-    this.description = description;
   }
 }
 
-interface GraphErrorBody {
-  error?: {
-    message?: string;
-    type?: string;
-    code?: number;
-    error_subcode?: number;
-  };
-}
-
-type FetchLike = typeof fetch;
-
-export interface WhatsAppCloudClientOptions {
-  /** Base URL Graph API — default https://graph.facebook.com (override mock via env META_API_BASE). */
-  baseUrl?: string;
-  /** Versi Graph ter-pin — default v26.0; lapisan API meneruskan nilai config. */
-  apiVersion?: string;
+export interface WhatsAppCloudClientOptions extends GraphClientOptions {
   /** Access Token WhatsApp (System User permanen / token sementara). */
   accessToken?: string;
-  fetchImpl?: FetchLike;
-  timeoutMs?: number;
 }
 
 /** Profil nomor WhatsApp dari Graph — hasil validasi saat connect. */
@@ -180,100 +162,24 @@ export function renderTemplatePreview(
   });
 }
 
-/** Klien WhatsApp Cloud API tipis di atas fetch. Satu instance per token. */
-export class WhatsAppCloudClient {
-  private readonly baseUrl: string;
-  private readonly apiVersion: string;
-  private readonly accessToken: string | undefined;
-  private readonly fetchImpl: FetchLike;
-  private readonly timeoutMs: number;
-
+/**
+ * Klien WhatsApp Cloud API tipis di atas fetch. Satu instance per token.
+ * Plumbing HTTP (header Bearer, parse error, GET/POST/DELETE JSON,
+ * timeout) diwarisi dari `GraphHttpClient` di channel-core (Fase 13D);
+ * kelas ini hanya memetakan kegagalan ke `WhatsAppGraphError`.
+ */
+export class WhatsAppCloudClient extends GraphHttpClient {
   constructor(options: WhatsAppCloudClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_META_API_BASE).replace(/\/+$/, "");
-    this.apiVersion = options.apiVersion ?? DEFAULT_META_GRAPH_API_VERSION;
-    this.accessToken = options.accessToken;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
+    super(options);
   }
 
-  private headers(): Record<string, string> {
-    return this.accessToken
-      ? { authorization: `Bearer ${this.accessToken}` }
-      : {};
-  }
-
-  private async parseError(response: Response): Promise<WhatsAppGraphError> {
-    let body: GraphErrorBody = {};
-    try {
-      body = (await response.json()) as GraphErrorBody;
-    } catch {
-      /* body bukan JSON — error generik di bawah */
-    }
-    const graphCode =
-      typeof body.error?.code === "number" ? body.error.code : null;
-    const description =
-      typeof body.error?.message === "string"
-        ? body.error.message.slice(0, 200)
-        : "whatsapp_graph_error";
-    return new WhatsAppGraphError(response.status, graphCode, description);
-  }
-
-  private async getJson<T>(path: string): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
-        method: "GET",
-        headers: this.headers(),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
-      throw new WhatsAppGraphError(0, null, "network_error");
-    }
-    if (!response.ok) throw await this.parseError(response);
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new WhatsAppGraphError(response.status, null, "invalid_response");
-    }
-  }
-
-  private async postJson<T>(path: string, payload: unknown): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
-        method: "POST",
-        headers: { ...this.headers(), "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
-      throw new WhatsAppGraphError(0, null, "network_error");
-    }
-    if (!response.ok) throw await this.parseError(response);
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new WhatsAppGraphError(response.status, null, "invalid_response");
-    }
-  }
-
-  private async deleteJson<T>(path: string): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
-        method: "DELETE",
-        headers: this.headers(),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
-      throw new WhatsAppGraphError(0, null, "network_error");
-    }
-    if (!response.ok) throw await this.parseError(response);
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new WhatsAppGraphError(response.status, null, "invalid_response");
-    }
+  protected createError(
+    status: number,
+    graphCode: number | null,
+    description: string,
+    graphSubcode: number | null,
+  ): WhatsAppGraphError {
+    return new WhatsAppGraphError(status, graphCode, description);
   }
 
   /**

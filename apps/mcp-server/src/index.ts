@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  CreateContactRequestSchema,
+  SendMessageRequestSchema,
+  UpdateContactRequestSchema,
+} from "@sahabat-kreator/contracts";
+import {
   SahabatKreatorApiError,
   SahabatKreatorClient,
 } from "@sahabat-kreator/sdk";
@@ -112,6 +117,28 @@ async function run<T>(fn: () => Promise<T>): Promise<CallToolResult> {
   }
 }
 
+/**
+ * Menyalin shape Zod milik KONTRAK sambil menambahkan deskripsi untuk
+ * model. Batas (min/max/format/refine) TIDAK ditulis ulang di sini —
+ * seluruhnya diwarisi dari `@sahabat-kreator/contracts`, sehingga
+ * perubahan batas di kontrak otomatis berlaku di MCP dan tidak bisa
+ * menyimpang diam-diam (Fase 13D).
+ *
+ * Konsekuensi yang disengaja: bila kontrak menambah field baru, field
+ * itu ikut muncul di tool (tanpa deskripsi sampai hint ditambahkan).
+ */
+function withHints<T extends z.ZodRawShape>(
+  shape: T,
+  hints: { [K in keyof T]?: string },
+): T {
+  const out: Record<string, z.ZodTypeAny> = {};
+  for (const [key, schema] of Object.entries(shape)) {
+    const hint = hints[key as keyof T];
+    out[key] = hint ? schema.describe(hint) : schema;
+  }
+  return out as T;
+}
+
 const server = new McpServer({ name: "sahabat-kreator", version: "0.1.0" });
 
 server.registerTool(
@@ -146,22 +173,21 @@ server.registerTool(
   {
     description:
       "Buat kontak baru di workspace (scope contacts:write). Hasil: kontak yang dibuat. [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
-    inputSchema: {
-      name: z.string().min(1).max(255).describe("Nama kontak"),
-      phone: z.string().min(1).max(32).optional().describe("Nomor telepon (opsional)"),
-      email: z.string().email().max(320).optional().describe("Email (opsional)"),
-      customFields: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe(
-          "Field kustom kontak sebagai peta string→string (opsional; kunci 1–64 karakter, nilai maks 1000 karakter, maks 50 entri)",
-        ),
-    },
+    inputSchema: withHints(CreateContactRequestSchema.shape, {
+      name: "Nama kontak",
+      phone: "Nomor telepon (opsional)",
+      email: "Email (opsional)",
+      tags: "Daftar tag (opsional)",
+      customFields:
+        "Field kustom kontak sebagai peta string→string (opsional; kunci 1–64 karakter, nilai maks 1000 karakter, maks 50 entri)",
+    }),
     annotations: { readOnlyHint: false },
   },
-  async ({ name, phone, email, customFields }) =>
+  async ({ name, phone, email, tags, customFields }) =>
     writesEnabled
-      ? run(() => client.createContact({ name, phone, email, customFields }))
+      ? run(() =>
+          client.createContact({ name, phone, email, tags, customFields }),
+        )
       : writeDisabledResult("create_contact"),
 );
 
@@ -198,7 +224,9 @@ server.registerTool(
       "Kirim pesan keluar ke satu percakapan sebagai workspace (scope messages:write). Pesan masuk jalur pengiriman yang sama dengan balasan dashboard — untuk webchat, pengunjung yang terhubung menerimanya realtime. [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
     inputSchema: {
       conversationId: z.string().uuid().describe("Id percakapan tujuan"),
-      text: z.string().min(1).max(4096).describe("Isi pesan teks"),
+      // Batas panjang pesan diwarisi dari kontrak (SendMessageRequest),
+      // bukan ditulis ulang — Fase 13D.
+      text: SendMessageRequestSchema.shape.contentText.describe("Isi pesan teks"),
     },
     annotations: { readOnlyHint: false },
   },
@@ -274,23 +302,14 @@ server.registerTool(
       "Ubah kontak yang ada (scope contacts:write) mengikuti kontrak UpdateContactRequest: nama, tags (menggantikan seluruh daftar), pipelineStage, optInStatus, dan/atau customFields — customFields digabung per kunci di server (kunci yang dikirim menimpa, yang tidak disebut dipertahankan). [TIER TULIS — menolak kecuali server dijalankan dengan MCP_ALLOW_WRITES=1; default server read-only.]",
     inputSchema: {
       contactId: z.string().uuid().describe("Id kontak (dari list_contacts)"),
-      name: z.string().min(1).max(255).optional().describe("Nama baru (opsional)"),
-      tags: z
-        .array(z.string().min(1).max(64))
-        .max(50)
-        .optional()
-        .describe("Daftar tag baru — menggantikan seluruh daftar lama (opsional)"),
-      pipelineStage: z.string().min(1).max(64).optional().describe("Tahap pipeline baru (opsional)"),
-      optInStatus: z
-        .enum(["unknown", "opted_in", "opted_out"])
-        .optional()
-        .describe("Status opt-in baru (opsional)"),
-      customFields: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe(
+      ...withHints(UpdateContactRequestSchema.shape, {
+        name: "Nama baru (opsional)",
+        tags: "Daftar tag baru — menggantikan seluruh daftar lama (opsional)",
+        pipelineStage: "Tahap pipeline baru (opsional)",
+        optInStatus: "Status opt-in baru (opsional)",
+        customFields:
           "Field kustom sebagai peta string→string (opsional; kunci 1–64 karakter, nilai maks 1000 karakter, maks 50 entri)",
-        ),
+      }),
     },
     annotations: { readOnlyHint: false },
   },

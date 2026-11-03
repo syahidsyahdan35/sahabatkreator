@@ -64,7 +64,20 @@ function ok(message: string): void {
 const routeKey = (method: string, p: string) => `${method} ${p}`;
 
 // --- Sumber implementasi ---------------------------------------------------
-const contractsSrc = read("packages/contracts/src/index.ts");
+/**
+ * Seluruh sumber paket contracts, digabung. Fase 13D memecah
+ * `contracts/src/index.ts` (4.282 baris) menjadi modul per domain, jadi
+ * pemindaian statis di bawah harus membaca SEMUA modul — bukan hanya
+ * barrel-nya — agar ekspor tetap ditemukan.
+ */
+const contractsSrc = (() => {
+  const dir = path.join(repoRoot, "packages/contracts/src");
+  return readdirSync(dir)
+    .filter((file) => file.endsWith(".ts"))
+    .sort()
+    .map((file) => readFileSync(path.join(dir, file), "utf8"))
+    .join("\n");
+})();
 const apiSrc = read("apps/api/src/modules/public-v1/routes.ts");
 const sdkSrc = read("packages/sdk/src/index.ts");
 const mcpSrc = read("apps/mcp-server/src/index.ts");

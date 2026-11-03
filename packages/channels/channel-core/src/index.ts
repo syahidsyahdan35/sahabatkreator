@@ -4,6 +4,17 @@
  * provider (format webhook, token, error code) hidup di adapter masing-masing.
  */
 
+// Kerangka klien Meta Graph bersama (Fase 13D) — dipakai channel-messenger
+// (Messenger + Instagram) dan channel-whatsapp supaya plumbing HTTP tidak
+// disalin dua kali.
+export {
+  DEFAULT_META_API_BASE,
+  DEFAULT_META_GRAPH_API_VERSION,
+  GraphApiError,
+  GraphHttpClient,
+  type GraphClientOptions,
+} from "./graph";
+
 export type ChannelProvider =
   | "whatsapp"
   | "instagram"

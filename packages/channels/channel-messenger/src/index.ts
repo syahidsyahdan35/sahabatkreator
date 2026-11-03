@@ -1,10 +1,15 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type {
-  ChannelAdapter,
-  SendMessageInput,
-  SendMessageResult,
-  StandardEvent,
-  VerifyWebhookInput,
+import {
+  DEFAULT_META_API_BASE,
+  DEFAULT_META_GRAPH_API_VERSION,
+  GraphApiError,
+  GraphHttpClient,
+  type ChannelAdapter,
+  type GraphClientOptions,
+  type SendMessageInput,
+  type SendMessageResult,
+  type StandardEvent,
+  type VerifyWebhookInput,
 } from "@sahabat-kreator/channel-core";
 
 /**
@@ -31,55 +36,29 @@ import type {
  * pesan resmi Graph (yang tidak memuat token).
  */
 
-export const DEFAULT_META_API_BASE = "https://graph.facebook.com";
-export const DEFAULT_META_GRAPH_API_VERSION = "v26.0";
+/**
+ * Konstanta base URL & versi Graph kini hidup di @sahabat-kreator/channel-core
+ * (Fase 13D) supaya adapter Meta lain memakai nilai yang sama persis.
+ * Diekspor ulang di sini agar impor lama tetap bekerja.
+ */
+export { DEFAULT_META_API_BASE, DEFAULT_META_GRAPH_API_VERSION };
 
 /** Error Graph API yang AMAN dicatat: status HTTP + kode Graph resmi. */
-export class MetaGraphError extends Error {
-  readonly status: number;
-  /** Kode error numerik Graph (mis. 190 token tidak valid, 551 jendela pesan); null bila tak ada. */
-  readonly graphCode: number | null;
-  /** Subkode error Graph (mis. 36003 untuk kegagalan exchange OAuth); null bila tak ada. */
-  readonly graphSubcode: number | null;
-  readonly description: string;
-
+export class MetaGraphError extends GraphApiError {
   constructor(
     status: number,
     graphCode: number | null,
     description: string,
     graphSubcode: number | null = null,
   ) {
-    super(
-      `Meta Graph API error (HTTP ${status}${graphCode !== null ? `, code ${graphCode}` : ""}): ${description}`,
-    );
+    super("Meta Graph API", status, graphCode, description, graphSubcode);
     this.name = "MetaGraphError";
-    this.status = status;
-    this.graphCode = graphCode;
-    this.graphSubcode = graphSubcode;
-    this.description = description;
   }
 }
 
-interface GraphErrorBody {
-  error?: {
-    message?: string;
-    type?: string;
-    code?: number;
-    error_subcode?: number;
-  };
-}
-
-type FetchLike = typeof fetch;
-
-export interface MetaGraphClientOptions {
-  /** Base URL Graph API — default https://graph.facebook.com (override untuk mock uji via env META_API_BASE). */
-  baseUrl?: string;
-  /** Versi Graph ter-pin — default v26.0; lapisan API meneruskan nilai config. */
-  apiVersion?: string;
+export interface MetaGraphClientOptions extends GraphClientOptions {
   /** Page Access Token. */
   accessToken?: string;
-  fetchImpl?: FetchLike;
-  timeoutMs?: number;
 }
 
 /** Profil objek Graph yang dipakai connect (Page / akun IG). */
@@ -158,100 +137,24 @@ export interface MetaWabaPhoneNumber {
   verifiedName: string | null;
 }
 
-/** Klien Graph API tipis di atas fetch. Satu instance per token. */
-export class MetaGraphClient {
-  private readonly baseUrl: string;
-  private readonly apiVersion: string;
-  private readonly accessToken: string | undefined;
-  private readonly fetchImpl: FetchLike;
-  private readonly timeoutMs: number;
-
+/**
+ * Klien Graph API tipis di atas fetch. Satu instance per token.
+ * Plumbing HTTP (header Bearer, parse error, GET/POST JSON, timeout)
+ * diwarisi dari `GraphHttpClient` di channel-core (Fase 13D); kelas ini
+ * hanya memetakan kegagalan ke `MetaGraphError`.
+ */
+export class MetaGraphClient extends GraphHttpClient {
   constructor(options: MetaGraphClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_META_API_BASE).replace(/\/+$/, "");
-    this.apiVersion = options.apiVersion ?? DEFAULT_META_GRAPH_API_VERSION;
-    this.accessToken = options.accessToken;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
+    super(options);
   }
 
-  private headers(): Record<string, string> {
-    return this.accessToken
-      ? { authorization: `Bearer ${this.accessToken}` }
-      : {};
-  }
-
-  private async parseError(response: Response): Promise<MetaGraphError> {
-    let body: GraphErrorBody = {};
-    try {
-      body = (await response.json()) as GraphErrorBody;
-    } catch {
-      /* body bukan JSON — error generik di bawah */
-    }
-    const graphCode =
-      typeof body.error?.code === "number" ? body.error.code : null;
-    const graphSubcode =
-      typeof body.error?.error_subcode === "number"
-        ? body.error.error_subcode
-        : null;
-    const description =
-      typeof body.error?.message === "string"
-        ? body.error.message.slice(0, 200)
-        : "meta_graph_error";
-    return new MetaGraphError(
-      response.status,
-      graphCode,
-      description,
-      graphSubcode,
-    );
-  }
-
-  private async getJson<T>(path: string): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
-        method: "GET",
-        headers: this.headers(),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
-      // Error jaringan/timeout: jangan teruskan objek asli.
-      throw new MetaGraphError(0, null, "network_error");
-    }
-    if (!response.ok) throw await this.parseError(response);
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new MetaGraphError(response.status, null, "invalid_response");
-    }
-  }
-
-  /** GET dengan parameter query ter-encode (untuk endpoint OAuth & penemuan aset Fase 7D). */
-  private async getJsonParams<T>(
-    path: string,
-    params: Record<string, string>,
-  ): Promise<T> {
-    const query = new URLSearchParams(params).toString();
-    return this.getJson<T>(query ? `${path}?${query}` : path);
-  }
-
-  private async postJson<T>(path: string, payload: unknown): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/${this.apiVersion}/${path}`, {
-        method: "POST",
-        headers: { ...this.headers(), "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
-      throw new MetaGraphError(0, null, "network_error");
-    }
-    if (!response.ok) throw await this.parseError(response);
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new MetaGraphError(response.status, null, "invalid_response");
-    }
+  protected createError(
+    status: number,
+    graphCode: number | null,
+    description: string,
+    graphSubcode: number | null,
+  ): MetaGraphError {
+    return new MetaGraphError(status, graphCode, description, graphSubcode);
   }
 
   /**
