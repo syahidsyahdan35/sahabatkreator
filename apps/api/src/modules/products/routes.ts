@@ -83,7 +83,11 @@ export function serializeOrder(
       ? buildPaymentUrl(baseUrl, paymentLink.code)
       : null,
     paymentStatus: paymentLink?.status ?? null,
-    provider: order.provider,
+    // Provider hidup di tautan bayar (sumber kebenaran tunggal
+    // pembayaran); order mewarisinya dari tautannya. 'simulation'
+    // hanya untuk order warisan tanpa tautan (tidak lahir dari
+    // checkout 13F).
+    provider: paymentLink?.provider ?? "simulation",
     paidAt: order.paidAt?.toISOString() ?? null,
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),

@@ -57,7 +57,9 @@ export type ApiKeyScope =
   // Fase 13B: scope baca growth links.
   | "growth_links:read"
   // Fase 13C: scope baca segmen.
-  | "segments:read";
+  | "segments:read"
+  // Fase 13F: scope baca order commerce.
+  | "orders:read";
 
 /** Hash SHA-256 (hex) dari kunci utuh — satu-satunya bentuk yang disimpan/dicari. */
 export function hashApiKey(fullKey: string): string {

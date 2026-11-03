@@ -856,7 +856,7 @@ export function createPublicV1Routes(
     const denied = requireScope(c, "orders:read");
     if (denied) return denied;
     const auth = c.get("apiKeyAuth");
-    const rows = await listOrders(bundle.db, auth.tenantId);
+    const rows = await listOrders(bundle.db, { tenantId: auth.tenantId });
     return c.json(
       OrderListResponseSchema.parse({
         orders: rows.map((r) => serializeOrder(r)),
@@ -870,7 +870,7 @@ export function createPublicV1Routes(
     const id = parseUuidParam(c);
     if (!id) return apiError(c, 404, "NOT_FOUND", "Order not found");
     const auth = c.get("apiKeyAuth");
-    const row = await getOrder(bundle.db, auth.tenantId, id);
+    const row = await getOrder(bundle.db, { tenantId: auth.tenantId }, id);
     if (!row) return apiError(c, 404, "NOT_FOUND", "Order not found");
     return c.json(serializeOrder(row));
   });

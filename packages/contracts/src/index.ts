@@ -4381,7 +4381,9 @@ export const OrderResponseSchema = z.object({
   /** URL publik halaman bayar: {base}/pay/{code} (relatif bila base tak dikenal). */
   paymentUrl: z.string().nullable(),
   paymentStatus: PaymentLinkStatusSchema.nullable(),
-  /** Fase ini selalu 'simulation' — belum ada pembayaran sungguhan. */
+  /** Provider pembayaran order = provider tautan bayarnya (sumber
+   * kebenaran tunggal di payment_links). Fase ini selalu
+   * 'simulation' — belum ada pembayaran sungguhan. */
   provider: z.string(),
   paidAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
