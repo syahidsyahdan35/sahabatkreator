@@ -6463,3 +6463,99 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   akun merchant user. Bukti UI dashboard Orders + builder node
   katalog/checkout menunggu uji klik user sendiri (aturan fase:
   tanpa Playwright; verifikasi = rantai server + typecheck + DB).
+
+## Fase 13G — Janji Temu + Google Calendar (2026-11-03)
+
+- **Migrasi `0006_appointments_google` (drizzle-kit generate) —
+  jurnal 7 entri; staging 58 tabel / 72 policy.** Lima tabel baru:
+  `appointment_services`, `appointment_settings` (zona waktu janji
+  + lead time per tenant, bawaan Asia/Jakarta / 120 menit),
+  `appointment_availability` (jendela mingguan, jam dinding
+  "HH:mm"), `bookings`, `google_calendar_connections` (token
+  terenkripsi envelope, unik per tenant). Blok kustom [K-13G]:
+  ekstensi `btree_gist` + constraint eksklusi GiST
+  `bookings_no_overlap_confirmed` (tenant + rentang tstzrange,
+  hanya baris `confirmed`) — anti-double-booking di lapisan data;
+  booking batal membebaskan rentangnya.
+- **Mesin slot SATU untuk chat + dashboard** (`getBookableSlots`):
+  jendela mingguan ∩ masa depan (+ lead time) − booking confirmed
+  − busy Google (bila terhubung), semua matematika di zona waktu
+  janji tenant (konversi jam-dinding→UTC via Intl). Node flow
+  `book_appointment` memarkir daftar slot bernomor dwibahasa di
+  mesin `wait_reply`; booking dari chat dibuat lewat `createBooking`
+  (transaksi sendiri, identik jalur dashboard) → branch
+  booked/invalid/timeout/slot_taken; yang kalah balapan menerima
+  pemberitahuan + daftar SEGAR (attempts tidak bertambah), branch
+  `slot_taken` hanya bila daftar segar kosong. Pembatalan v1 =
+  aksi dashboard saja (chat-cancel sengaja tidak dibangun).
+- **Google Calendar = sinkronisasi tambahan, bukan syarat.**
+  Klien OAuth platform dari Panel Admin (`google_oauth_client_id`
+  publik + `google_oauth_client_secret` rahasia; resolver
+  panel→env; pola kejujuran 11B — tanpa klien, connect menjawab
+  422 `GOOGLE_NOT_CONFIGURED`). Token tenant terenkripsi
+  `CHANNEL_TOKEN_SECRET`. Buat/hapus event via outbox
+  `appointment.google_sync_requested` → job worker; kegagalan
+  tercatat di booking (`google_sync_status`/`google_sync_error`)
+  dan TIDAK PERNAH menggagalkan booking. Base URL dapat dioverride
+  env untuk mock: `GOOGLE_API_BASE` / `GOOGLE_TOKEN_BASE` /
+  `GOOGLE_AUTH_BASE`. Redirect URI OAuth:
+  `https://botara.my.id/api/google/oauth/callback`.
+- **Permukaan publik baca saja**: scope baru `appointments:read`
+  (18 scope total), `GET /v1/appointments` (filter from/to/status)
+  + `GET /v1/appointment-services`; SDK + MCP read ikut fase yang
+  sama; tulis layanan/ketersediaan/booking dashboard+flow saja
+  (alasan di `docs/COVERAGE-MATRIX.md`).
+- **PERBAIKAN INFRA PENTING (berlaku surut ke semua bundle): `pg`
+  kini eksternal di bundle tsup + dependensi runtime apps.**
+  Sebelumnya `pg` ikut ter-bundel ke dist api/worker/realtime
+  (bukan dependensi langsung apps → tsup meng-inline-nya lewat
+  paket workspace) sementara drizzle-orm eksternal memuat `pg`
+  asli dari node_modules: dua kelas `Pool` berbeda membuat
+  `instanceof Pool` di sesi drizzle GAGAL, sehingga transaksi
+  drizzle tidak ter-pin ke satu koneksi — pernyataan satu
+  transaksi menyebar antar-koneksi pool (set_config tenant bisa
+  mendarat di koneksi lain → RLS acak 42501; ROLLBACK TO
+  SAVEPOINT → 25P01). Cacat laten sejak bundle pertama; selama ini
+  tertutup karena pool yang sepi cenderung memakai ulang koneksi
+  yang sama, dan terbuka oleh jalur booking 13G yang meminjam
+  koneksi kedua di tengah transaksi. Bukti: repro savepoint lulus
+  di mode source & bundle terisolasi, gagal deterministik di
+  worker bundle berumur panjang; sesudah perbaikan, rantai penuh
+  hijau. Perbaikannya: `external: ["pg"]` di 4 tsup.config.ts +
+  `pg` dideklarasikan di dependencies apps/api, apps/worker,
+  apps/realtime (satu instance store pg@8.23.1 yang sama dengan
+  peer drizzle → instanceof berlaku).
+- **Verifikasi**: typecheck bersih; PGlite SEMUA LULUS termasuk
+  seksi [40] baru (58 tabel / 72 policy; eksklusi GiST menolak
+  tumpang tindih & mengizinkan bersebelahan/tenant lain/sesudah
+  batal; CHECK ketersediaan; koneksi Google unik per tenant);
+  `pnpm check:drift` 34 rute; rantai terisolasi server (DB buangan
+  `sk_chain13g`, API :3217, Redis DB 14, mock gabungan
+  Telegram+Google :8419) **Fase A 21/21 + Fase B 49/49 PASS** —
+  NOT_CONFIGURED jujur tanpa klien platform, OAuth mock penuh,
+  freebusy memblokir tepat slotnya, booking flow membuat baris +
+  event mock di instan UTC yang tepat untuk jendela Asia/Jakarta
+  lintas-tengah-malam-UTC, balapan dua kontak → tepat satu booking
+  + tawaran ulang slot_taken, cancel menghapus event mock, bukti
+  lead time, anti-bocor agent (dengan konteks tenant — hitungan
+  RLS tanpa konteks tidak berarti), v1 + 403 scope, isolasi
+  tenant, regresi questionnaire + katalog/checkout; pasca-deploy:
+  health publik ok, 4 service aktif, grep bundle (api/worker:
+  `book_appointment`; dist BERSIH dari salinan pg inline), hitungan
+  live + sha `.env.staging` utuh.
+- **Batas jujur**: bukti LIVE Google menunggu klien OAuth milik
+  user — langkah persisnya: (1) buat project di Google Cloud
+  Console; (2) enable **Google Calendar API**; (3) OAuth consent
+  screen: External, scope `calendar.events` + `calendar.readonly`;
+  (4) Credentials → OAuth client ID tipe **Web application**,
+  Authorized redirect URI persis
+  `https://botara.my.id/api/google/oauth/callback`; (5) tempel
+  client ID + secret ke Panel Admin (kunci
+  `google_oauth_client_id` / `google_oauth_client_secret`) —
+  sesudah itu tenant menghubungkan dari halaman Appointments dan
+  sinkronisasi nyata berjalan; tanpa langkah ini fitur janji
+  tetap berfungsi penuh secara internal. State OAuth Google
+  disimpan di memori proses API (nonce sekali pakai, TTL 10
+  menit) — penyederhanaan sadar dari pola redis meta-oauth.
+  Bukti UI halaman Appointments + builder node menunggu uji klik
+  user (tanpa Playwright).
