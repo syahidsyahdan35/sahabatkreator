@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  BroadcastAbResultsResponse,
   BroadcastAudienceFilter,
   BroadcastAudiencePreviewResponse,
   BroadcastRecipientResponse,
@@ -725,6 +726,16 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
   const [requireOptIn, setRequireOptIn] = useState<boolean | null>(
     editing ? editing.requireOptIn : null,
   );
+  // Fase 13D: uji A/B — keadaan awal draft yang diedit dimuat dari
+  // endpoint ab-results (konfigurasi varian SENGAJA tidak ikut di
+  // BroadcastResponse agar permukaan v1 tetap bersih).
+  const [abEnabled, setAbEnabled] = useState(false);
+  const [abPercentB, setAbPercentB] = useState(50);
+  const [variantBText, setVariantBText] = useState("");
+  const [variantBTemplateId, setVariantBTemplateId] = useState("");
+  const [variantBVariableSources, setVariantBVariableSources] = useState<
+    string[]
+  >([]);
   const [when, setWhen] = useState<"now" | "schedule">("now");
   const [scheduledAtLocal, setScheduledAtLocal] = useState("");
   const [preview, setPreview] =
@@ -783,6 +794,34 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     selectedChannel?.provider === "instagram";
   const isWhatsApp = selectedChannel?.provider === "whatsapp";
   const selectedTemplate = waTemplates.find((tpl) => tpl.id === whatsappTemplateId);
+  const selectedTemplateB = waTemplates.find(
+    (tpl) => tpl.id === variantBTemplateId,
+  );
+
+  // Prefill konfigurasi A/B untuk draft yang diedit (Fase 13D).
+  useEffect(() => {
+    if (!tenantId || !editing) return;
+    let cancelled = false;
+    api.broadcasts
+      .abResults(tenantId, editing.id)
+      .then((res) => {
+        if (cancelled || !res.abTest) return;
+        setAbEnabled(true);
+        setAbPercentB(res.abTest.splitPercentB);
+        setVariantBText(res.abTest.variantBMessageText ?? "");
+        setVariantBTemplateId(res.abTest.variantBWhatsappTemplateId ?? "");
+        setVariantBVariableSources(
+          res.abTest.variantBTemplateVariableSources ?? [],
+        );
+      })
+      .catch(() => {
+        /* prefill gagal: formulir tetap bisa dipakai tanpa A/B */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, editing?.id]);
 
   // Muat cermin template setiap kali channel WhatsApp terpilih berubah.
   useEffect(() => {
@@ -879,6 +918,33 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
               stages: splitCommaList(stagesText),
             }
           : { audience: "all" };
+    // Fase 13D: bidang A/B hanya dikirim saat menyala (bentuk buat);
+    // jalur edit menambahkan null eksplisit saat mati (lihat save).
+    const abInput = !abEnabled
+      ? {}
+      : isWhatsApp
+        ? {
+            abSplitPercentB: abPercentB,
+            variantBWhatsappTemplateId: variantBTemplateId || undefined,
+            variantBTemplateVariableSources: (() => {
+              const countB = selectedTemplateB?.variableCount ?? 0;
+              const sourcesB: string[] = [];
+              for (let i = 0; i < countB; i++) {
+                sourcesB.push((variantBVariableSources[i] ?? "").trim());
+              }
+              while (
+                sourcesB.length > 0 &&
+                sourcesB[sourcesB.length - 1] === ""
+              ) {
+                sourcesB.pop();
+              }
+              return sourcesB;
+            })(),
+          }
+        : {
+            abSplitPercentB: abPercentB,
+            variantBMessageText: variantBText.trim(),
+          };
     if (isWhatsApp) {
       // Sumber variabel per posisi; posisi kosong di tengah
       // dipertahankan (makna posisional), ekor kosong dipangkas.
@@ -897,6 +963,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
         templateVariableSources: sources,
         audienceFilter,
         ...(requireOptIn !== null ? { requireOptIn } : {}),
+        ...abInput,
       };
     }
     return {
@@ -905,6 +972,7 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
       messageText: messageText.trim(),
       audienceFilter,
       ...(requireOptIn !== null ? { requireOptIn } : {}),
+      ...abInput,
     };
   };
 
@@ -915,7 +983,12 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     try {
       const input = buildInput();
       const saved = editing
-        ? await api.broadcasts.update(tenantId, editing.id, input)
+        ? await api.broadcasts.update(tenantId, editing.id, {
+            ...input,
+            // Fase 13D: edit dengan A/B mati mengirim null eksplisit
+            // agar konfigurasi varian tersimpan dibersihkan server.
+            ...(abEnabled ? {} : { abSplitPercentB: null }),
+          })
         : await api.broadcasts.create(tenantId, input);
       if (andSchedule) {
         await api.broadcasts.schedule(tenantId, saved.id, {
@@ -937,9 +1010,12 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
     "w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink";
   const labelClass = "block text-sm font-medium text-ink";
   // Mode WhatsApp: isi broadcast adalah template (bukan teks bebas).
-  const contentReady = isWhatsApp
-    ? !!whatsappTemplateId
-    : !!messageText.trim();
+  // Fase 13D: A/B menyala mewajibkan isi varian B yang lengkap juga.
+  const abReady =
+    !abEnabled ||
+    (isWhatsApp ? !!variantBTemplateId : !!variantBText.trim());
+  const contentReady =
+    (isWhatsApp ? !!whatsappTemplateId : !!messageText.trim()) && abReady;
   // Mode segment tanpa segmen terpilih belum bisa disimpan (server
   // juga menolaknya sebagai segment_not_found).
   const audienceReady = audienceMode !== "segment" || !!segmentId;
@@ -1274,6 +1350,166 @@ function BroadcastForm({ t, tenantId, target, onDone, onCancel }: BroadcastFormP
           </div>
         )}
 
+        <div className="rounded-xl border border-border bg-surface p-4">
+          <label className="flex items-start gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={abEnabled}
+              onChange={(e) => setAbEnabled(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">{t("broadcasts.abToggle")}</span>
+              <span className="mt-0.5 block text-xs font-normal text-muted">
+                {t("broadcasts.abToggleHint")}
+              </span>
+            </span>
+          </label>
+          {abEnabled ? (
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className={labelClass} htmlFor="bc-ab-percent">
+                  {t("broadcasts.abSplitLabel")}
+                </label>
+                <div className="mt-1 flex items-center gap-3">
+                  <input
+                    id="bc-ab-percent"
+                    type="range"
+                    min={1}
+                    max={99}
+                    step={1}
+                    className="flex-1"
+                    value={abPercentB}
+                    onChange={(e) =>
+                      setAbPercentB(
+                        Math.floor(Number(e.target.value) || 50),
+                      )
+                    }
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    step={1}
+                    className="w-20 rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-ink"
+                    value={abPercentB}
+                    onChange={(e) =>
+                      setAbPercentB(
+                        Math.min(
+                          99,
+                          Math.max(
+                            1,
+                            Math.floor(Number(e.target.value) || 50),
+                          ),
+                        ),
+                      )
+                    }
+                  />
+                </div>
+                <p className="mt-1 text-xs text-muted">
+                  B {abPercentB}% · A {100 - abPercentB}% —{" "}
+                  {t("broadcasts.abSplitHint")}
+                </p>
+              </div>
+              {isWhatsApp ? (
+                <div>
+                  <label className={labelClass} htmlFor="bc-template-b">
+                    {t("broadcasts.abVariantBTemplateLabel")}
+                  </label>
+                  <select
+                    id="bc-template-b"
+                    className={inputClass}
+                    value={variantBTemplateId}
+                    onChange={(e) => setVariantBTemplateId(e.target.value)}
+                  >
+                    <option value="">
+                      {t("broadcasts.templateSelectPlaceholder")}
+                    </option>
+                    {waTemplates.map((tpl) => (
+                      <option
+                        key={tpl.id}
+                        value={tpl.id}
+                        disabled={tpl.status !== "APPROVED"}
+                      >
+                        {tpl.name} · {tpl.language} · {tpl.category}
+                        {tpl.status !== "APPROVED" ? ` — ${tpl.status}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTemplateB ? (
+                    <div className="mt-3 rounded-lg bg-surface-2 p-3">
+                      <p className="text-xs font-medium text-muted">
+                        {t("broadcasts.templatePreviewLabel")}
+                      </p>
+                      <p className="mt-1 whitespace-pre-wrap text-sm text-ink">
+                        {selectedTemplateB.bodyText ??
+                          t("whatsappTemplates.noBody")}
+                      </p>
+                    </div>
+                  ) : null}
+                  {selectedTemplateB &&
+                  selectedTemplateB.variableCount > 0 ? (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm font-medium text-ink">
+                        {t("broadcasts.templateVariablesTitle")}
+                      </p>
+                      {Array.from(
+                        { length: selectedTemplateB.variableCount },
+                        (_, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <label
+                              className="w-24 shrink-0 text-xs text-muted"
+                              htmlFor={`bc-var-b-${i}`}
+                            >
+                              {t("broadcasts.templateVariableSourceLabel", {
+                                n: i + 1,
+                              })}
+                            </label>
+                            <input
+                              id={`bc-var-b-${i}`}
+                              className={inputClass}
+                              value={variantBVariableSources[i] ?? ""}
+                              onChange={(e) => {
+                                const next = [...variantBVariableSources];
+                                next[i] = e.target.value;
+                                setVariantBVariableSources(next);
+                              }}
+                              placeholder={t(
+                                "broadcasts.templateVariableSourcePlaceholder",
+                              )}
+                            />
+                          </div>
+                        ),
+                      )}
+                      <p className="text-xs text-muted">
+                        {t("broadcasts.templateVariableSourceHint")}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div>
+                  <label className={labelClass} htmlFor="bc-message-b">
+                    {t("broadcasts.abVariantBMessageLabel")}
+                  </label>
+                  <textarea
+                    id="bc-message-b"
+                    className={inputClass}
+                    rows={5}
+                    value={variantBText}
+                    onChange={(e) => setVariantBText(e.target.value)}
+                    placeholder={t("broadcasts.messagePlaceholder")}
+                    maxLength={4096}
+                  />
+                  <p className="mt-1 text-xs text-muted">
+                    {t("broadcasts.messageHint")}
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+
         <fieldset>
           <legend className={labelClass}>{t("broadcasts.whenLabel")}</legend>
           <div className="mt-2 flex flex-wrap items-center gap-4">
@@ -1350,6 +1586,8 @@ interface BroadcastDetailProps {
 
 function BroadcastDetail({ t, locale, tenantId, broadcastId, onBack }: BroadcastDetailProps) {
   const [broadcast, setBroadcast] = useState<BroadcastResponse | null>(null);
+  const [abResults, setAbResults] =
+    useState<BroadcastAbResultsResponse | null>(null);
   const [recipients, setRecipients] = useState<BroadcastRecipientResponse[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1361,11 +1599,15 @@ function BroadcastDetail({ t, locale, tenantId, broadcastId, onBack }: Broadcast
       if (!tenantId) return;
       if (!silent) setLoading(true);
       try {
-        const [detail, page] = await Promise.all([
+        const [detail, page, ab] = await Promise.all([
           api.broadcasts.get(tenantId, broadcastId),
           api.broadcasts.listRecipients(tenantId, broadcastId, { limit: 50 }),
+          api.broadcasts
+            .abResults(tenantId, broadcastId)
+            .catch(() => null),
         ]);
         setBroadcast(detail);
+        setAbResults(ab);
         setRecipients(page.recipients);
         setNextCursor(page.nextCursor);
       } catch (err) {
@@ -1478,6 +1720,90 @@ function BroadcastDetail({ t, locale, tenantId, broadcastId, onBack }: Broadcast
             ))}
           </div>
 
+          {abResults?.abTest ? (
+            <div className="mt-6">
+              <h2 className="text-lg font-semibold text-ink">
+                {t("broadcasts.abResultsTitle")}
+              </h2>
+              <p className="mt-1 max-w-2xl text-xs text-muted">
+                {t("broadcasts.abResultsNote")}
+              </p>
+              <div className="mt-3 overflow-x-auto rounded-xl border border-border bg-surface">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-muted">
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.abColVariant")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.abColAssigned")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statQueued")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statSent")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statDelivered")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statRead")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statFailed")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statSkipped")}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t("broadcasts.statCancelled")}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {abResults.variants.map((v) => (
+                      <tr key={v.variant} className="border-t border-border">
+                        <td className="px-3 py-2 font-semibold uppercase text-ink">
+                          {v.variant}
+                        </td>
+                        <td className="px-3 py-2 text-ink">{v.assigned}</td>
+                        <td className="px-3 py-2 text-ink">{v.queued}</td>
+                        <td className="px-3 py-2 text-ink">{v.sent}</td>
+                        <td className="px-3 py-2 text-ink">{v.delivered}</td>
+                        <td className="px-3 py-2 text-ink">{v.read}</td>
+                        <td className="px-3 py-2 text-ink">{v.failed}</td>
+                        <td className="px-3 py-2 text-ink">
+                          {v.skipped}
+                          {v.skipped > 0 ? (
+                            <span className="block text-xs font-normal text-muted">
+                              {(
+                                Object.entries(v.skippedByReason) as [
+                                  string,
+                                  number,
+                                ][]
+                              )
+                                .filter(([, n]) => n > 0)
+                                .map(([reason, n]) =>
+                                  `${
+                                    SKIP_REASON_LABEL_KEYS[reason]
+                                      ? t(SKIP_REASON_LABEL_KEYS[reason])
+                                      : reason
+                                  }: ${n}`,
+                                )
+                                .join(" · ")}
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 text-ink">{v.cancelled}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
           <h2 className="mt-6 text-lg font-semibold text-ink">
             {t("broadcasts.recipientsTitle")}
           </h2>
@@ -1496,6 +1822,15 @@ function BroadcastDetail({ t, locale, tenantId, broadcastId, onBack }: Broadcast
                     {r.contactName}
                   </span>
                   <span className="flex items-center gap-2 text-xs text-muted">
+                    {abResults?.abTest ? (
+                      <span className="rounded bg-surface-2 px-1.5 py-0.5 font-semibold text-ink">
+                        {t(
+                          r.variant === "b"
+                            ? "broadcasts.abVariantBadgeB"
+                            : "broadcasts.abVariantBadgeA",
+                        )}
+                      </span>
+                    ) : null}
                     {r.status === "skipped" && r.skipReason ? (
                       <span>
                         {SKIP_REASON_LABEL_KEYS[r.skipReason]

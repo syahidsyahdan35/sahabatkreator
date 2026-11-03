@@ -129,6 +129,8 @@ export function translateApiError(t: Translate, err: unknown): string {
       return t("errors.BROADCAST_TEMPLATE_REQUIRED");
     case "BROADCAST_TEMPLATE_NOT_APPROVED":
       return t("errors.BROADCAST_TEMPLATE_NOT_APPROVED");
+    case "BROADCAST_AB_INCOMPLETE":
+      return t("errors.BROADCAST_AB_INCOMPLETE");
     case "META_TEMPLATE_INVALID":
       return t("errors.META_TEMPLATE_INVALID");
     case "META_WABA_MISSING":

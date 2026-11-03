@@ -16,6 +16,7 @@ import type {
   AutomationRunListResponse,
   AutomationRunResponse,
   BroadcastAudiencePreviewResponse,
+  BroadcastAbResultsResponse,
   BroadcastListResponse,
   BroadcastRecipientListResponse,
   BroadcastResponse,
@@ -69,6 +70,7 @@ import type {
   FlowGraphIssue,
   FlowListResponse,
   FlowResponse,
+  FlowExperimentsResponse,
   FlowRunListResponse,
   FlowRunStepListResponse,
   FlowTemplateListResponse,
@@ -1259,6 +1261,20 @@ export const api = {
         { method: "GET" },
       );
     },
+    /**
+     * GET /api/tenants/:tenantId/broadcasts/:id/ab-results — gema
+     * konfigurasi A/B + rincian statistik per varian (Fase 13D,
+     * dashboard saja; broadcast tanpa A/B → abTest null).
+     */
+    abResults(
+      tenantId: string,
+      broadcastId: string,
+    ): Promise<BroadcastAbResultsResponse> {
+      return request<BroadcastAbResultsResponse>(
+        `/api/tenants/${tenantId}/broadcasts/${broadcastId}/ab-results`,
+        { method: "GET" },
+      );
+    },
   },
   whatsappTemplates: {
     /** GET /api/tenants/:tenantId/whatsapp-templates?channelAccountId= → cermin lokal (Fase 10A). */
@@ -1459,6 +1475,20 @@ export const api = {
       const qs = params.toString();
       return request<FlowRunStepListResponse>(
         `/api/tenants/${tenantId}/flows/runs/${runId}/steps${qs ? `?${qs}` : ""}`,
+        { method: "GET" },
+      );
+    },
+    /**
+     * GET /api/tenants/:tenantId/flows/:id/experiments — hasil
+     * eksperimen A/B per node split (Fase 13D, dashboard saja):
+     * penugasan, run, konversi + putusan z-test dari server.
+     */
+    experiments(
+      tenantId: string,
+      flowId: string,
+    ): Promise<FlowExperimentsResponse> {
+      return request<FlowExperimentsResponse>(
+        `/api/tenants/${tenantId}/flows/${flowId}/experiments`,
         { method: "GET" },
       );
     },
