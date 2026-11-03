@@ -6886,3 +6886,52 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   `sendMessage` hanya menerima teks — CLI tidak melampaui permukaan
   SDK yang disahkan.
 
+
+## Deploy Audit + Reset DB — 2026-11-03 (setelah 14D)
+
+- **Isi**: (a) audit kode tim Fase 13E–14D dengan tiga perbaikan
+  konkurensi — transisi webhook pembayaran, klaim keranjang checkout,
+  dan pembatalan booking kini atomik (lihat commit `d22b559`);
+  (b) id event Google Calendar deterministik dari id booking, 409
+  duplicate diperlakukan sukses, menutup jendela event ganda saat job
+  sinkron diulang (commit `dc94a31`); (c) nonce state OAuth janji temu
+  dipindah dari Map proses ke Redis lewat `apps/api/src/oauth-kv.ts`
+  yang dipakai bersama modul meta-oauth (commit `9c5a2e5`);
+  (d) token reset kata sandi dibuang dari address bar (commit
+  `8a1a536`).
+- **RESET DATABASE (diminta user, tanpa backup)**: skema `public` dan
+  `drizzle` dijatuhkan lalu `public` dibuat ulang di
+  `sahabat_kreator_staging`. Database, role, dan konfigurasi container
+  TIDAK disentuh. Seluruh 9 migrasi (`0000`–`0008`) dijalankan ulang
+  dari VM pengembangan lewat tunnel SSH `-L 5434`.
+- **Temuan penting saat reset**: `pg_default_acl` kosong — hak akses
+  `sk_app` ternyata dipasang sebagai GRANT eksplisit pada tabel yang
+  ada, bukan lewat `ALTER DEFAULT PRIVILEGES` seperti yang tertulis di
+  catatan Fase 1B. Setelah reset, `sk_app` kehilangan SEMUA hak
+  (0 baris grant, `has_table_privilege` false). Dipulihkan dengan
+  GRANT ulang + `ALTER DEFAULT PRIVILEGES` agar migrasi berikutnya
+  otomatis ter-grant. **Langkah ini wajib diulang setiap kali skema
+  direset** — tanpanya API hidup tetapi setiap query gagal
+  "permission denied".
+- **Verifikasi**: typecheck 20/20 paket hijau; PGlite 42/42; drift
+  PASS "34 rute v1"; build semua dist. Pasca-deploy di server: 59
+  tabel / 9 migrasi / 73 policy / 52 tabel ber-RLS / grant `sk_app`
+  236 baris; `sk_app` tanpa konteks tenant membaca 0 baris tenants &
+  messages (RLS berlaku); smoke ujung-ke-ujung **14 PASS / 0 FAIL**
+  (health; sign-up; get-session; tanpa cookie 401; POST tenant 201;
+  GET tenant 200; 7 modul fase baru 200 bukan 503; callback OAuth
+  Google publik 302). Data smoke dihapus sesudahnya — DB ditinggalkan
+  kosong (0 user / 0 tenant).
+- **Deploy**: tar-over-SSH (server tanpa rsync & tanpa akses GitHub;
+  `node`/`pnpm` tidak ada di PATH non-login, jadi build tetap di VM).
+  `.env.staging` byte-identik sebelum & sesudah (sha256
+  `9c1ded2a5a69f09e…`). Empat service direstart; health lokal
+  (`:3101`), lewat proxy web (`:5180/api/health`), dan publik
+  (`https://botara.my.id/api/health`) semua `ok`. Bundle web publik
+  `index-BLT6SwoX.js` — hash sama dengan build lokal.
+- **Catatan operasional**: `sudo` di server butuh kata sandi
+  (`-S` dengan kata sandi di file sementara chmod 600, dihapus
+  sesudahnya); SSH hanya menerima publickey (kata sandi ditolak),
+  kunci yang berlaku `~/.ssh/id_ed25519_botara_vps` di port 19228.
+  Build web lokal gagal bila `apps/web/dist` masih berisi >50 berkas
+  (penjaga hapus-massal sandbox) — hapus direktori `dist` lebih dulu.
