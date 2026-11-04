@@ -1,6 +1,7 @@
 import type { TranslationKey } from "@sahabat-kreator/i18n";
 import { desktopItems, type NavItem } from "../navigation/registry";
 import { NavIcon } from "./NavIcon";
+import { BrandLogo } from "./BrandLogo";
 
 interface SidebarProps {
   t: (key: TranslationKey) => string;
@@ -20,9 +21,14 @@ interface SidebarProps {
 export function Sidebar({ t, activeId, onNavigate, badges, controls, workspace, profile, items = desktopItems }: SidebarProps) {
   return (
     <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-line bg-surface md:flex">
-      <div className="border-b border-line px-5 py-4">
-        <div className="text-lg font-bold text-ink">{t("app.name")}</div>
-        <div className="text-xs text-muted">{t("app.tagline")}</div>
+      <div className="flex items-center gap-2.5 border-b border-line px-4 py-4">
+        <BrandLogo size={36} />
+        <div className="min-w-0">
+          <div className="truncate text-base font-bold leading-tight text-ink">
+            {t("app.name")}
+          </div>
+          <div className="truncate text-xs text-muted">{t("app.tagline")}</div>
+        </div>
       </div>
       <div className="border-b border-line px-4 py-3">{workspace}</div>
       <nav className="flex-1 overflow-y-auto p-3">

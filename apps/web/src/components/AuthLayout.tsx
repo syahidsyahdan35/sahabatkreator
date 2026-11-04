@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { TranslationKey } from "@sahabat-kreator/i18n";
+import { BrandLogo } from "./BrandLogo";
 
 interface AuthLayoutProps {
   t: (key: TranslationKey) => string;
@@ -19,7 +20,8 @@ export function AuthLayout({ t, title, subtitle, children, controls, footer }: A
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg px-4 py-10 text-ink">
       <div className="w-full max-w-md">
-        <div className="mb-6 text-center">
+        <div className="mb-6 flex flex-col items-center text-center">
+          <BrandLogo size={72} className="mb-3" />
           <div className="text-2xl font-bold">{t("app.name")}</div>
           <div className="mt-1 text-sm text-muted">{t("app.tagline")}</div>
         </div>

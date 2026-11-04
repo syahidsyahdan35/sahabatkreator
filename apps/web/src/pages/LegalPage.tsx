@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { TranslationKey } from "@sahabat-kreator/i18n";
 import { LegalLinks, type LegalPageKind } from "../components/LegalLinks";
+import { BrandLogo } from "../components/BrandLogo";
 
 type Translate = (
   key: TranslationKey,
@@ -121,9 +122,12 @@ export function LegalPage({ t, kind, controls, onNavigate }: LegalPageProps) {
     <div className="min-h-screen bg-bg text-ink">
       <div className="mx-auto w-full max-w-3xl px-4 py-8 md:py-12">
         <header className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="text-xl font-bold">{t("app.name")}</div>
-            <div className="mt-0.5 text-xs text-muted">{t("app.tagline")}</div>
+          <div className="flex items-center gap-2.5">
+            <BrandLogo size={36} />
+            <div>
+              <div className="text-lg font-bold leading-tight">{t("app.name")}</div>
+              <div className="mt-0.5 text-xs text-muted">{t("app.tagline")}</div>
+            </div>
           </div>
           {controls}
         </header>

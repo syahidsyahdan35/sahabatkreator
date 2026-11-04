@@ -3,6 +3,7 @@ import type { PublicPaymentResponse } from "@sahabat-kreator/contracts";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
 import { api, ApiClientError } from "../api/client";
 import { formatDateTime, formatIdrId } from "../utils/format";
+import { BrandLogo } from "../components/BrandLogo";
 
 type Translate = (
   key: TranslationKey,
@@ -102,7 +103,10 @@ export function PayPage({ t, locale, code }: PayPageProps) {
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col bg-bg px-4 py-10 text-ink">
-      <div className="text-lg font-bold">{t("app.name")}</div>
+      <div className="flex items-center gap-2">
+        <BrandLogo size={28} />
+        <span className="text-lg font-bold">{t("app.name")}</span>
+      </div>
 
       {/* Lencana SIMULASI — hanya untuk provider 'simulation', besar &
           permanen, tidak bisa dilewatkan pembeli. */}

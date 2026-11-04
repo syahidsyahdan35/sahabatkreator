@@ -22,6 +22,7 @@ import { saveReturnTo } from "./navigation/returnTo";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { WorkspaceProvider } from "./workspace/WorkspaceProvider";
 import { Sidebar } from "./components/Sidebar";
+import { BrandLogo } from "./components/BrandLogo";
 import { MobileBottomBar } from "./components/MobileBottomBar";
 import { MoreSheet } from "./components/MoreSheet";
 import { ProfileBlock } from "./components/ProfileBlock";
@@ -300,9 +301,14 @@ function ShellMain({ t, locale, controls, path, onNavigateTo, onReplaceTo }: She
           wideMain ? "max-w-[1440px]" : "max-w-5xl"
         }`}
       >
-        <div className="mb-6 md:hidden">
-          <div className="text-lg font-bold">{t("app.name")}</div>
-          <div className="text-xs text-muted">{t("app.tagline")}</div>
+        <div className="mb-6 flex items-center gap-2.5 md:hidden">
+          <BrandLogo size={36} />
+          <div className="min-w-0">
+            <div className="truncate text-base font-bold leading-tight">
+              {t("app.name")}
+            </div>
+            <div className="truncate text-xs text-muted">{t("app.tagline")}</div>
+          </div>
         </div>
         <Suspense
           fallback={<p className="text-sm text-muted">{t("common.loading")}</p>}

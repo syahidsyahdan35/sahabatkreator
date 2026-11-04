@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { Locale, TranslationKey } from "@sahabat-kreator/i18n";
+import { BrandLogo } from "../components/BrandLogo";
 
 type Translate = (
   key: TranslationKey,
@@ -44,7 +45,10 @@ export function WebchatDemoPage({ t, locale }: WebchatDemoPageProps) {
 
   return (
     <main className="mx-auto min-h-screen w-full max-w-2xl bg-bg px-4 py-10 text-ink">
-      <div className="text-lg font-bold">{t("app.name")}</div>
+      <div className="flex items-center gap-2">
+        <BrandLogo size={28} />
+        <span className="text-lg font-bold">{t("app.name")}</span>
+      </div>
       <h1 className="mt-6 text-2xl font-bold">{t("channels.demoTitle")}</h1>
       <p className="mt-2 text-sm text-muted">{t("channels.demoBody")}</p>
       {siteKey ? (

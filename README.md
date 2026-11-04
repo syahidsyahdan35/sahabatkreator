@@ -80,6 +80,21 @@ PRIVILEGES` di rantai migrasi, jadi `db:migrate` selalu menghasilkan DB
 yang bisa dipakai. `db:grant` disediakan untuk restore-dari-dump
 (dump dibuat `--no-privileges`).
 
+### Brand assets (logo, favicon, PWA icon)
+
+Semua aset turunan sudah di-commit di `apps/web/public/`, jadi build normal
+tidak butuh Python. Bila logo berubah, ganti `scripts/brand/logo-source.jpg`
+lalu jalankan generator (butuh `pip install pillow`):
+
+```bash
+python scripts/brand/build-brand-assets.py
+```
+
+Script memotong latar putih + drop shadow dari JPG sumber, lalu menulis
+`brand/logo.png`, `favicon.ico`, `favicon-16/32.png`, `apple-touch-icon.png`,
+dan `icons/icon-192|512|maskable-512.png`. Di UI, pakai komponen
+`BrandLogo` (`apps/web/src/components/BrandLogo.tsx`), jangan hardcode path.
+
 ## Status
 
 Implementasi berjalan sampai **Fase 13C** (segmen audiens + opt-in broadcast) dan
