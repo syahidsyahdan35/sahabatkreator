@@ -74,6 +74,11 @@ export {
   type AiUsageAgentPoint,
 } from "./ai-usage";
 export {
+  DASHBOARD_IDLE_HOURS,
+  DASHBOARD_ACTIVITY_DAYS,
+  getDashboardSummary,
+} from "./dashboard";
+export {
   listConversations,
   getConversation,
   assignConversation,

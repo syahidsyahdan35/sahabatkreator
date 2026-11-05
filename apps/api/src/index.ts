@@ -60,6 +60,7 @@ import { createAppointmentsRoutes } from "./modules/appointments/routes";
 import { createNotesRoutes } from "./modules/notes/routes";
 import { createTeamRoutes } from "./modules/team/routes";
 import { createAnalyticsRoutes } from "./modules/analytics/routes";
+import { createDashboardRoutes } from "./modules/dashboard/routes";
 import { startTelegramDeliveryPoller } from "./modules/telegram/poller";
 import {
   createRealtimePublisher,
@@ -300,6 +301,8 @@ routes.route(
 );
 // Modul analitik (Fase 9B) — pemakaian AI /tenants/:tenantId/analytics/ai-usage.
 routes.route("/", createAnalyticsRoutes(authBundle));
+// Modul dashboard (Fase 16A) — ringkasan live /tenants/:tenantId/dashboard/summary.
+routes.route("/", createDashboardRoutes(authBundle));
 // Modul tenants (Fase 1B) — route /tenants* dengan middleware sesi di dalamnya.
 routes.route("/", createTenantsRoutes(authBundle));
 // Modul contacts & inbox (Fase 1D) — route bersarang /tenants/:tenantId/...

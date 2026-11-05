@@ -3,6 +3,7 @@ import type {
   AiUsageReportResponse,
   ApiKeyListResponse,
   AuditLogListResponse,
+  DashboardSummaryResponse,
   ApiKeyResponse,
   CreatedApiKeyResponse,
   CreateApiKeyRequest,
@@ -366,6 +367,15 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ name }),
       });
+    },
+  },
+  dashboard: {
+    /** GET /api/tenants/:tenantId/dashboard/summary — ringkasan live workspace (Fase 16A). */
+    summary(tenantId: string): Promise<DashboardSummaryResponse> {
+      return request<DashboardSummaryResponse>(
+        `/api/tenants/${tenantId}/dashboard/summary`,
+        { method: "GET" },
+      );
     },
   },
   contacts: {

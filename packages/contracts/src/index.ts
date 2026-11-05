@@ -26,6 +26,7 @@ export * from "./admin";
 export * from "./integration-logs";
 export * from "./audit";
 export * from "./analytics";
+export * from "./dashboard";
 export * from "./broadcasts";
 export * from "./whatsapp-templates";
 export * from "./flows";
