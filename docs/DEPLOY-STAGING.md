@@ -7243,3 +7243,50 @@ direset untuk hotfix ini; tanpa migrasi (jurnal tetap 3).
   akan menampilkan `grants=<n>` dan label tepi baru.
 - Server tertinggal satu commit dokumen ini sampai deploy berikutnya
   (pola yang sama seperti entri sebelumnya).
+
+## Deploy Lifecycle Token + Dashboard Real Data — 2026-11-05
+
+- **Commit yang dideploy**: `9830562` (feat(meta): lifecycle token —
+  migrasi 0010, refresh tbft, auth-error, worker 6 jam), `a276ad6`
+  (feat(dashboard): ringkasan real data — API summary + halaman
+  live), `067f0ba` (fix(db): tag journal 0010 disamakan dengan nama
+  file migrasi). Push `3627d29..067f0ba` → origin/main; server
+  `git fetch origin && git reset --hard origin/main` → HEAD
+  `067f0ba`, status KOSONG.
+- **Pelajaran migrasi (penting untuk deploy berikutnya)**:
+  `drizzle-kit migrate` GAGAL SENYAP (exit 1 tanpa pesan) bila tag di
+  `meta/_journal.json` tidak cocok dengan nama file SQL — drizzle
+  generate menamai `0010_crazy_korg`, file direname manual ke
+  `0010_meta_token_lifecycle` tanpa menyunting journal. Jika me-rename
+  file migrasi, SEDERHANAKAN tag journal-nya juga.
+- **Migrasi**: lokal (Neon, `MIGRATION_DATABASE_URL`) diterapkan dulu
+  — kolom/enum/index/policy/backfill diverifikasi via `pg` langsung
+  (messenger → `page_access_token`; instagram sengaja NULL, ditulis
+  balik probe `/me` pertama). Staging: `drizzle-kit migrate` via tunnel
+  `ssh -N -L 5434:127.0.0.1:5434` memakai `MIGRATION_DATABASE_URL`
+  (`sk_migration`) dari `.env.staging` server — 11 migrasi terpasang;
+  `DATABASE_URL` biasa (`sk_app`) TIDAK bisa membaca schema `drizzle`
+  (permission denied — itu penyebab percobaan pertama gagal senyap).
+  Probe `sk_app` via tunnel: SELECT+UPDATE kolom enum baru OK
+  (RLS menyembunyikan baris tanpa konteks — wajar); grant tabel
+  menutup kolom baru, enum tak butuh grant tersendiri untuk DML.
+- **Perangkat deploy**: VM Windows tidak punya rsync — dist dikirim
+  `scp -r` PER FOLDER (api/worker/realtime/web → `apps/<nama>/`).
+  CATATAN: scp dengan beberapa folder bernama sama (`dist`) ke satu
+  target salin-menimpa satu sama lain — kirim satu per satu ke folder
+  app masing-masing (kesalahan pertama dipulihkan dengan rm + ulang).
+  Bundle web live `index-Og-RFMGk.js` byte-sama dengan build lokal.
+- **Restart**: 4 unit (api/web/realtime/worker) via `sudo -S systemctl
+  restart` — MainPID 799632–799638 → 859406–859410, semua active.
+- **Verifikasi pasca-deploy**: health lokal `:3101` + publik
+  `https://botara.my.id/api/health` → `ok`; ready → database+redis
+  `ok`; web lokal `:5180` dan publik memuat bundle yang sama; route
+  baru `/api/tenants/:id/dashboard/summary` tanpa sesi → 401
+  (terpasang + middleware auth aktif, tercatat di jurnal API);
+  jurnal worker menampilkan mode warn lifecycle sesuai desain
+  ("refresh tidak terkonfigurasi … hanya penandaan expiring/expired");
+  `.env.staging` sha256 tetap `9c1ded2a5a69f09e…`; `git status`
+  server kosong.
+- Server tertinggal satu commit dokumen ini sampai deploy berikutnya
+  (pola yang sama seperti entri sebelumnya).
+
