@@ -80,13 +80,21 @@ realtime); DB perawan (tenants/users/channels = 0). Verifikasi publik
 sementara lewat `curl -H 'Host: sahabatkreator.my.id'
 http://43.173.6.204/` — menunggu DNS.
 
-Catatan server: mesin yang sama SUDAH menjalankan stack lain
-`sahabatkreator.com` (prod 127.0.0.1:3001 + staging :3002, proyek
-compose `sahabatkreator`/`sahabatkreator-staging`, Cloudflare Origin
-SSL) dan aplikasi `toeflynk` (:3000) dari pengaturan terpisah. Stack
-dokumen ini (proyek `sahabat-kreator`, port 3101/3103/5180/5434/6381)
-berdiri sendiri dan tidak menyentuh mereka; RAM bersama masih aman
-(±1,7 GB tersedia dari 3,6 GB saat verifikasi).
+Catatan server: mesin yang sama juga menjalankan `sahabatkreator.com`
+PROD (127.0.0.1:3001, proyek compose `sahabatkreator`, Cloudflare
+Origin SSL) dan aplikasi `toeflynk` (:3000) dari pengaturan terpisah.
+Stack dokumen ini (proyek `sahabat-kreator`, port 3101/3103/5180/
+5434/6381) berdiri sendiri dan tidak menyentuh mereka. Staging .com
+(`app.sahabatkreator.com`, :3002) DIHAPUS 2026-11-05 atas perintah
+pemilik server (container + volume + image + blok nginx; backup conf
+di server `sahabatkreator.conf.bak-20261105085253`), sekalian
+pembersihan build cache Docker ±5,65 GB — disk bebas naik 36→43 GB.
+
+DNS `sahabatkreator.my.id` + `www` sudah diproxy Cloudflare (anycast)
+dan mode SSL zone-nya Full/Full-Strict (edge selalu bicara 443 ke
+origin), jadi langkah TLS di bawah BUKAN opsional: tanpa blok 443 +
+Origin Certificate zone ini, https dibalas 301 ke sahabatkreator.com
+oleh blok default origin.
 
 ## Sisa setelah DNS menunjuk ke server
 
