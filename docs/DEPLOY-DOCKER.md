@@ -31,7 +31,12 @@ gerbang start api/worker/realtime), `worker` (tanpa port).
 
 Satu-satunya berkas rahasia, di root clone server, mode 600, tidak
 pernah di-commit (`.env.*` di-.gitignore). Isi (nilai digenerate DI
-server dengan `openssl rand -hex`, tidak pernah lewat chat/log):
+server, tidak pernah lewat chat/log). FORMAT WAJIB: dua secret kripto
+harus `openssl rand -base64 32` (base64 dari tepat 32 byte —
+`packages/core` deriveKey menolak format lain; hex PERNAH menyebabkan
+500 pertama di Panel Admin deployment ini, 2026-11-05, lalu diperbaiki
+sebelum ada data terenkripsi): `CHANNEL_TOKEN_SECRET` dan
+`PLATFORM_SETTINGS_SECRET`. Sisanya bebas (hex aman):
 
 - `NODE_ENV=production`, `API_PORT=3101`, `REALTIME_PORT=3103`
 - `BETTER_AUTH_URL=https://sahabatkreator.my.id`
