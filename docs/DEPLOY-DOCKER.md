@@ -96,12 +96,23 @@ origin), jadi langkah TLS di bawah BUKAN opsional: tanpa blok 443 +
 Origin Certificate zone ini, https dibalas 301 ke sahabatkreator.com
 oleh blok default origin.
 
-## Sisa setelah DNS menunjuk ke server
+## TLS: SELESAI (2026-11-05) — pola sama persis dengan .com
 
-1. `sudo certbot --nginx -d sahabatkreator.my.id` (atau Origin Certificate
-   Cloudflare bila proxy oranye aktif dengan mode Full/Strict), lalu
-   pastikan redirect HTTP→HTTPS.
-2. Daftar admin pertama `mas@romo.com` (allowlist platform admin).
-3. Isi Panel Admin: Meta app (id/secret/config IG/WA — callback menjadi
-   `https://sahabatkreator.my.id/api/meta/oauth/callback`), OpenRouter,
-   R2, Resend.
+DNS @ + www diproxy Cloudflare; Origin Certificate zone
+`sahabatkreator.my.id` (SAN `*.sahabatkreator.my.id` +
+`sahabatkreator.my.id`, Cloudflare Origin CA, berlaku s.d. Nov 2041)
+terpasang di `/etc/nginx/ssl/sahabatkreator-myid/origin.crt|key`
+(key mode 600 root). Blok 443 di `conf.d/sahabatkreator-myid.conf`
+melayani @ + www (real_ip_header CF-Connecting-IP, body 110m/300s),
+port 80 redirect 301 ke https. Terverifikasi publik:
+`https://sahabatkreator.my.id/api/health` ok lewat Cloudflare
+(Full/Strict menerima cert origin), www 200, http → 301 https.
+
+## Sisa berikutnya (sisi pemilik akun)
+
+1. Daftar admin pertama `mas@romo.com` di
+   `https://sahabatkreator.my.id/register` (allowlist platform admin).
+2. Isi Panel Admin: Meta app (id/secret/config IG/WA — callback menjadi
+   `https://sahabatkreator.my.id/api/meta/oauth/callback` dan webhook
+   `https://sahabatkreator.my.id/api/meta/webhook`), OpenRouter, R2,
+   Resend.
