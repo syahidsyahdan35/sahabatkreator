@@ -1,6 +1,7 @@
 import {
   claimOutboundMessage,
   decryptChannelSecret,
+  markChannelAccountAuthError,
   markOutboundMessageFailed,
   markOutboundMessageSent,
   recordIntegrationLog,
@@ -57,6 +58,14 @@ export interface DeliveryPollerSpec<D extends QueuedDeliveryBase> {
   compositeProviderMessageId: (delivery: D, rawProviderId: string) => string;
   /** Terjemahkan error transport → kode aman (tanpa token/URL). */
   errorCode: (err: unknown) => string;
+  /**
+   * Deteksi error KREDENSIAL MATI (lifecycle 0010 — mis. Graph 190):
+   * bila dikembalikan true, runner menandai akun status='error' +
+   * error_code di konteks tenant pemiliknya, sehingga inbox meminta
+   * "hubungkan ulang" alih-alih gagal senyap berulang. Penandaan
+   * best-effort — kegagalan DB tidak mengubah penandaan pesan.
+   */
+  isAuthError?: (err: unknown) => boolean;
 }
 
 export interface DeliveryPoller {
@@ -229,6 +238,27 @@ export function startDeliveryPoller<D extends QueuedDeliveryBase>(
           );
           await logOut(delivery, "failed", code);
           await nudgeStatus("message.failed");
+          // Lifecycle 0010: token mati → tandai akun 'error' + error_code
+          // (best-effort) supaya gagal berikutnya dicegah lebih awal dan
+          // pemilik melihat "hubungkan ulang", bukan pesan gagal diam.
+          if (spec.isAuthError?.(err)) {
+            try {
+              await markChannelAccountAuthError(
+                bundle.db,
+                ctx,
+                delivery.channelAccountId,
+                code,
+              );
+              console.error(
+                `[${spec.name}] akun ${delivery.channelAccountId} ditandai 'error' (${code}) — kredensial ditolak provider`,
+              );
+            } catch (markErr) {
+              console.error(
+                `[${spec.name}] penandaan auth-error akun ${delivery.channelAccountId} gagal`,
+                markErr,
+              );
+            }
+          }
         }
       }
     } catch (err) {

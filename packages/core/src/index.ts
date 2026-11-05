@@ -285,7 +285,13 @@ export {
   fetchAndStoreMetaContactProfile,
   listQueuedMetaDeliveries,
   metaContactFallbackName,
+  markChannelAccountAuthError,
+  setChannelAccountTokenType,
+  metaTokenLifecycleDecision,
+  listExpiringMetaTokens,
+  applyMetaTokenLifecycleUpdate,
   type MetaProvider,
+  type MetaChannelTokenType,
   type CreateMetaChannelInput,
   type UpdateMetaCredentialsInput,
   type MetaAccountRef,
@@ -295,6 +301,7 @@ export {
   type FetchMetaContactProfileInput,
   type MetaQueuedDelivery,
   type MetaDeliveryProvider,
+  type MetaTokenLifecycleRef,
 } from "./meta";
 export {
   WHATSAPP_CONTACT_FALLBACK_NAME,

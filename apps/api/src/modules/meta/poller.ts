@@ -2,6 +2,7 @@ import {
   extractRawProviderMessageId,
   getMessageProviderMessageId,
   listQueuedMetaDeliveries,
+  setChannelAccountTokenType,
   type MetaQueuedDelivery,
 } from "@sahabat-kreator/core";
 import {
@@ -58,19 +59,37 @@ export interface MetaPollerOptions {
 
 export type MetaDeliveryPoller = DeliveryPoller;
 
-/** Masa berlaku cache varian token akun IG di dalam satu proses. */
-const INSTAGRAM_SEND_VARIANT_TTL_MS = 5 * 60_000;
-
 /**
  * Cache varian token per akun IG: `suat=true` berarti token System User
  * (Unified Login/SUAT) → kirim ke id akun IG; selain itu Page token →
- * kirim ke `me`. Di-probe sekali per akun per TTL agar tiap pesan tidak
- * membayar satu request `/me` tambahan.
+ * kirim ke `me`. Sejak lifecycle 0010 cache hanya jaring pengaman:
+ * varian tersimpan di kolom `token_type` (tersimpan saat connect atau
+ * hasil write-back probe pertama), sehingga tiap akun membayar SATU
+ * probe `/me` seumur hidup proses, bukan per TTL.
  */
 const instagramSendVariant = new Map<
   string,
   { suat: boolean; expiresAt: number }
 >();
+
+/** TTL pengaman bila varian masih harus di-probe (akun warisan). */
+const INSTAGRAM_SEND_VARIANT_TTL_MS = 5 * 60_000;
+
+/**
+ * Peta varian token tersimpan → apakah token System User:
+ * - system_user_token / business_token → ya (kirim ke id akun IG);
+ * - page_access_token → tidak (kirim ke `me`);
+ * - null (akun warisan) → null = belum tahu, perlu probe.
+ */
+export function instagramSendVariantFromTokenType(
+  tokenType: string | null,
+): boolean | null {
+  if (tokenType === "system_user_token" || tokenType === "business_token") {
+    return true;
+  }
+  if (tokenType === "page_access_token") return false;
+  return null;
+}
 
 /**
  * Pilih objek pemilik endpoint Send API Instagram dari varian token
@@ -94,27 +113,52 @@ export function pickInstagramSendObjectId(
 }
 
 /**
- * Resolusi objek kirim Instagram dengan probe varian token ber-cache.
- * Probe memakai `getTokenProfile` (`/me?fields=id,client_business_id`):
- * `client_business_id` hanya ada pada System User token; Page token
- * menolak field itu (Graph 400) → dianggap Page token.
+ * Resolusi objek kirim Instagram (lifecycle 0010):
+ * 1. Varian TERsimpan (`token_type` kolom akun) dipakai langsung — tanpa
+ *    panggilan Graph apa pun.
+ * 2. Akun warisan (varian NULL) di-probe sekali (`/me?fields=
+ *    id,client_business_id`; field itu hanya ada pada System User token)
+ *    lalu hasilnya ditulis balik ke DB lewat `persist` dan di-cache —
+ *    pengiriman berikutnya tak pernah men-probe lagi.
  */
 export async function resolveInstagramSendObjectId(
   client: MetaGraphClient,
-  delivery: Pick<MetaDelivery, "channelAccountId" | "accountExternalId">,
+  delivery: Pick<
+    MetaDelivery,
+    "channelAccountId" | "accountExternalId" | "tokenType"
+  >,
+  persist?: (tokenType: "page_access_token" | "system_user_token") => Promise<void>,
 ): Promise<string> {
   const key = delivery.channelAccountId;
+  const stored = instagramSendVariantFromTokenType(delivery.tokenType ?? null);
+  if (stored !== null) return pickInstagramSendObjectId(stored, delivery.accountExternalId);
+
   const now = Date.now();
   let variant = instagramSendVariant.get(key);
   if (!variant || variant.expiresAt <= now) {
     const profile = await client.getTokenProfile().catch(() => null);
-    variant = {
-      suat: Boolean(profile?.clientBusinessId),
-      expiresAt: now + INSTAGRAM_SEND_VARIANT_TTL_MS,
-    };
+    const suat = Boolean(profile?.clientBusinessId);
+    variant = { suat, expiresAt: now + INSTAGRAM_SEND_VARIANT_TTL_MS };
     instagramSendVariant.set(key, variant);
+    // Tulis balik varian yang terbaca (best-effort — kegagalan DB tidak
+    // boleh menggagalkan pengiriman; probe akan berulang di siklus lain).
+    void persist?.(suat ? "system_user_token" : "page_access_token").catch(
+      () => {},
+    );
   }
   return pickInstagramSendObjectId(variant.suat, delivery.accountExternalId);
+}
+
+/**
+ * Deteksi error KREDENSIAL MATI (Graph 190 — token kedaluwarsa/invalid/
+ * dicabut) untuk Meta & WhatsApp. Diekspor agar teruji langsung dan
+ * dipakai spec poller Meta (`isAuthError` runner → akun 'error').
+ */
+export function metaSendSpecIsAuthError(err: unknown): boolean {
+  return (
+    (err instanceof MetaGraphError || err instanceof WhatsAppGraphError) &&
+    err.graphCode === 190
+  );
 }
 
 export function startMetaDeliveryPoller(
@@ -192,11 +236,22 @@ export function startMetaDeliveryPoller(
           accessToken: token,
         });
         // Objek path kirim Instagram mengikuti varian token akun
-        // (probe `/me` ber-cache): SUAT → id akun IG, Page token → "me".
-        // Lihat pickInstagramSendObjectId.
+        // (kolom token_type; probe `/me` hanya untuk akun warisan, hasil
+        //nya ditulis balik ke DB). Lihat resolveInstagramSendObjectId.
         const sendObjectId =
           delivery.provider === "instagram"
-            ? await resolveInstagramSendObjectId(client, delivery)
+            ? await resolveInstagramSendObjectId(
+                client,
+                delivery,
+                // Write-back varian akun warisan (best-effort).
+                (tokenType) =>
+                  setChannelAccountTokenType(
+                    bundle.db,
+                    { tenantId: delivery.tenantId },
+                    delivery.channelAccountId,
+                    tokenType,
+                  ),
+              )
             : delivery.accountExternalId;
         return (
           await client.sendMessage({
@@ -226,6 +281,10 @@ export function startMetaDeliveryPoller(
           ? `meta_graph_${graphErr.graphCode}_${graphErr.graphSubcode}`
           : `meta_graph_${graphErr.graphCode}`;
       },
+      // Graph 190 = token ditolak (kedaluwarsa/invalid/dicabut). Tanpa
+      // penandaan ini akun tetap 'connected' dan setiap balasan gagal
+      // senyap; dengan ini inbox meminta "hubungkan ulang" (lifecycle 0010).
+      isAuthError: metaSendSpecIsAuthError,
     },
     {
       channelTokenSecret: opts.channelTokenSecret,

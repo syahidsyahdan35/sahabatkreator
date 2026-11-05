@@ -31,6 +31,7 @@ import {
   type PaymentDeps,
   type PlatformSettingsOptions,
 } from "@sahabat-kreator/core";
+import { runMetaTokenLifecycle } from "./meta-token-lifecycle";
 import {
   AGENT_RESPOND_JOB,
   AUTOMATION_EVALUATE_JOB,
@@ -201,6 +202,10 @@ const platformSettingsOptions: PlatformSettingsOptions = {
     // me-resolve klien yang sama seperti API.
     google_oauth_client_id: env.GOOGLE_OAUTH_CLIENT_ID,
     google_oauth_client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+    // Lifecycle token Meta (0010): kredensial aplikasi untuk refresh
+    // `tbft` — panel menang, env fallback, sama seperti API.
+    meta_app_id: env.META_APP_ID,
+    meta_app_secret: env.META_APP_SECRET,
   },
 };
 
@@ -983,6 +988,46 @@ const broadcastReconcileTimer = setInterval(
 );
 void broadcastReconcileTick();
 
+// ---------------------------------------------------------------------------
+// Lifecycle token Meta (0010): worker harian memindai akun Meta aktif yang
+// tokennya mendekati kedaluwarsa (≤7 hari), mencoba REFRESH `tbft` untuk
+// varian refreshable (system_user_token/business_token — token Unified
+// Login & bisnis), dan menandai kesehatan ("expiring"/"expired") untuk
+// varian yang tidak bisa di-refresh (Page token) supaya pemilik
+// menghubungkan ulang SEBELUM token mati. Refresh yang ditolak Graph 190
+// menandai akun 'error' — sama seperti runner pengiriman. Pola poller
+// purge: sekali saat boot lalu tiap 6 jam, penjaga anti-tumpang-tindih,
+// tanpa BullMQ. Jalan run-once: `pnpm --filter @sahabat-kreator/worker
+// meta:token-lifecycle` (skrip scripts/meta-token-lifecycle.ts).
+const TOKEN_LIFECYCLE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let tokenLifecycleRunning = false;
+async function tokenLifecycleTick(): Promise<void> {
+  if (tokenLifecycleRunning) return;
+  tokenLifecycleRunning = true;
+  try {
+    const result = await runMetaTokenLifecycle({
+      db,
+      platform: platformSettingsOptions,
+      channelTokenSecret: env.CHANNEL_TOKEN_SECRET,
+      metaApiBase: env.META_API_BASE,
+    });
+    if (result.scanned > 0) {
+      console.log(
+        `[worker] lifecycle token: ${result.scanned} akun terpindai — refresh=${result.refreshed} warned=${result.warned} authError=${result.authErrored} failed=${result.failed}`,
+      );
+    }
+  } catch (err) {
+    console.error("[worker] lifecycle token gagal (akan dicoba lagi):", err);
+  } finally {
+    tokenLifecycleRunning = false;
+  }
+}
+const tokenLifecycleTimer = setInterval(
+  () => void tokenLifecycleTick(),
+  TOKEN_LIFECYCLE_INTERVAL_MS,
+);
+void tokenLifecycleTick();
+
 console.log(
   `[worker] Sahabat Kreator worker aktif — antrean "${MAIN_QUEUE_NAME}", relay outbox tiap ${RELAY_INTERVAL_MS}ms`,
 );
@@ -996,6 +1041,7 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(purgeTimer);
   clearInterval(logPruneTimer);
   clearInterval(broadcastReconcileTimer);
+  clearInterval(tokenLifecycleTimer);
   await bullWorker.close();
   await queue.close();
   realtimePublisher.close();

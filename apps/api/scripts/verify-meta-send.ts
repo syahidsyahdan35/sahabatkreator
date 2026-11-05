@@ -37,11 +37,13 @@ import {
 
 /**
  * Bentuk minimal delivery yang dipakai resolver — hanya kunci cache
- * (channelAccountId) dan id akun IG; field lain tidak disentuh.
+ * (channelAccountId), id akun IG, dan varian token tersimpan (lifecycle
+ * 0010; null = akun warisan → jalur probe). Field lain tidak disentuh.
  */
 interface MinimalDelivery {
   channelAccountId: string;
   accountExternalId: string;
+  tokenType: "page_access_token" | "system_user_token" | "business_token" | null;
 }
 
 let passes = 0;
@@ -138,6 +140,8 @@ async function main(): Promise<void> {
     const delivery: MinimalDelivery = {
       channelAccountId: "acc-page-token",
       accountExternalId: IG_ACCOUNT_ID,
+      // Akun warisan (sebelum lifecycle 0010): varian NULL → jalur probe.
+      tokenType: null,
     };
     const target1 = await resolveInstagramSendObjectId(client, delivery);
     const target2 = await resolveInstagramSendObjectId(client, delivery);
@@ -191,6 +195,7 @@ async function main(): Promise<void> {
     const delivery: MinimalDelivery = {
       channelAccountId: "acc-suat",
       accountExternalId: IG_ACCOUNT_ID,
+      tokenType: null,
     };
     const target = await resolveInstagramSendObjectId(client, delivery);
     check("SUAT: resolusi → id akun IG", target === IG_ACCOUNT_ID, target);

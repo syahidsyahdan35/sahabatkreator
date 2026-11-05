@@ -1,4 +1,16 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   auditLogs,
   channelAccounts,
@@ -49,6 +61,15 @@ import { outboundClaimStale } from "./outbound-claim";
 
 export type MetaProvider = "messenger" | "instagram";
 
+/**
+ * Varian token Meta (lifecycle 0010 — lihat channelTokenTypeEnum di
+ * skema). Menentukan objek kirim Send API & kelayakan refresh `tbft`.
+ */
+export type MetaChannelTokenType =
+  | "page_access_token"
+  | "system_user_token"
+  | "business_token";
+
 export interface CreateMetaChannelInput {
   provider: MetaProvider;
   /** Page ID (messenger) / ID akun IG Professional (instagram). */
@@ -71,6 +92,19 @@ export interface CreateMetaChannelInput {
    * Makna per provider sejajar WhatsApp (WABA ID).
    */
   parentExternalId?: string | null;
+  /**
+   * Varian token (lifecycle 0010): page_access_token (Facebook Login),
+   * system_user_token (SUAT/BISU Unified Login), business_token (OAuth
+   * ber-kedaluwarsa). Null = warisan — poller probe `/me` lalu menulis
+   * balik varian yang terbaca.
+   */
+  tokenType?: MetaChannelTokenType | null;
+  /**
+   * Kedaluwarsa token dari `expires_in` Graph saat connect/exchange;
+   * null = token tanpa expiry terdokumentasi (Page token, SUAT manual)
+   * — tidak pernah dipindai worker lifecycle.
+   */
+  tokenExpiresAt?: Date | null;
 }
 
 export async function createMetaChannelAccount(
@@ -91,6 +125,12 @@ export async function createMetaChannelAccount(
         publicHandle: input.publicHandle,
         parentExternalId: input.parentExternalId ?? null,
         graphApiVersion: input.graphApiVersion,
+        // Lifecycle token (0010): varian + jadwal kedaluwarsa tersimpan
+        // saat connect; token baru selalu dimulai sehat & bersih.
+        tokenType: input.tokenType ?? null,
+        tokenExpiresAt: input.tokenExpiresAt ?? null,
+        tokenHealth: "ok",
+        errorCode: null,
       })
       .returning();
 
@@ -122,6 +162,20 @@ export interface UpdateMetaCredentialsInput {
   /** Nama tampilan dari form (hanya menimpa bila diisi pemilik). */
   displayName?: string;
   status?: ChannelAccount["status"];
+  /** Varian token baru (lifecycle 0010); undefined = jangan ubah. */
+  tokenType?: MetaChannelTokenType | null;
+  /** Kedaluwarsa token baru; undefined = jangan ubah. */
+  tokenExpiresAt?: Date | null;
+  /** Waktu refresh token terakhir (worker tbft); undefined = jangan ubah. */
+  tokenRefreshedAt?: Date | null;
+  /**
+   * Kesehatan token eksplisit (worker lifecycle); undefined = otomatis.
+   * Token baru (encryptedAccessToken diisi) selalu memulai "ok" kecuali
+   * nilai eksplisit diberikan.
+   */
+  tokenHealth?: ChannelAccount["tokenHealth"];
+  /** Kode error koneksi (mis. meta_graph_190); undefined = jangan ubah. */
+  errorCode?: string | null;
 }
 
 /**
@@ -141,6 +195,10 @@ export async function updateMetaChannelAccountCredentials(
     const patch: Partial<ChannelAccount> = { updatedAt: new Date() };
     if (input.encryptedAccessToken !== undefined) {
       patch.accessTokenEncrypted = input.encryptedAccessToken;
+      // Kredensial baru = siklus token dimulai ulang: sehat & bersih
+      // (nilai tokenHealth eksplisit tetap menang — lihat bawah).
+      patch.tokenHealth = "ok";
+      patch.errorCode = null;
     }
     if (input.parentExternalId !== undefined) {
       patch.parentExternalId = input.parentExternalId;
@@ -148,6 +206,15 @@ export async function updateMetaChannelAccountCredentials(
     if (input.publicHandle !== undefined) {
       patch.publicHandle = input.publicHandle;
     }
+    if (input.tokenType !== undefined) patch.tokenType = input.tokenType;
+    if (input.tokenExpiresAt !== undefined) {
+      patch.tokenExpiresAt = input.tokenExpiresAt;
+    }
+    if (input.tokenRefreshedAt !== undefined) {
+      patch.tokenRefreshedAt = input.tokenRefreshedAt;
+    }
+    if (input.tokenHealth !== undefined) patch.tokenHealth = input.tokenHealth;
+    if (input.errorCode !== undefined) patch.errorCode = input.errorCode;
     if (input.displayName !== undefined) {
       patch.displayName = input.displayName;
     } else if (input.graphName) {
@@ -166,7 +233,11 @@ export async function updateMetaChannelAccountCredentials(
       if (current && !current.displayName) patch.displayName = input.graphName;
     }
     if (input.status !== undefined) patch.status = input.status;
-    if (input.status === "connected") patch.trashedAt = null;
+    if (input.status === "connected") {
+      patch.trashedAt = null;
+      // Hubungkan ulang = kesalahan koneksi sebelumnya selesai ditangani.
+      patch.errorCode = null;
+    }
 
     const [row] = await tx
       .update(channelAccounts)
@@ -179,6 +250,202 @@ export async function updateMetaChannelAccountCredentials(
       )
       .returning();
     return row ?? null;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle token Meta (0010): penandaan auth-error, varian, refresh harian
+// ---------------------------------------------------------------------------
+
+/**
+ * Tandai akun Meta sebagai GAGAL AUTH (token ditolak Graph 190 / setara):
+ * status berubah 'error' + error_code tersimpan sehingga inbox menampilkan
+ * "hubungkan ulang" alih-alih gagal senyap berulang. Dipanggil runner
+ * pengiriman (Graph 190) dan worker lifecycle (refresh ditolak 190).
+ * Kode dipetakan dari errorCode poller yang aman (tanpa token).
+ */
+export async function markChannelAccountAuthError(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  channelAccountId: string,
+  errorCode: string,
+): Promise<void> {
+  await withTenantDb(db, ctx.tenantId, async (tx) => {
+    await tx
+      .update(channelAccounts)
+      .set({ status: "error", errorCode, updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      );
+  });
+}
+
+/**
+ * Tulis balik varian token hasil probe `/me` poller (lifecycle 0010):
+ * akun warisan (token_type NULL) diberi varian yang terbaca sehingga
+ * pengiriman berikutnya tidak pernah men-probe lagi. Probe sukses juga
+ * membuktikan token hidup → tokenHealth "ok".
+ */
+export async function setChannelAccountTokenType(
+  db: Database,
+  ctx: Pick<TenantContext, "tenantId">,
+  channelAccountId: string,
+  tokenType: MetaChannelTokenType,
+): Promise<void> {
+  await withTenantDb(db, ctx.tenantId, async (tx) => {
+    await tx
+      .update(channelAccounts)
+      .set({ tokenType, tokenHealth: "ok", updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenantId),
+          eq(channelAccounts.id, channelAccountId),
+        ),
+      );
+  });
+}
+
+/** Ref hasil pemindaian lifecycle token (bentuk minimal worker). */
+export interface MetaTokenLifecycleRef {
+  tenantId: string;
+  channelAccountId: string;
+  provider: "messenger" | "instagram" | "whatsapp";
+  externalId: string;
+  /** Varian token; NULL = warisan (tak bisa di-refresh secara andal). */
+  tokenType: MetaChannelTokenType | null;
+  tokenExpiresAt: Date;
+  tokenRefreshedAt: Date | null;
+  /** Envelope token terenkripsi — worker yang mendekripsi. */
+  accessTokenEncrypted: string | null;
+}
+
+/**
+ * Keputusan worker lifecycle untuk SATU akun (fungsi murni — mudah
+ * diuji):
+ * - token varian refreshable (system_user_token / business_token) dan
+ *   konfigurasi refresh lengkap (appId+appSecret) → "refresh";
+ * - selain itu → "warn": varian tak refreshable (Page token) atau
+ *   konfigurasi kurang — worker hanya menandai kesehatan dan
+ *   mencatat peringatan supaya pemilik menghubungkan ulang sebelum
+ *   token mati.
+ * Kesehatan: sudah lewat jadwal → "expired", mendekati → "expiring".
+ */
+export function metaTokenLifecycleDecision(input: {
+  tokenType: MetaChannelTokenType | null;
+  tokenExpiresAt: Date;
+  now: Date;
+  canRefresh: boolean;
+}): { action: "refresh" | "warn"; health: "expiring" | "expired" } {
+  const refreshable =
+    input.tokenType === "system_user_token" ||
+    input.tokenType === "business_token";
+  return {
+    action: refreshable && input.canRefresh ? "refresh" : "warn",
+    health: input.tokenExpiresAt <= input.now ? "expired" : "expiring",
+  };
+}
+
+/**
+ * Pindai akun Meta AKTIF lintas tenant yang tokennya mendekati atau
+ * sudah melewati kedaluwarsa (dalam `withinDays` hari ke depan).
+ * Memakai lengan RLS `meta_token_lifecycle_scan` (0010) dengan
+ * `app.system_relay = 'meta_token_lifecycle'` — baca saja; penulisan
+ * hasil lewat konteks tenant masing-masing. Akun yang sudah berstatus
+ * 'error' tidak diikutkan (hubungkan ulang dulu).
+ */
+export async function listExpiringMetaTokens(
+  db: Database,
+  opts: { withinDays?: number; limit?: number; now?: Date } = {},
+): Promise<MetaTokenLifecycleRef[]> {
+  const now = opts.now ?? new Date();
+  const withinMs = (opts.withinDays ?? 7) * 24 * 60 * 60 * 1000;
+  const deadline = new Date(now.getTime() + withinMs);
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT set_config('app.system_relay', 'meta_token_lifecycle', true)`,
+    );
+    const rows = await tx
+      .select({
+        tenantId: channelAccounts.tenantId,
+        channelAccountId: channelAccounts.id,
+        provider: channelAccounts.provider,
+        externalId: channelAccounts.externalId,
+        tokenType: channelAccounts.tokenType,
+        tokenExpiresAt: channelAccounts.tokenExpiresAt,
+        tokenRefreshedAt: channelAccounts.tokenRefreshedAt,
+        accessTokenEncrypted: channelAccounts.accessTokenEncrypted,
+      })
+      .from(channelAccounts)
+      .where(
+        and(
+          inArray(channelAccounts.provider, [
+            "messenger",
+            "instagram",
+            "whatsapp",
+          ]),
+          eq(channelAccounts.status, "connected"),
+          isNotNull(channelAccounts.tokenExpiresAt),
+          lte(channelAccounts.tokenExpiresAt, deadline),
+        ),
+      )
+      .orderBy(asc(channelAccounts.tokenExpiresAt))
+      .limit(opts.limit ?? 100);
+    return rows.map((r) => ({
+      ...r,
+      provider: r.provider as MetaTokenLifecycleRef["provider"],
+      tokenType: (r.tokenType ?? null) as MetaChannelTokenType | null,
+      // Guard tipe: WHERE sudah menjamin tokenExpiresAt tak null.
+      tokenExpiresAt: r.tokenExpiresAt as Date,
+    }));
+  });
+}
+
+/**
+ * Terapkan hasil satu langkah lifecycle (refresh sukses/gagal, peringatan
+ * kedaluwarsa) pada akun Meta di konteks tenant pemiliknya. Envelope
+ * token baru (refresh sukses) menimpa kredensial; kesehatan selalu
+ * ditulis eksplisit oleh pemanggil (decider worker). Return false bila
+ * akun sudah tiada/pindah tenant — worker melewati diam-diam.
+ */
+export async function applyMetaTokenLifecycleUpdate(
+  db: Database,
+  ref: Pick<MetaTokenLifecycleRef, "tenantId" | "channelAccountId">,
+  update: {
+    /** Envelope token hasil refresh — BUKAN token mentah. */
+    encryptedAccessToken?: string;
+    tokenExpiresAt?: Date | null;
+    tokenRefreshedAt?: Date | null;
+    tokenHealth: ChannelAccount["tokenHealth"];
+  },
+): Promise<boolean> {
+  return withTenantDb(db, ref.tenantId, async (tx) => {
+    const patch: Partial<ChannelAccount> = {
+      tokenHealth: update.tokenHealth,
+      updatedAt: new Date(),
+    };
+    if (update.encryptedAccessToken !== undefined) {
+      patch.accessTokenEncrypted = update.encryptedAccessToken;
+    }
+    if (update.tokenExpiresAt !== undefined) {
+      patch.tokenExpiresAt = update.tokenExpiresAt;
+    }
+    if (update.tokenRefreshedAt !== undefined) {
+      patch.tokenRefreshedAt = update.tokenRefreshedAt;
+    }
+    const rows = await tx
+      .update(channelAccounts)
+      .set(patch)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ref.tenantId),
+          eq(channelAccounts.id, ref.channelAccountId),
+        ),
+      )
+      .returning({ id: channelAccounts.id });
+    return rows.length > 0;
   });
 }
 
@@ -742,6 +1009,13 @@ export interface MetaQueuedDelivery {
   provider: MetaDeliveryProvider;
   /** external_id akun: Page ID (messenger) / ID akun IG (instagram) — segmen path endpoint kirim. */
   accountExternalId: string;
+  /**
+   * Varian token akun (lifecycle 0010): penentu objek kirim Instagram
+   * (system_user_token/business_token → id akun IG, page_access_token
+   * → `me`). NULL = warisan — poller probe `/me` sekali lalu tulis
+   * balik varian yang terbaca ke DB.
+   */
+  tokenType: MetaChannelTokenType | null;
   /** Envelope enkripsi Page Access Token akun pemilik. */
   encryptedAccessToken: string | null;
   /** PSID/IGSID tujuan: provider_chat_id percakapan, jatuh kembali ke identitas kontak. */
@@ -775,6 +1049,7 @@ export async function listQueuedMetaDeliveries(
         channelAccountId: channelAccounts.id,
         provider: channelAccounts.provider,
         accountExternalId: channelAccounts.externalId,
+        tokenType: channelAccounts.tokenType,
         encryptedAccessToken: channelAccounts.accessTokenEncrypted,
         recipientExternalId: sql<string>`coalesce(${conversations.providerChatId}, ${channelIdentities.externalUserId})`,
       })

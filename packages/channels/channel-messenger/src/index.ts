@@ -432,6 +432,37 @@ export class MetaGraphClient extends GraphHttpClient {
   }
 
   /**
+   * Refresh token System User / bisnis ber-kedaluwarsa (lifecycle 0010):
+   * `GET /refresh_access_token?grant_type=tbft&client_id=…&client_secret=…`
+   * dengan token LAMA sebagai Bearer header (docs Meta "Refresh a System
+   * User access token" — grant `tbft`, token baru berlaku ±60 hari).
+   * Token TIDAK PERNAH dikirim sebagai query `access_token=` (kebijakan
+   * keamanan paket ini). Melempar MetaGraphError pada penolakan Graph —
+   * code 190 berarti token sudah mati (harus hubungkan ulang).
+   */
+  async refreshSystemUserToken(input: {
+    clientId: string;
+    clientSecret: string;
+  }): Promise<MetaOAuthTokenResult> {
+    const body = await this.getJsonParams<{
+      access_token?: string;
+      expires_in?: number;
+    }>("refresh_access_token", {
+      grant_type: "tbft",
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+    });
+    if (typeof body.access_token !== "string" || !body.access_token) {
+      throw new MetaGraphError(200, null, "missing_access_token");
+    }
+    return {
+      accessToken: body.access_token,
+      expiresInSeconds:
+        typeof body.expires_in === "number" ? body.expires_in : null,
+    };
+  }
+
+  /**
    * Probe profil token (`GET /me?fields=id,client_business_id`) —
    * Fase 7D.3: `client_business_id` yang terisi menandai token System
    * User (Business Integration System User dari Unified Login / SUAT

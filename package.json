@@ -13,7 +13,7 @@
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "echo \"lint: TODO eslint + i18n no-literal-string (RANCANGAN §11.1)\"",
-    "verify:ci": "pnpm check:drift && pnpm --filter @sahabat-kreator/db verify && pnpm --filter @sahabat-kreator/core verify && pnpm --filter @sahabat-kreator/worker verify:agent-tools && pnpm --filter @sahabat-kreator/worker verify:sequences && pnpm --filter @sahabat-kreator/worker verify:kb-embeddings && pnpm --filter @sahabat-kreator/worker verify:agent-playground && pnpm --filter @sahabat-kreator/worker verify:platform-settings && pnpm --filter @sahabat-kreator/api verify:http && pnpm --filter @sahabat-kreator/api verify:oauth-kv && pnpm --filter @sahabat-kreator/api verify:meta-discovery && pnpm --filter @sahabat-kreator/api verify:meta-send",
+    "verify:ci": "pnpm check:drift && pnpm --filter @sahabat-kreator/db verify && pnpm --filter @sahabat-kreator/core verify && pnpm --filter @sahabat-kreator/worker verify:agent-tools && pnpm --filter @sahabat-kreator/worker verify:sequences && pnpm --filter @sahabat-kreator/worker verify:kb-embeddings && pnpm --filter @sahabat-kreator/worker verify:agent-playground && pnpm --filter @sahabat-kreator/worker verify:platform-settings && pnpm --filter @sahabat-kreator/api verify:http && pnpm --filter @sahabat-kreator/api verify:oauth-kv && pnpm --filter @sahabat-kreator/api verify:meta-discovery && pnpm --filter @sahabat-kreator/api verify:meta-send && pnpm --filter @sahabat-kreator/api verify:meta-token-lifecycle",
     "smoke:api": "node scripts/ci-smoke-api.mjs",
     "check:drift": "pnpm --filter @sahabat-kreator/sdk run check:drift",
     "db:doctor": "pnpm --filter @sahabat-kreator/db run db:doctor"

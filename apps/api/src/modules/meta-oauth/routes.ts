@@ -271,6 +271,12 @@ interface OAuthSessionData {
   pageTokens?: Record<string, string>;
   /** Instagram (SUAT) & WhatsApp (token bisnis): satu token semua aset. */
   accessToken?: string;
+  /**
+   * Umur token alur dari `expires_in` Graph (lifecycle 0010), detik —
+   * null bila Graph tidak melaporkannya (disimpan sebagai tanpa expiry,
+   * bukan ditebak). Token Page per aset TIDAK memakai ini (non-expiring).
+   */
+  accessTokenExpiresInSeconds?: number | null;
   /** Instagram: client_business_id portfolio klien (konteks induk). */
   clientBusinessId?: string | null;
   /**
@@ -664,6 +670,9 @@ export function createMetaOAuthRoutes(
           code,
           redirectUri,
         });
+        // Lifecycle 0010: umur token BISU dari `expires_in` Graph —
+        // jadwal kedaluwarsa + refresh harian `tbft` berbasis ini.
+        const flowTokenExpiresInSeconds = suat.expiresInSeconds;
         const client = graphClient(suat.accessToken);
         // Probe profil token (Fase 7D.3, best-effort): client_business_id
         // yang terisi = token System User (BISU); kosong = token user.
@@ -758,6 +767,7 @@ export function createMetaOAuthRoutes(
           pageTokens:
             Object.keys(pageTokens).length > 0 ? pageTokens : undefined,
           accessToken: suat.accessToken,
+          accessTokenExpiresInSeconds: flowTokenExpiresInSeconds,
           clientBusinessId,
           emptyHint,
           expiresAt: Date.now() + OAUTH_TTL_SECONDS * 1000,
@@ -805,6 +815,7 @@ export function createMetaOAuthRoutes(
           userId: state.userId,
           assets,
           accessToken: businessToken.accessToken,
+          accessTokenExpiresInSeconds: businessToken.expiresInSeconds,
           expiresAt: Date.now() + OAUTH_TTL_SECONDS * 1000,
         };
       }
@@ -981,6 +992,24 @@ export function createMetaOAuthRoutes(
         "No credential is stored for the selected asset",
       );
     }
+    // Lifecycle 0010: varian + jadwal kedaluwarsa token yang DISIMPAN.
+    // - Token Page per aset (Messenger & kandidat IG lewat Page):
+    //   page_access_token, non-expiring.
+    // - Token alur Unified Login (SUAT/BISU): system_user_token,
+    //   kedaluwarsa dari `expires_in` Graph (null = tanpa laporan —
+    //   disimpan jujur sebagai tanpa expiry, bukan ditebak).
+    // - Token alur WhatsApp Embedded Signup: business_token, sama.
+    const usingPageToken = Boolean(session.pageTokens?.[asset.assetId]);
+    const storedTokenType: "page_access_token" | "system_user_token" | "business_token" =
+      usingPageToken
+        ? "page_access_token"
+        : provider === "instagram"
+          ? "system_user_token"
+          : "business_token";
+    const storedTokenExpiresAt =
+      usingPageToken || session.accessTokenExpiresInSeconds == null
+        ? null
+        : new Date(Date.now() + session.accessTokenExpiresInSeconds * 1000);
 
     // Penjaga satu akun = satu koneksi (pola connect manual 7A/7B):
     // aktif di workspace lain → 409; sesi TIDAK dikonsumsi agar pemilik
@@ -1034,6 +1063,10 @@ export function createMetaOAuthRoutes(
             displayPhoneNumber: asset.handle,
             verifiedName: asset.name,
             status: "connected",
+            // Lifecycle 0010: revive dengan varian + jadwal token baru.
+            tokenType: storedTokenType,
+            tokenExpiresAt: storedTokenExpiresAt,
+            tokenRefreshedAt: null,
           },
         );
       } else {
@@ -1050,6 +1083,10 @@ export function createMetaOAuthRoutes(
                 ? (session.clientBusinessId ?? asset.parentId)
                 : undefined,
             status: "connected",
+            // Lifecycle 0010: revive dengan varian + jadwal token baru.
+            tokenType: storedTokenType,
+            tokenExpiresAt: storedTokenExpiresAt,
+            tokenRefreshedAt: null,
           },
         );
       }
@@ -1068,6 +1105,9 @@ export function createMetaOAuthRoutes(
           publicHandle: asset.handle,
           encryptedAccessToken,
           graphApiVersion: opts.graphApiVersion,
+          // Lifecycle 0010: Page token Facebook Login, non-expiring.
+          tokenType: storedTokenType,
+          tokenExpiresAt: storedTokenExpiresAt,
         },
       );
       created = true;
@@ -1096,6 +1136,10 @@ export function createMetaOAuthRoutes(
           encryptedAccessToken,
           graphApiVersion: opts.graphApiVersion,
           parentExternalId: session.clientBusinessId ?? asset.parentId,
+          // Lifecycle 0010: Page token (lewat Page) atau SUAT BISU
+          // ber-kedaluwarsa (token alur Unified Login).
+          tokenType: storedTokenType,
+          tokenExpiresAt: storedTokenExpiresAt,
         },
       );
       created = true;
@@ -1110,6 +1154,9 @@ export function createMetaOAuthRoutes(
           displayPhoneNumber: asset.handle,
           encryptedAccessToken,
           graphApiVersion: opts.graphApiVersion,
+          // Lifecycle 0010: token bisnis Embedded Signup + jadwalnya.
+          tokenType: storedTokenType,
+          tokenExpiresAt: storedTokenExpiresAt,
         },
       );
       created = true;

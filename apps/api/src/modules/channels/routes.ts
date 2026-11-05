@@ -1255,6 +1255,11 @@ async function connectMeta(
         parentExternalId:
           isSuat && suatParentExternalId ? suatParentExternalId : undefined,
         status: "connected",
+        // Lifecycle 0010: varian token tersimpan saat connect — SUAT
+        // eksplisit (system_user_token) vs Page token (page_access_token).
+        tokenType: isSuat ? "system_user_token" : "page_access_token",
+        tokenExpiresAt: null,
+        tokenRefreshedAt: null,
       },
     );
     if (!updated) {
@@ -1287,6 +1292,11 @@ async function connectMeta(
         // Varian SUAT (7D.3): konteks portofolio pemilik token.
         // Varian lain: undefined → core menyimpan null (perilaku 7A).
         parentExternalId: isSuat ? suatParentExternalId : undefined,
+        // Lifecycle 0010: varian token tersimpan saat connect — SUAT
+        // eksplisit vs Page token (Facebook Login); keduanya tanpa
+        // expiry terdokumentasi di jalur manual ini.
+        tokenType: isSuat ? "system_user_token" : "page_access_token",
+        tokenExpiresAt: null,
       },
     );
   } catch {
@@ -1496,6 +1506,11 @@ async function connectWhatsApp(
         verifiedName: profile.verifiedName,
         displayName: input.displayName,
         status: "connected",
+        // Lifecycle 0010: token manual System User — varian tersimpan,
+        // tanpa expiry terdokumentasi di jalur manual ini.
+        tokenType: "system_user_token",
+        tokenExpiresAt: null,
+        tokenRefreshedAt: null,
       },
     );
     if (!updated) {
@@ -1526,6 +1541,9 @@ async function connectWhatsApp(
         displayName: input.displayName,
         encryptedAccessToken,
         graphApiVersion: META_GRAPH_API_VERSION,
+        // Lifecycle 0010: token manual System User (system_user_token).
+        tokenType: "system_user_token",
+        tokenExpiresAt: null,
       },
     );
   } catch {

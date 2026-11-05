@@ -14,6 +14,7 @@ import {
 import type { TenantContext } from "./tenant";
 import { withTenantDb } from "./tx";
 import { resolveInboundReplyTargetId } from "./conversations";
+import type { MetaChannelTokenType } from "./meta";
 
 /**
  * Service domain WhatsApp (Fase 7B, RANCANGAN §4 & §12) — WhatsApp
@@ -66,6 +67,13 @@ export interface CreateWhatsAppChannelInput {
   encryptedAccessToken: string;
   /** Versi Graph API ter-pin untuk akun ini (dari packages/config). */
   graphApiVersion: string;
+  /**
+   * Lifecycle token (0010): varian (umumnya business_token hasil
+   * Embedded Signup) + jadwal kedaluwarsa dari `expires_in` Graph.
+   * Default varian: business_token.
+   */
+  tokenType?: MetaChannelTokenType | null;
+  tokenExpiresAt?: Date | null;
 }
 
 export async function createWhatsAppChannelAccount(
@@ -86,6 +94,10 @@ export async function createWhatsAppChannelAccount(
         accessTokenEncrypted: input.encryptedAccessToken,
         publicHandle: input.displayPhoneNumber,
         graphApiVersion: input.graphApiVersion,
+        tokenType: input.tokenType ?? "business_token",
+        tokenExpiresAt: input.tokenExpiresAt ?? null,
+        tokenHealth: "ok",
+        errorCode: null,
       })
       .returning();
 
@@ -115,6 +127,10 @@ export interface UpdateWhatsAppCredentialsInput {
   verifiedName?: string | null;
   displayName?: string;
   status?: ChannelAccount["status"];
+  /** Lifecycle 0010: varian + jadwal token baru saat revive. */
+  tokenType?: MetaChannelTokenType | null;
+  tokenExpiresAt?: Date | null;
+  tokenRefreshedAt?: Date | null;
 }
 
 /**
@@ -133,9 +149,19 @@ export async function updateWhatsAppChannelAccountCredentials(
     const patch: Partial<ChannelAccount> = { updatedAt: new Date() };
     if (input.encryptedAccessToken !== undefined) {
       patch.accessTokenEncrypted = input.encryptedAccessToken;
+      // Kredensial baru = siklus token dimulai ulang (lifecycle 0010).
+      patch.tokenHealth = "ok";
+      patch.errorCode = null;
     }
     if (input.wabaId !== undefined) {
       patch.parentExternalId = input.wabaId;
+    }
+    if (input.tokenType !== undefined) patch.tokenType = input.tokenType;
+    if (input.tokenExpiresAt !== undefined) {
+      patch.tokenExpiresAt = input.tokenExpiresAt;
+    }
+    if (input.tokenRefreshedAt !== undefined) {
+      patch.tokenRefreshedAt = input.tokenRefreshedAt;
     }
     if (input.displayPhoneNumber !== undefined) {
       patch.publicHandle = input.displayPhoneNumber;
@@ -158,7 +184,10 @@ export async function updateWhatsAppChannelAccountCredentials(
       }
     }
     if (input.status !== undefined) patch.status = input.status;
-    if (input.status === "connected") patch.trashedAt = null;
+    if (input.status === "connected") {
+      patch.trashedAt = null;
+      patch.errorCode = null;
+    }
 
     const [row] = await tx
       .update(channelAccounts)

@@ -38,6 +38,37 @@ export const channelAccountStatusEnum = pgEnum("channel_account_status", [
   "error",
 ]);
 
+/**
+ * Varian token Meta (lifecycle token, migrasi 0010) — menentukan BENTUK
+ * kirim (objek path Send API) dan KELAYAKAN refresh:
+ * - page_access_token : Facebook Login / Page Access Token. Non-expiring
+ *   (mati bila password direset/izin dicabut), kirim Messenger/IG via
+ *   Page (`me`).
+ * - system_user_token : System User token (SUAT eksplisit / Business
+ *   Integration System User hasil Unified Login). Bisa ber-kedaluwarsa
+ *   (60 hari) dan refreshable via `grant_type=tbft`; kirim IG via id
+ *   akun IG.
+ * - business_token    : token bisnis OAuth ber-kedaluwarsa (WhatsApp
+ *   Embedded Signup). Refreshable seperti di atas.
+ */
+export const channelTokenTypeEnum = pgEnum("channel_token_type", [
+  "page_access_token",
+  "system_user_token",
+  "business_token",
+]);
+
+/**
+ * Kesehatan token (lifecycle 0010) — diisi connect ("ok") dan worker
+ * harian ("expiring"/"expired"/"refresh_failed"). NULL = belum pernah
+ * dipantau (akun warisan sebelum migrasi, atau non-Meta).
+ */
+export const channelTokenHealthEnum = pgEnum("channel_token_health", [
+  "ok",
+  "expiring",
+  "expired",
+  "refresh_failed",
+]);
+
 export const channelAccounts = pgTable(
   "channel_accounts",
   {
@@ -78,6 +109,30 @@ export const channelAccounts = pgTable(
     /** Versi Graph API yang ter-pin untuk akun Meta ini (mis. 'v26.0', RANCANGAN §12.1). */
     graphApiVersion: varchar("graph_api_version", { length: 16 }),
     /**
+     * Varian token Meta (lifecycle 0010 — lihat channelTokenTypeEnum):
+     * penentu objek kirim Send API (Page token → `me`, System User token
+     * → id akun IG) dan kelayakan refresh harian. NULL = warisan sebelum
+     * migrasi (poller probe `/me` dan menulis balik varian yang terbaca).
+     */
+    tokenType: channelTokenTypeEnum("token_type"),
+    /**
+     * Kapan token akses kedaluwarsa (dari `expires_in` Graph saat
+     * connect/exchange). NULL = token tanpa expiry terdokumentasi (Page
+     * token, SUAT manual) — tidak pernah dipindai worker lifecycle.
+     */
+    tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+    /** Terakhir kali token berhasil di-refresh (grant tbft) oleh worker. */
+    tokenRefreshedAt: timestamp("token_refreshed_at", { withTimezone: true }),
+    /** Kesehatan token (lihat channelTokenHealthEnum); NULL = belum dipantau. */
+    tokenHealth: channelTokenHealthEnum("token_health"),
+    /**
+     * Kode error koneksi TERAKHIR saat status='error' (mis.
+     * `meta_graph_190` — token ditolak Graph) sehingga inbox meminta
+     * "hubungkan ulang" alih-alih gagal senyap berulang. Dibersihkan
+     * saat connect ulang.
+     */
+    errorCode: varchar("error_code", { length: 128 }),
+    /**
      * Kapan akun dibuang ke Sampah (Fase 6I — hapus permanen BERPENJAGA);
      * NULL = akun hidup normal. Membuang selalu mendahului disconnect
      * (status berakhir 'disconnected' + kredensial kosong), jadi baris
@@ -111,6 +166,12 @@ export const channelAccounts = pgTable(
     index("channel_accounts_trashed_at_idx")
       .on(t.trashedAt)
       .where(sql`${t.trashedAt} IS NOT NULL`),
+    // Antrean worker lifecycle token (0010): pindai akun Meta aktif
+    // yang tokennya ber-kedaluwarsa — index parsial hanya memuat baris
+    // ber-jadwal kedaluwarsa.
+    index("channel_accounts_token_expires_at_idx")
+      .on(t.tokenExpiresAt)
+      .where(sql`${t.tokenExpiresAt} IS NOT NULL`),
   ],
 );
 
