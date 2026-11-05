@@ -69,6 +69,25 @@ Verifikasi minimal tiap deploy: health OK lokal, `curl -H 'Host:
 sahabatkreator.my.id' http://127.0.0.1/` dari nginx host membalas HTML
 app, dan hitungan DB tidak berubah tanpa sebab.
 
+## Status: LIVE di server (2026-11-05)
+
+Deploy pertama selesai dari commit `eb72998` (kode `9e85a00`):
+image `sahabat-kreator-app:latest` 735 MB, `sahabat-kreator-web:latest`
+77,6 MB; migrate exit 0 (jurnal 10); `/api/health` + `/api/ready`
+(database+redis ok) hijau; web 200 dan `/brand/logo.png` persis
+188.804 byte; bundle `pg` eksternal tepat 1 per app (api/worker/
+realtime); DB perawan (tenants/users/channels = 0). Verifikasi publik
+sementara lewat `curl -H 'Host: sahabatkreator.my.id'
+http://43.173.6.204/` — menunggu DNS.
+
+Catatan server: mesin yang sama SUDAH menjalankan stack lain
+`sahabatkreator.com` (prod 127.0.0.1:3001 + staging :3002, proyek
+compose `sahabatkreator`/`sahabatkreator-staging`, Cloudflare Origin
+SSL) dan aplikasi `toeflynk` (:3000) dari pengaturan terpisah. Stack
+dokumen ini (proyek `sahabat-kreator`, port 3101/3103/5180/5434/6381)
+berdiri sendiri dan tidak menyentuh mereka; RAM bersama masih aman
+(±1,7 GB tersedia dari 3,6 GB saat verifikasi).
+
 ## Sisa setelah DNS menunjuk ke server
 
 1. `sudo certbot --nginx -d sahabatkreator.my.id` (atau Origin Certificate
