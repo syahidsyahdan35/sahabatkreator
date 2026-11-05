@@ -210,8 +210,15 @@ export function startDeliveryPoller<D extends QueuedDeliveryBase>(
           await nudgeStatus("message.sent");
         } catch (err) {
           const code = spec.errorCode(err);
+          // Sertakan deskripsi resmi provider (dipotong) supaya log server
+          // tidak hanya berbunyi "meta_graph_100" tanpa sebab. Deskripsi
+          // Graph tidak memuat token; error jaringan tetap "network_error".
+          const detail =
+            err instanceof Error && err.message
+              ? ` — ${err.message.slice(0, 200)}`
+              : "";
           console.error(
-            `[${spec.name}] pengiriman pesan ${delivery.messageId} gagal: ${code}`,
+            `[${spec.name}] pengiriman pesan ${delivery.messageId} gagal: ${code}${detail}`,
           );
           await markOutboundMessageFailed(
             bundle.db,

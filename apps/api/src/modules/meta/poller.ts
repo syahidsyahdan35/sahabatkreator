@@ -30,8 +30,13 @@ import {
  * percakapan messenger/instagram/whatsapp berakhir sebagai pesan outbound
  * `queued` di DB. Runner memindai antrean lintas tenant, mengklaim tiap
  * baris, lalu memanggil `send` di bawah:
- * - Messenger/IG: Send API `POST /{account-id}/messages`
- *   (messaging_type RESPONSE);
+ * - Messenger: Send API `POST /{page-id}/messages` (messaging_type
+ *   RESPONSE);
+ * - Instagram: Send API `POST /{objek}/messages` — objek mengikuti
+ *   varian token akun (probe `/me` ber-cache): System User token
+ *   (SUAT/Unified Login) → id akun IG, Page token (Facebook Login) →
+ *   `me` (hotfix bug balasan IG 2026-11-05, `meta_graph_100` subcode
+ *   2534014);
  * - WhatsApp: Cloud API `POST /{phone_number_id}/messages`
  *   (messaging_product whatsapp; template resmi bila payload template).
  *
@@ -52,6 +57,65 @@ export interface MetaPollerOptions {
 }
 
 export type MetaDeliveryPoller = DeliveryPoller;
+
+/** Masa berlaku cache varian token akun IG di dalam satu proses. */
+const INSTAGRAM_SEND_VARIANT_TTL_MS = 5 * 60_000;
+
+/**
+ * Cache varian token per akun IG: `suat=true` berarti token System User
+ * (Unified Login/SUAT) → kirim ke id akun IG; selain itu Page token →
+ * kirim ke `me`. Di-probe sekali per akun per TTL agar tiap pesan tidak
+ * membayar satu request `/me` tambahan.
+ */
+const instagramSendVariant = new Map<
+  string,
+  { suat: boolean; expiresAt: number }
+>();
+
+/**
+ * Pilih objek pemilik endpoint Send API Instagram dari varian token
+ * akun (hasil probe `/me`).
+ *
+ * - Page Access Token (Facebook Login; webhook `entry.id` tetap id akun
+ *   IG): IGSID hanya ter-resolve di konteks Page — memakai
+ *   `/{ig-user-id}/messages` ditolak Graph code 100 subcode 2534014
+ *   "Pengguna yang diminta tidak dapat ditemukan" walau percakapannya
+ *   nyata. Meta mendokumentasikan `/{page-id}/messages` atau `/me`
+ *   untuk varian ini → kirim ke `me`.
+ * - System User token (Unified Login/SUAT): `/me` adalah business
+ *   integration system user, BUKAN akun IG ("Always use the Instagram
+ *   account ID" — docs Meta) → kirim ke id akun IG tersimpan.
+ */
+export function pickInstagramSendObjectId(
+  suat: boolean,
+  accountExternalId: string,
+): string {
+  return suat ? accountExternalId : "me";
+}
+
+/**
+ * Resolusi objek kirim Instagram dengan probe varian token ber-cache.
+ * Probe memakai `getTokenProfile` (`/me?fields=id,client_business_id`):
+ * `client_business_id` hanya ada pada System User token; Page token
+ * menolak field itu (Graph 400) → dianggap Page token.
+ */
+export async function resolveInstagramSendObjectId(
+  client: MetaGraphClient,
+  delivery: Pick<MetaDelivery, "channelAccountId" | "accountExternalId">,
+): Promise<string> {
+  const key = delivery.channelAccountId;
+  const now = Date.now();
+  let variant = instagramSendVariant.get(key);
+  if (!variant || variant.expiresAt <= now) {
+    const profile = await client.getTokenProfile().catch(() => null);
+    variant = {
+      suat: Boolean(profile?.clientBusinessId),
+      expiresAt: now + INSTAGRAM_SEND_VARIANT_TTL_MS,
+    };
+    instagramSendVariant.set(key, variant);
+  }
+  return pickInstagramSendObjectId(variant.suat, delivery.accountExternalId);
+}
 
 export function startMetaDeliveryPoller(
   bundle: AuthBundle,
@@ -127,9 +191,16 @@ export function startMetaDeliveryPoller(
           apiVersion: opts.graphApiVersion,
           accessToken: token,
         });
+        // Objek path kirim Instagram mengikuti varian token akun
+        // (probe `/me` ber-cache): SUAT → id akun IG, Page token → "me".
+        // Lihat pickInstagramSendObjectId.
+        const sendObjectId =
+          delivery.provider === "instagram"
+            ? await resolveInstagramSendObjectId(client, delivery)
+            : delivery.accountExternalId;
         return (
           await client.sendMessage({
-            accountExternalId: delivery.accountExternalId,
+            accountExternalId: sendObjectId,
             recipientExternalId: delivery.recipientExternalId,
             text: delivery.contentText!,
             // Fase 10B: pesan DM comment-to-DM dikirim sebagai private
@@ -147,9 +218,13 @@ export function startMetaDeliveryPoller(
             : null;
         if (!graphErr) return "meta_send_error";
         if (graphErr.status === 0) return "meta_network_error";
-        return graphErr.graphCode !== null
-          ? `meta_graph_${graphErr.graphCode}`
-          : `meta_http_${graphErr.status}`;
+        if (graphErr.graphCode === null) return `meta_http_${graphErr.status}`;
+        // Subcode membedakan penyebab yang berbagi code 100 (mis.
+        // 2534014 = penerima tak ter-resolve) — tanpa ini diagnosis
+        // hanya bisa menebak dari "meta_graph_100".
+        return graphErr.graphSubcode !== null
+          ? `meta_graph_${graphErr.graphCode}_${graphErr.graphSubcode}`
+          : `meta_graph_${graphErr.graphCode}`;
       },
     },
     {
