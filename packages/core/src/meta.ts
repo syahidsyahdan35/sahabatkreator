@@ -598,7 +598,17 @@ export async function fetchAndStoreMetaContactProfile(
       `${base}/${input.graphApiVersion}/${encodeURIComponent(input.senderExternalId)}?fields=${metaSenderProfileFields(input.provider)}`,
       { headers, signal: AbortSignal.timeout(timeoutMs) },
     );
-    if (!profileRes.ok) return false;
+    if (!profileRes.ok) {
+      // Fase 7A.1: kegagalan Graph TIDAK boleh senyap — tanpa jejak ini,
+      // kontak selamanya memakai label cadangan ("Messenger user") dan
+      // mustahil didiagnosis. Body error Graph aman dicatat (berisi
+      // code/subcode/fbtrace_id, TIDAK pernah memuat token).
+      const errBody = await profileRes.text();
+      console.error(
+        `[meta] profil kontak gagal (provider ${input.provider}, kontak ${input.contactId}) http=${profileRes.status} body=${errBody.slice(0, 300)}`,
+      );
+      return false;
+    }
     const profile = (await profileRes.json()) as {
       first_name?: string;
       last_name?: string;
