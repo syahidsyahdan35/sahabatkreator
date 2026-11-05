@@ -1,0 +1,138 @@
+# Sahabat Kreator — stack produksi sahabatkreator.my.id (server claw-vps2,
+# 43.173.6.204). BACA docs/DEPLOY-DOCKER.md sebelum menjalankan.
+#
+# Semua perintah compose WAJIB memakai env file server:
+#   docker compose --env-file .env.production -f docker-compose.prod.yml <cmd>
+# (.env.production hanya ada di server, mode 600, tidak pernah di-commit —
+# pola .env.* memang di-.gitignore.)
+#
+# Topologi meniru staging yang sudah terbukti, hanya pengelolanya yang
+# berganti dari systemd ke Docker:
+#   nginx host :80/:443 ─┬─ /          → web container    127.0.0.1:5180
+#                       ├─ /api,/go   → api container    127.0.0.1:3101
+#                       └─ /realtime  → realtime (host)  127.0.0.1:3103
+#   db 127.0.0.1:5434 · redis 127.0.0.1:6381 (loopback saja)
+#
+# realtime memakai network_mode: host karena kodenya listen hardcoded ke
+# 127.0.0.1 (apps/realtime/src/index.ts) — di bridge NAT docker, trafik
+# hasil port-publish tiba di eth0 container dan akan ditolak. Konsekuensi:
+# DATABASE_URL/REDIS_URL milik realtime menunjuk port publish loopback
+# (5434/6381), sedangkan service bridge memakai nama service (db/redis).
+
+name: sahabat-kreator
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: app
+  image: sahabat-kreator-app:latest
+  env_file:
+    - .env.production
+  restart: unless-stopped
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: sahabat-kreator-pg
+    environment:
+      POSTGRES_USER: sk_migration
+      POSTGRES_PASSWORD: ${SK_MIGRATION_PASSWORD:?SK_MIGRATION_PASSWORD wajib ada di .env.production}
+      POSTGRES_DB: sahabat_kreator
+      SK_APP_PASSWORD: ${SK_APP_PASSWORD:?SK_APP_PASSWORD wajib ada di .env.production}
+    volumes:
+      - sk-prod-db:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sk_migration -d sahabat_kreator"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sahabat-kreator-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - sk-prod-redis:/data
+    ports:
+      - "127.0.0.1:6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  # Migrasi drizzle sebagai service sekali-jalan: `up` menunggu service ini
+  # selesai sukses sebelum api/worker/realtime start. Idempoten — jalan
+  # ulang pada DB yang sudah mutakhir adalah no-op. DATABASE_URL ditimpa
+  # ke MIGRATION_DATABASE_URL (db:migrate membaca DATABASE_URL).
+  migrate:
+    <<: *app
+    container_name: sahabat-kreator-migrate
+    command: ["sh", "-c", "DATABASE_URL=$$MIGRATION_DATABASE_URL pnpm --filter @sahabat-kreator/db db:migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app
+    container_name: sahabat-kreator-api
+    command: ["node", "apps/api/dist/index.js"]
+    ports:
+      - "127.0.0.1:3101:3101"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    container_name: sahabat-kreator-worker
+    command: ["node", "apps/worker/dist/index.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  realtime:
+    <<: *app
+    container_name: sahabat-kreator-realtime
+    command: ["node", "apps/realtime/dist/index.js"]
+    network_mode: host
+    environment:
+      DATABASE_URL: postgres://sk_app:${SK_APP_PASSWORD}@127.0.0.1:5434/sahabat_kreator
+      REDIS_URL: redis://127.0.0.1:6381
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: sahabat-kreator-web:latest
+    container_name: sahabat-kreator-web
+    ports:
+      - "127.0.0.1:5180:80"
+    restart: unless-stopped
+
+volumes:
+  sk-prod-db:
+  sk-prod-redis:
